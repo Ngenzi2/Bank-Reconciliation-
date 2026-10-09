@@ -1,0 +1,24 @@
+[server]
+headless = true
+address = "localhost"          # only this computer can open the app
+port = 8501
+maxUploadSize = 200
+enableStaticServing = true     # serves reconciliation_app/static (the font)
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"
+
+[theme]
+primaryColor = "#123239"        # IremboPay dark teal (buttons, progress bars, selections)
+font = "Nunito, sans-serif"     # rounded, close to the iremboPay logo lettering
+
+[[theme.fontFaces]]
+family = "Nunito"
+url = "app/static/Nunito.ttf"   # reconciliation_app/static (no internet needed)
+weight = "200 1000"
+
+[runner]
+magicEnabled = false          # never print values of bare expressions on the page
