@@ -1,0 +1,33 @@
+# ---- Python and macOS
+__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
+.DS_Store
+
+# ---- Google Drive: credentials, sign-in tokens and local settings (never in Git)
+# (they are kept in ~/.config/bank-reconciliation/, outside the project; these rules are a safety net)
+drive_settings.toml
+drive_settings.toml.*
+*service-account*.json
+*service_account*.json
+oauth-client*.json
+client_secret*.json
+token*.json
+.streamlit/secrets.toml
+secrets/
+
+# ---- generated reports and local working files
+# reports are stored on Google Drive; output/ keeps the exception decisions (.review_store.csv) and the run log on
+# this computer only (both contain invoice numbers)
+output/
+
+# ---- sensitive sample data (real bank and payment data)
+Bank of Africe/
+August_2026_Summary_Report.xlsx
+
+# ---- Slack: the Incoming Webhook URL (kept in ~/.config/bank-reconciliation/; this rule is a safety net)
+slack-webhook*
+
+# ---- documents kept on this computer only
+I&M Bank Reconciliation System - Project Report.docx

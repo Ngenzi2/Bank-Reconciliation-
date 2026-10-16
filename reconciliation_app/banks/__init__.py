@@ -6,6 +6,8 @@ engine.py. The app checks every bank file at start-up and says exactly what is m
 
     im.py        I&M Bank   (the template: the simplest bank, every optional setting left at its default)
     ecobank.py   Ecobank    (an example of every optional setting)
+    boa.py       Bank of Africa Rwanda (works like I&M: credits only, Value Date vs paid_at; statement checked
+                 against its own totals; matching by invoice, or by Ref no when the description has none)
 
 To add a bank
     1. copy im.py to a new file (e.g. bk.py)
@@ -19,13 +21,13 @@ CONTENTS
     3. Optional settings (OPTIONAL): leave them out to work like I&M
     4. Checking the bank files at start-up
 """
-from . import ecobank, im
+from . import boa, ecobank, im
 
 
 # =====================================================================================================================
 # 1. ACTIVE BANKS
 # =====================================================================================================================
-ACTIVE = [im, ecobank]          # the first one is the default
+ACTIVE = [im, ecobank, boa]     # the first one is the default
 
 
 # =====================================================================================================================
@@ -70,6 +72,8 @@ OPTIONAL = {
     "SLA_DIFF_COLUMN": "name of the SLA difference column (default 'sla_days_difference')",
     # ---- statement rows and the report
     "DUPLICATE_KEY": "columns that make two statement rows the same export",
+    "REVIEW_KEY_WITHOUT_REFERENCE": "True when the review recognises a row by currency | date | invoice only (the "
+                                    "bank reference is not in the IremboPay files; default False)",
     "DETAIL_COLUMNS": "extra statement columns shown in the detail sheets",
     "DATETIME_COLUMNS": "statement columns with a time, formatted with hh:mm:ss",
     "TOTALS_CHECK_SKIP": "summary tables left out of the 'weeks add up to the month' check",

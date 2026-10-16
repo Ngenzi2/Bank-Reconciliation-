@@ -1,0 +1,31 @@
+# Google Drive settings of the Bank Reconciliation app.
+# Copy this file to drive_settings.toml (same folder) and fill in the folder IDs.
+# drive_settings.toml is ignored by Git. Never put a key or a token in it: only paths to the files.
+#
+# A folder ID is the last part of the folder's link:
+#   https://drive.google.com/drive/folders/<FOLDER ID>
+
+[google_drive]
+# how the app signs in to Google Drive:
+#   "oauth"            (default) as you, with your Google account ("Sign in with Google" in the app)
+#   "service_account"  with a service-account key (fallback; it cannot save reports in a My Drive folder)
+auth = "oauth"
+
+# OAuth: the "Desktop app" client JSON from Google Cloud, and where your sign-in is kept (both outside the project)
+oauth_client_file = "~/.config/bank-reconciliation/oauth-client.json"
+token_file = "~/.config/bank-reconciliation/token.json"
+
+# service account (only used when auth = "service_account")
+credentials_file = "~/.config/bank-reconciliation/service-account.json"
+
+# My Drive: Bank Reconciliation/Reconciliation Reports (reports are saved in <bank>/<YYYY-MM>/ inside it)
+reports_root_folder_id = ""
+
+# My Drive: Bank Reconciliation/IremboPay File (files in it and in its subfolders, up to 3 levels, are listed)
+irembopay_folder_id = ""
+
+[access]
+# The administrators of the app's settings (Settings page, Bank Management page): the Google accounts signed in to
+# Google Drive in the app. Administrators change every setting, choose the editors and see the banks' technical
+# settings. Editors (chosen in the app) change the targets and the SLA days. Everyone else can only view.
+admins = ["name@irembo.com"]

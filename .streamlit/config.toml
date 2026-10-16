@@ -9,11 +9,24 @@ enableStaticServing = true     # serves reconciliation_app/static (the font)
 gatherUsageStats = false
 
 [client]
-toolbarMode = "minimal"
+toolbarMode = "viewer"         # menu (top right) without developer options; Settings holds the Light / Dark / System choice
 
 [theme]
 primaryColor = "#123239"        # IremboPay dark teal (buttons, progress bars, selections)
 font = "Nunito, sans-serif"     # rounded, close to the iremboPay logo lettering
+
+# the two palettes the user can choose from (menu top right > Settings > App theme; "System" follows the computer)
+[theme.light]
+primaryColor = "#123239"            # IremboPay dark teal
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F2F6F7"
+textColor = "#1D2B2F"
+
+[theme.dark]
+primaryColor = "#2B8A99"            # lighter IremboPay teal: still visible on the dark background
+backgroundColor = "#0E1A1D"         # very dark teal
+secondaryBackgroundColor = "#15282D"
+textColor = "#E6EEF0"
 
 [[theme.fontFaces]]
 family = "Nunito"

@@ -9,7 +9,7 @@ if [ -z "$PY" ]; then
 fi
 echo "Using Python: $PY"
 echo "Installing the packages (this takes a minute)..."
-"$PY" -m pip install --upgrade streamlit pandas openpyxl python-calamine reportlab
+"$PY" -m pip install --upgrade streamlit pandas openpyxl python-calamine reportlab google-api-python-client google-auth google-auth-oauthlib
 if [ $? -eq 0 ]; then
   echo ""
   echo "Setup finished. From now on, double-click 'Start Reconciliation' to open the app."

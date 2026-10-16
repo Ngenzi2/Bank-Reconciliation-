@@ -13,11 +13,11 @@ The Ecobank statement ("IREMBO PAY" export) is a log of payment REQUESTS, not of
 The report follows the old tool
     - processed = IremboPay payments made through ECOBANK, counted by paid_at
     - pending and "not found in IremboPay" = invoices Ecobank requested in the period
-    - "Duplicate Payment" table = paid with another channel; the invoices debited twice are on their own sheet
+    - "Duplicate Payment" table = paid with another channel (each invoice once)
 
-CONTENTS (same numbers as im.py; sections 7 and 8 exist only for Ecobank)
+CONTENTS (same numbers as im.py; section 7 exists only for Ecobank)
     1. Identity            4. Reading a statement            7. Which rows go in the period and in each table
-    2. Statement columns   5. Matching: one row per invoice  8. Extra report sheets
+    2. Statement columns   5. Matching: one row per invoice
     3. Files needed        6. SLA + calculations
 """
 import io
@@ -39,7 +39,9 @@ STATEMENT_SHEET = "Ecobank statement"
 
 # IremboPay statuses
 COMPLETED_STATUSES = {"SETTLED", "PAID", "PAYOUT_INITIATED"}
-PENDING_STATUSES = {"NEW"}
+# pending = not paid yet: NEW, or EXPIRED (an invoice the IremboPay check of the review found expired: it is in the
+# Pending table and keeps EXPIRED as its status in the report)
+PENDING_STATUSES = {"NEW", "EXPIRED"}
 
 
 # =====================================================================================================================
@@ -79,6 +81,10 @@ PAYMENT_OPTIONAL_COLUMNS = ["created_at"]
 
 # an unresolved invoice that Ecobank retries in two weeks is pending in both: the weeks can add up to more
 TOTALS_CHECK_SKIP = ["Pending notifications"]
+
+# the review recognises an invoice by currency | Request Date | invoice: the Cba Ref No is Ecobank's own number, it is
+# not in the IremboPay files and can be missing, so it must never stop a decision from matching (2026-10-12)
+REVIEW_KEY_WITHOUT_REFERENCE = True
 
 # SLA: a fixed rule (same minute), so the "SLA days" setting is hidden
 SLA_DAYS_SETTING = False
@@ -219,9 +225,10 @@ def pending(rows: pd.DataFrame) -> pd.Series:
 
 
 def duplicate(rows: pd.DataFrame) -> pd.Series:
-    """Paid with another channel: Ecobank received it, but IremboPay says another provider was used."""
+    """Paid with another channel: Ecobank received it, but IremboPay says another provider was used (a row the
+    review placed here without a paid_at is dated by its Request Date, see _paid_when)."""
     return (rows["found_in_irembopay"] & rows["payment_provider"].notna() & rows["payment_provider"].ne(PROVIDER)
-            & ~rows["payment_status"].isin(PENDING_STATUSES) & rows["paid_at"].notna())
+            & ~rows["payment_status"].isin(PENDING_STATUSES) & _paid_when(rows).notna())
 
 
 # =====================================================================================================================
@@ -233,15 +240,28 @@ def _requested(rows, attempts, a, b):
     return rows["invoice_number"].isin(set(sent))
 
 
+FIRST_IN_PERIOD = "_first_request_in_period"     # set by in_period(): the first attempt inside the reconciled period
+
+
 def _paid_when(rows):
-    """paid_at; for an invoice marked 'Notification received' in the review without a paid_at, the request time."""
+    """paid_at; for an invoice the review placed in 'Notification received' or 'Paid with other channel' without a
+    paid_at (it is not in the IremboPay payment file), the Ecobank Request Date (Kigali time): its first attempt
+    INSIDE the reconciled period when it has one there, otherwise its first attempt. One date per invoice for the
+    whole report, so it is counted once (in one month, and in one week of it)."""
     review_table = rows["review_table"] if "review_table" in rows else pd.Series("", index=rows.index)
-    use_request = rows["paid_at"].isna() & review_table.eq("Notification received")
-    return rows["paid_at"].where(~use_request, rows["Request Date"])
+    use_request = rows["paid_at"].isna() & review_table.isin(["Notification received", "Paid with other channel"])
+    request = rows["Request Date"]
+    if FIRST_IN_PERIOD in rows:
+        request = rows[FIRST_IN_PERIOD].where(rows[FIRST_IN_PERIOD].notna(), request)
+    return rows["paid_at"].where(~use_request, request)
 
 
 def in_period(rows, attempts, start, end) -> pd.Series:
-    """A row belongs to the period when Ecobank requested it then, or IremboPay says it was paid then."""
+    """A row belongs to the period when Ecobank requested it then, or IremboPay says it was paid then.
+    Also records on the rows the first attempt of each invoice inside the period (used by _paid_when)."""
+    inside = attempts[(attempts["Request Date"] >= start) & (attempts["Request Date"] < end)]
+    first_in = inside.groupby("invoice_number")["Request Date"].min()
+    rows[FIRST_IN_PERIOD] = rows["invoice_number"].map(first_in)
     paid = _paid_when(rows)
     return _requested(rows, attempts, start, end) | ((paid >= start) & (paid < end))
 
@@ -256,32 +276,3 @@ def tables(rows, attempts, a, b) -> dict:
             "sla": processed & rows["sla_status"].eq("SLA violated"),
             "pending": _requested(rows, attempts, a, b) & pending(rows),
             "duplicate": paid_in & duplicate(rows)}
-
-
-# =====================================================================================================================
-# 8. EXTRA REPORT SHEETS (Ecobank only): "Debited more than once" and "Payment per merchant"
-# =====================================================================================================================
-def extra_sheets(rows, attempts, start, end, whole) -> dict:
-    """Debited more than once + Payment per merchant (Ecobank only)."""
-    # ---- invoices debited successfully (Cba 000) under more than one bank reference, in the period
-    sent = attempts[(attempts["Request Date"] >= start) & (attempts["Request Date"] < end)]
-    debits = sent[sent["Cba Rsp Code"].eq(SUCCESS) & sent["Cba Ref No"].notna()]
-    debits = debits.sort_values("Request Date", kind="stable").drop_duplicates(["invoice_number", "Cba Ref No"])
-    debits = debits[debits.groupby("invoice_number")["invoice_number"].transform("size") > 1].copy()
-    debits["Debit"] = debits.groupby("invoice_number").cumcount().map(lambda i: "1st" if i == 0 else f"{i + 1} (duplicate)")
-    first = debits.groupby("invoice_number")["Request Date"].transform("min")
-    debited = (debits.assign(_first=first).sort_values(["_first", "invoice_number", "Request Date"])
-               [["invoice_number", "Currency", "Amount", "Cba Ref No", "Request Date", "Debit", "Biller Rsp Msg",
-                 "Source Channel", "Source file"]])
-
-    # ---- notifications received, by merchant and currency, with a total per currency
-    got = rows[whole["received"]]
-    merchants = (got.assign(name=got["name"].fillna("(no merchant)"))
-                 .groupby(["name", "Currency"]).agg(**{"Number of Transactions": ("invoice_number", "size"),
-                                                        "Total Amount": ("Amount", "sum")})
-                 .reset_index().rename(columns={"name": "Merchant name"})
-                 .sort_values(["Currency", "Number of Transactions"], ascending=[True, False]))
-    totals = merchants.groupby("Currency", as_index=False)[["Number of Transactions", "Total Amount"]].sum()
-    totals["Merchant name"] = "Total"
-    merchants = pd.concat([merchants, totals[merchants.columns]], ignore_index=True)
-    return {"Debited more than once": debited, "Payment per merchant": merchants}

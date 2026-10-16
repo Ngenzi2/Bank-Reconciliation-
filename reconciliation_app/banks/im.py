@@ -39,6 +39,9 @@ STATEMENT_SHEET = "I&M statement" # name of the statement sheet in the report
 
 # IremboPay statuses that count as paid
 COMPLETED_STATUSES = {"SETTLED", "PAID", "PAYOUT_INITIATED"}
+# pending = not paid yet: NEW, or EXPIRED (an invoice the IremboPay check of the review found expired: it is in the
+# Pending table and keeps EXPIRED as its status in the report; approved 2026-10-12, as for Ecobank)
+PENDING_STATUSES = {"NEW", "EXPIRED"}
 
 
 # =====================================================================================================================
@@ -162,11 +165,11 @@ def received(rows: pd.DataFrame) -> pd.Series:
 
 
 def pending(rows: pd.DataFrame) -> pd.Series:
-    """Pending notification: the invoice is still NEW in IremboPay."""
-    return rows["payment_status"].eq("NEW")
+    """Pending notification: the invoice is not paid yet in IremboPay (NEW, or EXPIRED)."""
+    return rows["payment_status"].isin(PENDING_STATUSES)
 
 
 def duplicate(rows: pd.DataFrame) -> pd.Series:
     """Duplicate payment: paid on I&M, but IremboPay says it was paid with another channel."""
     return (rows["found_in_irembopay"] & rows["payment_provider"].notna()
-            & rows["payment_provider"].ne(PROVIDER) & rows["payment_status"].ne("NEW"))
+            & rows["payment_provider"].ne(PROVIDER) & ~rows["payment_status"].isin(PENDING_STATUSES))

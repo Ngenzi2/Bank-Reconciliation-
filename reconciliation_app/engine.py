@@ -125,6 +125,9 @@ STORE_NAME = ".review_store.csv"
 TABLE_TITLES = ["Overall processed payments", "Overall notifications received by Irembo", "SLA Violated",
                 "Pending notifications", "Duplicate Payment"]
 SUMMARY_SHEET = {"day": "Summary-Daily", "week": "Summary-Weekly", "month": "Summary-Monthly"}
+# the 6th table of each summary block (2026-10-12): the notifications received, by merchant and currency
+MERCHANT_TITLE = "Payment per merchant"
+OLD_SHEETS = {"Payment per merchant", "Debited more than once"}   # Ecobank sheets of reports made before: removed
 NOT_FOUND_SHEET = "not found in IremboPay"     # only in old reports (removed when they are made again)
 REPORT_SHEETS = ({"Summary-Daily", "Summary-Weekly", "Summary-Monthly", "Pending notification",
                   "Duplicate payment other channel", NOT_FOUND_SHEET, "Payment details"}
@@ -230,10 +233,12 @@ def extra_monday(period: Period, bank=None):
 # =====================================================================================================================
 # 4. FILE NAMES AND COLUMNS
 # =====================================================================================================================
-def report_path(base_dir: Path, period: Period, bank=None) -> Path:
-    """Where the report of a bank and period is saved: output/<day|week|month>/<CODE>_recon_summary_<label>.xlsx."""
+def report_path(base_dir: Path, period: Period, bank=None, root: Path | None = None) -> Path:
+    """Where the report of a bank and period is written: <root>/<day|week|month>/<CODE>_recon_summary_<label>.xlsx.
+    root: output/ by default; the app gives its session's temporary folder (reports are kept on Google Drive)."""
     code = get_bank(bank).CODE
-    return Path(base_dir) / "output" / period.report_type / f"{code}{REPORT_SUFFIX}{period.label}.xlsx"
+    root = Path(root) if root is not None else Path(base_dir) / "output"
+    return root / period.report_type / f"{code}{REPORT_SUFFIX}{period.label}.xlsx"
 
 
 def report_bank(path: Path) -> str:
@@ -269,6 +274,7 @@ class UploadedFile:
     rows: int = 0
     other_credits: int = 0                 # credits on the statement that are not IremboPay payments
     bank: str = ""                         # bank code (bank files only)
+    providers: frozenset | None = None     # payment_provider values found (payment files only, e.g. {"I_M"})
 
 
 def file_digest(content: bytes) -> str:
@@ -320,8 +326,9 @@ def read_payment_file(name: str, content: bytes, bank=None) -> UploadedFile:
     paid = df["paid_at"].dropna()
     if paid.empty:
         raise ReconError(f"{name}: no paid_at dates found in this payment file.")
+    providers = frozenset(df["payment_provider"].dropna().astype(str).str.strip().str.upper())
     return UploadedFile(name, "payments", file_digest(content), df, "",
-                        paid.min().normalize(), paid.max().normalize(), len(df))
+                        paid.min().normalize(), paid.max().normalize(), len(df), providers=providers)
 
 
 # =====================================================================================================================
@@ -353,6 +360,8 @@ def accept_file(period: Period, f: UploadedFile, accepted: list, bank=None) -> s
         return f"{f.name}: the same file was already added."
     if f.kind == "bank" and f.bank != bank.CODE:
         return f"{f.name}: this is a {bank_name(f.bank)} statement, not {bank.NAME}."
+    if f.kind == "payments" and f.providers is not None and bank.PROVIDER.upper() not in f.providers:
+        return f"{f.name}: this IremboPay file has no {bank.NAME} payments (payment_provider {bank.PROVIDER})."
     # the days a file may cover: statements from the day before (late payments) to the Monday after a weekend
     if f.kind == "bank":
         window_start, window_end = period.day_before, extra_monday(period, bank) or period.last_day
@@ -468,10 +477,16 @@ def store_path(base_dir: Path) -> Path:
 
 def key_of(df, bank=None):
     """Key of a bank row in the review store: currency | payment date | bank reference | invoice."""
-    c = get_bank(bank).COLUMNS
-    return (df["Currency"].astype(str) + "|"
+    bank = get_bank(bank)
+    c = bank.COLUMNS
+    if option(bank, "REVIEW_KEY_WITHOUT_REFERENCE", False):          # Ecobank: the reference is not used
+        reference = pd.Series("", index=df.index)
+    else:
+        reference = df[c["reference"]]
+        reference = reference.astype(object).where(reference.notna(), "")   # no reference: blank, the row still has
+    return (df["Currency"].astype(str) + "|"                                # a key and gets its decision
             + pd.to_datetime(df[c["payment_date"]]).dt.strftime("%Y-%m-%d") + "|"
-            + df[c["reference"]].astype(str).str.strip() + "|"
+            + reference.astype(str).str.strip() + "|"
             + df["invoice_number"].fillna("").astype(str).str.strip())
 
 
@@ -490,6 +505,14 @@ def load_store(base_dir: Path, bank=None) -> pd.DataFrame:
         if c not in store.columns:
             store[c] = ""
     store.loc[store["bank"].eq(""), "bank"] = "IM"
+    # banks whose review ignores the reference: decisions saved with one still match (currency | date | | invoice)
+    for code in [k for k, b in BANKS.items() if option(b, "REVIEW_KEY_WITHOUT_REFERENCE", False)]:
+        rows = store["bank"].eq(code)
+        if rows.any():                                    # currency | date (the first two parts) + the invoice from
+            parts = store.loc[rows, "key"].str.split("|", n=2, expand=True)   # its own column: a reference or an
+            if parts.shape[1] == 3:                                            # invoice may itself contain "|"
+                store.loc[rows, "key"] = (parts[0] + "|" + parts[1] + "||"
+                                          + store.loc[rows, "invoice_number"].astype(str).str.strip())
     store = store[STORE_COLS]
     return store if bank is None else store[store["bank"].eq(get_bank(bank).CODE)]
 
@@ -662,7 +685,9 @@ def apply_review(merged: pd.DataFrame, not_found: pd.DataFrame, payments: pd.Dat
             merged.loc[rows, "found_in_irembopay"] = True
         elif table_choice == "Pending notification":
             merged.loc[rows, "payment_provider"] = bank.PROVIDER
-            merged.loc[rows, "payment_status"] = "NEW"
+            # NEW, unless the status typed in the review is one the bank counts as pending (Ecobank: EXPIRED too)
+            merged.loc[rows, "payment_status"] = (manual["payment_status"] if manual["payment_status"]
+                                                  in option(bank, "PENDING_STATUSES", {"NEW"}) else "NEW")
             merged.loc[rows, "found_in_irembopay"] = True
         elif table_choice == "Paid with other channel":
             provider = manual["payment_provider"]
@@ -743,9 +768,10 @@ def find_previous_report(base_dir: Path, period: Period, bank=None):
     return (path if path.exists() else None), prev
 
 
-def save_uploaded_report(base_dir: Path, period: Period, name: str, content: bytes, bank=None) -> Path:
-    """Check an uploaded report for `period` and keep it in the report store."""
-    tmp = Path(base_dir) / "output" / f".upload_{file_digest(content)}.xlsx"
+def save_uploaded_report(base_dir: Path, period: Period, name: str, content: bytes, bank=None,
+                         root: Path | None = None) -> Path:
+    """Check an uploaded report for `period` and keep it in the report store (root: see report_path)."""
+    tmp = (Path(root) if root is not None else Path(base_dir) / "output") / f".upload_{file_digest(content)}.xlsx"
     tmp.parent.mkdir(parents=True, exist_ok=True)
     tmp.write_bytes(content)
     try:
@@ -773,7 +799,7 @@ def save_uploaded_report(base_dir: Path, period: Period, name: str, content: byt
     except Exception:
         tmp.unlink(missing_ok=True)
         raise ReconError(f"{name}: this is not a reconciliation report made by this app.") from None
-    target = report_path(base_dir, period, bank)
+    target = report_path(base_dir, period, bank, root)
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp.replace(target)
     return target
@@ -783,6 +809,31 @@ def counts_of(tables: dict) -> dict:
     """{table title: {currency or "Total": number of transactions}} of one block."""
     return {title: {("Total" if pd.isna(c) else c): int(n) for c, n in zip(t["Currency"], t["Number of Transactions"])}
             for title, t in tables.items()}
+
+
+def merchant_counts(table) -> dict:
+    """{(merchant, currency): number of transactions} of a Payment per merchant table ("All" included)."""
+    if table is None:
+        return {}
+    return {(str(m), str(c)): int(n) for m, c, n in zip(table["Merchant name"], table["Currency"],
+                                                       table["Number of Transactions"])}
+
+
+def add_vs_merchants(table: pd.DataFrame, prev, unit: str) -> pd.DataFrame:
+    """Add 'VS prev <unit> (%)' to a Payment per merchant table: the change of each merchant (same currency).
+    prev None = nothing to compare (empty column); a merchant missing before (or a previous report without
+    the table, prev {}) = "N/A"."""
+    t = table.copy()
+    col = f"VS prev {unit} (%)"
+    if prev is None:
+        t[col] = None
+        return t
+    out = []
+    for m, c, n in zip(t["Merchant name"], t["Currency"], t["Number of Transactions"]):
+        before = prev.get((str(m), str(c)), 0)
+        out.append("N/A" if not before else f"{(n - before) / before * 100:.2f}%")
+    t[col] = out
+    return t
 
 
 def add_vs_column(tables: dict, prev_counts, unit: str) -> dict:
@@ -825,6 +876,8 @@ class RunResult:
     review_counts: dict = field(default_factory=dict) # what the reviewed rows became: {"Pending notification": 6, ...}
     sheets: dict = field(default_factory=dict)        # the detail sheets of the report (used by the custom report)
     daily: dict = field(default_factory=dict)         # {day: counts_of(the 5 tables of that day)} (custom charts)
+    merchants: dict = field(default_factory=dict)     # {block heading: Payment per merchant table}
+    previous_counts: dict | None = None               # "Compare": counts_of() the previous report (Slack message)
 
     @property
     def reconciled_on(self) -> pd.Timestamp:
@@ -841,8 +894,11 @@ class RunResult:
 
 
 def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare: bool = False,
-        require_review: bool = True, bank=None) -> RunResult:
+        require_review: bool = True, bank=None, report_dir: Path | None = None,
+        previous_report: Path | None = None) -> RunResult:
     """Reconcile the uploaded files for one bank and period, and write the report.
+    report_dir: where the Excel is written (default output/; the app gives a temporary folder).
+    previous_report: the report compared with (default: looked for in output/).
     Steps: A payments  B statement  C match  D review  E SLA  F summary tables  G totals check  H comparison
     I report + run log."""
     bank = get_bank(bank)
@@ -1002,11 +1058,36 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
             "Duplicate Payment": table(rep[m["duplicate"]]),
         }
 
+    def build_merchants(a, b):
+        """Payment per merchant for [a, b): the notifications received (the same rows as that table), one row per
+        merchant and currency - amounts are never added across currencies -, most transactions first, then an
+        "All" row per currency. % = share of the currency's notifications received."""
+        part = rep[table_rows(a, b)["received"]]
+        name = part["name"].astype(object) if "name" in part else pd.Series(None, index=part.index, dtype=object)
+        name = name.where(name.notna() & name.astype(str).str.strip().ne(""), "(no merchant)").astype(str).str.strip()
+        rows = []
+        for cur in list(bank.CURRENCIES) + sorted(set(part["Currency"].dropna()) - set(bank.CURRENCIES)):
+            sub = part[part["Currency"] == cur]
+            if sub.empty:
+                continue
+            g = (pd.DataFrame({"m": name[sub.index], "amt": sub[amount]}).groupby("m")
+                 .agg(n=("m", "size"), amt=("amt", "sum")).reset_index().sort_values(["n", "m"], ascending=[False, True]))
+            total = len(sub)
+            rows += [{"Merchant name": m, "Currency": cur, "Number of Transactions": int(n), "Total Amount": amt,
+                      "%": n / total} for m, n, amt in zip(g["m"], g["n"], g["amt"])]
+            rows.append({"Merchant name": "All", "Currency": cur, "Number of Transactions": total,
+                         "Total Amount": sub[amount].sum(), "%": 1.0})
+        if not rows:
+            rows = [{"Merchant name": "All", "Currency": bank.CURRENCIES[0], "Number of Transactions": 0,
+                     "Total Amount": 0.0, "%": 0.0}]
+        return pd.DataFrame(rows)
+
     # one block for a day or a week; for a month one block per week (Monday to Sunday) + one for the month.
     # Headings show the last day of the block (the end date itself is not included).
     one_day = pd.Timedelta(days=1)
     if period.report_type == "day":
         res.blocks = [("Summary-Daily", f"Day: {start:%d/%m/%Y}", build_summary5(start, end))]
+        res.merchants[res.blocks[-1][1]] = build_merchants(start, end)
     else:
         if period.report_type == "week":
             weeks = [(start, end)]
@@ -1017,9 +1098,11 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
         for i, (a, b) in enumerate(weeks, 1):
             res.blocks.append(("Summary-Weekly", f"Week {i}: {a:%d/%m/%Y} - {b - one_day:%d/%m/%Y}",
                                build_summary5(a, b)))
+            res.merchants[res.blocks[-1][1]] = build_merchants(a, b)
         if period.report_type == "month":
             res.blocks.append(("Summary-Monthly", f"Month: {start:%B %Y} ({start:%d/%m/%Y} - {period.last_day:%d/%m/%Y})",
                                build_summary5(start, end)))
+            res.merchants[res.blocks[-1][1]] = build_merchants(start, end)
 
     # the same counts for each day (only used by the charts of a custom report)
     res.daily = {d: counts_of(build_summary5(d, d + one_day)) for d in pd.date_range(start, period.last_day)}
@@ -1045,13 +1128,17 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
     # ---- H. comparison with the previous period of the same bank (only when ticked) ----
     if compare:
         prev_path, prev = find_previous_report(base_dir, period, bank)
+        if previous_report is not None:
+            prev_path = Path(previous_report)
         if prev_path is None:
             raise ReconError(f"No {bank.NAME} report found for {prev.name}. Upload it or make it first.")
         prev_counts, _, prev_unreviewed = read_report_counts(prev_path, SUMMARY_SHEET[period.report_type], bank)
         res.compared_with = f"{prev.name} (report of {pd.Timestamp(prev_path.stat().st_mtime, unit='s'):%d/%m/%Y})"
+        res.previous_counts = prev_counts
         if prev_unreviewed:
             res.add("warning", f"{prev.name} was not reviewed: its {prev_unreviewed} missing invoice(s) are counted as "
                                "not found. The comparison may not be exact.")
+        prev_merchants = read_merchant_counts(prev_path, SUMMARY_SHEET[period.report_type])   # {} when it has none
         week_blocks = [b for b in res.blocks if b[0] == "Summary-Weekly"]
         new_blocks = []
         for block in res.blocks:
@@ -1060,8 +1147,11 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
                 i = week_blocks.index(block)
                 prev_tables = counts_of(week_blocks[i - 1][2]) if i > 0 else None      # week 1: no comparison
                 new_blocks.append((sheet_name, heading, add_vs_column(tables, prev_tables, "Week")))
+                prev_m = merchant_counts(res.merchants.get(week_blocks[i - 1][1])) if i > 0 else None
+                res.merchants[heading] = add_vs_merchants(res.merchants[heading], prev_m, "Week")
             else:
                 new_blocks.append((sheet_name, heading, add_vs_column(tables, prev_counts, period.unit)))
+                res.merchants[heading] = add_vs_merchants(res.merchants[heading], prev_merchants, period.unit)
         res.blocks = new_blocks
     res.timings["summary"] = time.perf_counter() - t
 
@@ -1083,12 +1173,13 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
         sheets.update(bank.extra_sheets(rep, attempts, start, end, whole))
     sheets["Payment details"] = detail
     res.sheets = sheets
-    report_file = report_path(base_dir, period, bank)
+    report_file = report_path(base_dir, period, bank, report_dir)
     report_file.parent.mkdir(parents=True, exist_ok=True)
-    _write_report(report_file, res.blocks, sheets, bank, res.reconciled_on)
+    _write_report(report_file, res.blocks, sheets, bank, res.reconciled_on, res.merchants)
     res.report_file = report_file
     res.timings["report"] = time.perf_counter() - t
-    res.add("success", f"Report saved: output/{period.report_type}/{report_file.name}")
+    res.add("success", f"Report made: {report_file.name}" if report_dir is not None
+            else f"Report saved: output/{period.report_type}/{report_file.name}")
     _log_run(output_dir, res, sla_days)
     return res
 
@@ -1160,9 +1251,10 @@ GS_TITLE_FILL = PatternFill("solid", start_color="D0DEE3")
 # where each table goes in a block: (column, slot) -> column 1 = A or 6 = F; slot 0/1/2 = rows 3, 11, 19 of the block
 GS_SLOTS = {"Overall processed payments": (1, 0), "Overall notifications received by Irembo": (6, 0),
             "SLA Violated": (1, 1), "Pending notifications": (6, 1), "Duplicate Payment": (1, 2)}
+MERCHANT_SLOT = (6, 2)                       # Payment per merchant: right of "Duplicate Payment"
 GS_STEP = 8                                  # rows between two slots
 GS_BLOCK = 2 + 3 * GS_STEP                   # rows taken by one block (heading + 3 slots)
-GS_WIDTHS = {"A": 40, "B": 26, "C": 17, "D": 12, "E": 18, "F": 40, "G": 26, "H": 17, "I": 12, "J": 18}
+GS_WIDTHS = {"A": 40, "B": 26, "C": 17, "D": 12, "E": 18, "F": 40, "G": 26, "H": 17, "I": 14, "J": 18, "K": 18}
 RECONCILED_CELL = (1, 6)                     # F1 of each summary sheet: "Reconciled on: Thursday 08/10/2026"
 RECONCILED_LABEL = "Reconciled on: "
 
@@ -1215,18 +1307,27 @@ def _write_table(ws, top, left, title, table):
                 c.alignment = Alignment(horizontal="right")
 
 
-def _write_summary(ws, blocks, reconciled_on=None):
-    """A summary sheet: the day it was reconciled (F1), then the blocks one under the other (heading, 5 tables)."""
+def _write_summary(ws, blocks, reconciled_on=None, merchants=None):
+    """A summary sheet: the day it was reconciled (F1), then the blocks one under the other (heading, the 5 tables,
+    and Payment per merchant in the 6th place). A block is GS_BLOCK rows, more when its merchant table is long."""
     for col, w in GS_WIDTHS.items():
         ws.column_dimensions[col].width = w
     if reconciled_on is not None:
         ws.cell(*RECONCILED_CELL, f"{RECONCILED_LABEL}{reconciled_on:%A %d/%m/%Y}").font = Font(size=12, italic=True)
-    for k, (heading, tables) in enumerate(blocks):
-        base = 1 + k * GS_BLOCK
+    base = 1
+    for heading, tables in blocks:
         ws.cell(base, 1, heading).font = Font(size=14, bold=True)
         for title, table in tables.items():
             col, slot = GS_SLOTS[title]
             _write_table(ws, base + 2 + slot * GS_STEP, col, title, table)
+        height = GS_BLOCK
+        table = (merchants or {}).get(heading)
+        if table is not None:
+            col, slot = MERCHANT_SLOT
+            top = base + 2 + slot * GS_STEP
+            _write_table(ws, top, col, MERCHANT_TITLE, table)
+            height = max(GS_BLOCK, top - base + 2 + len(table) + 3)       # a long table pushes the next block down
+        base += height
 
 
 def _open_report(path: Path):
@@ -1243,7 +1344,7 @@ def _open_report(path: Path):
         raise ReconError(f"{path.name} is open in Excel. Close it and run again.") from None
 
 
-def _write_report(path: Path, blocks, sheets, bank=None, reconciled_on=None):
+def _write_report(path: Path, blocks, sheets, bank=None, reconciled_on=None, merchants=None):
     """Write the whole report: summary sheets first, then the detail sheets."""
     summary_sheets = []
     for sheet, _, _ in blocks:
@@ -1257,11 +1358,123 @@ def _write_report(path: Path, blocks, sheets, bank=None, reconciled_on=None):
                 df.to_excel(writer, sheet_name=name, index=False)
                 _style_table_sheet(writer.sheets[name], bank)
             for sheet in summary_sheets:
-                _write_summary(writer.sheets[sheet], [(h, t) for s, h, t in blocks if s == sheet], reconciled_on)
-            if NOT_FOUND_SHEET in writer.book.sheetnames:          # left over in a report made before
-                del writer.book[NOT_FOUND_SHEET]
+                _write_summary(writer.sheets[sheet], [(h, t) for s, h, t in blocks if s == sheet], reconciled_on,
+                               merchants)
+            for old in {NOT_FOUND_SHEET} | OLD_SHEETS:             # left over in a report made before
+                if old in writer.book.sheetnames and old not in sheets:
+                    del writer.book[old]
     except PermissionError:
         raise ReconError(f"{path.name} is open in Excel. Close it and run again.") from None
+
+
+NO_TX_STATUS = "No Transactions Recorded"
+NO_TX_NOTE = ("No transactions were recorded for the selected reporting period. Consequently, no payment matching or "
+              "reconciliation was performed for this period.")
+STATUS_FILL, STATUS_INK = PatternFill("solid", start_color="FFF3D6"), "7A4E00"      # the app's amber notice
+
+
+def previous_column(period: Period) -> str:
+    """The name of the column with the previous period's counts: 'Previous week' / 'Previous month' / 'Previous day'."""
+    return f"Previous {period.unit.lower()}"
+
+
+def read_previous_counts(path: Path, period: Period, bank=None) -> dict:
+    """{table title: {currency: n, "Total": n}} of the previous period's report, for the "Previous week" column:
+    a standard report (its first summary block), or a No-Transaction Report (its one table)."""
+    bank = get_bank(bank)
+    sheet = SUMMARY_SHEET[period.report_type]
+    wb = load_workbook(path, data_only=True)
+    try:
+        ws = wb[sheet] if sheet in wb.sheetnames else None
+        no_tx = ws is not None and any(ws.cell(r, 1).value == "Reconciliation status" for r in range(1, ws.max_row + 1))
+        if no_tx:
+            counts = {title: {cur: 0 for cur in bank.CURRENCIES} for title in GS_SLOTS}
+            for r in range(1, ws.max_row + 1):
+                title, cur, n = ws.cell(r, 1).value, ws.cell(r, 2).value, ws.cell(r, 3).value
+                if title in counts and cur in counts[title] and isinstance(n, (int, float)):
+                    counts[title][cur] = int(n)
+            for d in counts.values():
+                d["Total"] = sum(d.values())
+            return counts
+    finally:
+        wb.close()
+    return read_report_counts(path, sheet, bank)[0]
+
+
+def no_transaction_rows(bank=None, previous: dict | None = None) -> list:
+    """The rows of a no-transaction Reconciliation Summary (Excel and the app's preview): the 5 categories in the
+    standard report's order, at 0 for each currency of the bank; then the previous period's number of transactions
+    (read_previous_counts) and the change against it, as the standard reports' 'VS prev' column: "-100.00%";
+    "No change" when the previous period had none too; "N/A" when its report was not found."""
+    rows = []
+    for title in GS_SLOTS:
+        for cur in get_bank(bank).CURRENCIES:
+            before = None if previous is None else int((previous.get(title) or {}).get(cur, 0))
+            change = ("N/A" if before is None else "No change" if before == 0
+                      else f"{(0 - before) / before * 100:.2f}%")
+            rows.append([title, cur, 0, 0, "N/A" if before is None else before, change])
+    return rows
+
+
+def no_transaction_excel(period: Period, bank=None, made_at=None, previous: dict | None = None) -> bytes:
+    """The report of a period in which the bank had no transactions, in the standard report's look (same title
+    fill, borders and number formats): one Reconciliation Summary table (every category at 0 for each currency of
+    the bank; the last column = the previous period's transactions)
+    and the Reconciliation status under it."""
+    from openpyxl import Workbook
+    bank = get_bank(bank)
+    made_at = pd.Timestamp.now() if made_at is None else pd.Timestamp(made_at)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = SUMMARY_SHEET[period.report_type]
+    for col, w in {"A": 40, "B": 14, "C": 24, "D": 18, "E": 18, "F": 20}.items():
+        ws.column_dimensions[col].width = w
+    ws.cell(1, 1, f"{bank.FULL_NAME} – {period.name[0].upper() + period.name[1:]}").font = Font(size=14, bold=True)
+    ws.cell(2, 1, f"Reporting period: {period.start:%d/%m/%Y} to {period.last_day:%d/%m/%Y}").font = Font(italic=True)
+    ws.cell(2, 3, f"Generated on: {made_at:%A %d/%m/%Y}").font = Font(italic=True)
+
+    # ---- the summary table: title row, column names, one row per category and currency
+    cols = ["Category", "Currency", "Number of Transactions", "Total Amount", previous_column(period),
+            f"VS prev {period.unit} (%)"]
+    top = 4
+    ws.merge_cells(start_row=top, start_column=1, end_row=top, end_column=len(cols))
+    t = ws.cell(top, 1, "Reconciliation Summary")
+    t.font, t.alignment = Font(size=14), Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[top].height = 22
+    for j, name in enumerate(cols, 1):
+        ws.cell(top, j).fill, ws.cell(top, j).border = GS_TITLE_FILL, BOX
+        cell = ws.cell(top + 1, j, name)
+        cell.font, cell.border = BOLD, BOX
+    r = top + 2
+    for values in no_transaction_rows(bank, previous):
+        for j, v in enumerate(values, 1):
+            cell = ws.cell(r, j, v)
+            cell.border = BOX
+            if j in (3, 4) or (j == 5 and isinstance(v, int)):
+                cell.number_format = "#,##0"
+            elif j in (5, 6):
+                cell.alignment = Alignment(horizontal="right")
+        r += 1
+
+    # ---- the reconciliation status, under the table
+    r += 1
+    ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=len(cols))
+    ws.cell(r, 1, "Reconciliation status").font = BOLD
+    for j in range(1, len(cols) + 1):
+        ws.cell(r, j).fill, ws.cell(r, j).border = GS_TITLE_FILL, BOX
+    for i, (text, font) in enumerate([(NO_TX_STATUS, Font(bold=True, size=12, color=STATUS_INK)),
+                                      (NO_TX_NOTE, Font(color=STATUS_INK))], 1):
+        ws.merge_cells(start_row=r + i, start_column=1, end_row=r + i, end_column=len(cols))
+        cell = ws.cell(r + i, 1, text)
+        cell.font, cell.alignment = font, Alignment(wrap_text=True, vertical="center", indent=1)
+        for j in range(1, len(cols) + 1):
+            ws.cell(r + i, j).fill, ws.cell(r + i, j).border = STATUS_FILL, BOX
+    ws.row_dimensions[r + 1].height, ws.row_dimensions[r + 2].height = 22, 34
+    ws.page_setup.orientation, ws.page_setup.fitToWidth, ws.page_setup.fitToHeight = "portrait", 1, 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
 
 
 # =====================================================================================================================
@@ -1374,9 +1587,45 @@ def delete_review(base_dir: Path, store_key: str, bank=None):
     _write_store(base_dir, store[~(store["bank"].eq(code) & store["period"].eq(store_key))], "try again")
 
 
+def _read_merchant_table(ws, top: int, col: int) -> pd.DataFrame:
+    """The Payment per merchant table whose title is at (top, col): its header row, then rows down to a blank."""
+    headers, c = [], col
+    while ws.cell(top + 1, c).value:
+        headers.append(ws.cell(top + 1, c).value)
+        c += 1
+    rows, r = [], top + 2
+    while ws.cell(r, col).value not in (None, ""):
+        rows.append([ws.cell(r, col + j).value for j in range(len(headers))])
+        r += 1
+    t = pd.DataFrame(rows, columns=headers)
+    if len(t):
+        t["Number of Transactions"] = pd.to_numeric(t["Number of Transactions"], errors="coerce").fillna(0).astype(int)
+        t["Total Amount"] = pd.to_numeric(t["Total Amount"], errors="coerce")
+        t["%"] = pd.to_numeric(t["%"], errors="coerce").fillna(0.0)
+    return t
+
+
+def read_merchant_counts(path: Path, sheet: str) -> dict:
+    """{(merchant, currency): transactions} of the first Payment per merchant table of a summary sheet; {} when
+    the report has none (made before 12/10/2026): the comparison then says N/A."""
+    wb = load_workbook(path, data_only=True)
+    try:
+        if sheet not in wb.sheetnames:
+            return {}
+        ws = wb[sheet]
+        for r in range(1, ws.max_row + 1):
+            col, _ = MERCHANT_SLOT
+            if ws.cell(r, col).value == MERCHANT_TITLE:
+                return merchant_counts(_read_merchant_table(ws, r, col))
+        return {}
+    finally:
+        wb.close()
+
+
 def read_report(path: Path) -> dict:
     """Read a saved report back: {"report_type", "bank", "title", "blocks": [(sheet, heading, tables)], "not_found",
-    "reconciled_on" ('Thursday 08/10/2026', or "" for reports made before it was recorded)}.
+    "reconciled_on" ('Thursday 08/10/2026', or "" for reports made before it was recorded),
+    "merchants": {heading: Payment per merchant table} (empty for reports made before 12/10/2026)}.
     Works for reports made by this app (same layout as _write_summary)."""
     path = Path(path)
     kind = path.parent.name if path.parent.name in SUMMARY_SHEET else "month"
@@ -1384,7 +1633,7 @@ def read_report(path: Path) -> dict:
     currencies = BANKS[code].CURRENCIES if code in BANKS else []
     wb = load_workbook(path, data_only=True)
     try:
-        blocks, reconciled_on = [], ""
+        blocks, reconciled_on, merchants = [], "", {}
         for sheet in ("Summary-Daily", "Summary-Weekly", "Summary-Monthly"):
             if sheet not in wb.sheetnames:
                 continue
@@ -1392,12 +1641,12 @@ def read_report(path: Path) -> dict:
             stamp = str(ws.cell(*RECONCILED_CELL).value or "")
             if stamp.startswith(RECONCILED_LABEL):
                 reconciled_on = stamp[len(RECONCILED_LABEL):]
-            k = 0
-            while True:                                           # one block after the other, until an empty heading
-                base = 1 + k * GS_BLOCK
+            # a block = a heading in column A with "Overall processed payments" two rows below (found by looking:
+            # a block is taller when its merchant table is long; reports made before have the same layout)
+            starts = [r for r in range(1, ws.max_row + 1)
+                      if ws.cell(r, 1).value and ws.cell(r + 2, 1).value == "Overall processed payments"]
+            for base in starts:
                 heading = ws.cell(base, 1).value
-                if not heading:
-                    break
                 tables = {}
                 for title, (col, slot) in GS_SLOTS.items():
                     top = base + 2 + slot * GS_STEP
@@ -1405,8 +1654,9 @@ def read_report(path: Path) -> dict:
                         continue
                     headers = []
                     c = col
-                    while ws.cell(top + 1, c).value and (c == col or ws.cell(top + 1, c).value != "Currency"):
-                        headers.append(ws.cell(top + 1, c).value)       # stop at the next table's columns
+                    while (c < col + 5 and ws.cell(top + 1, c).value       # a table has 5 columns at most: stop at
+                           and (c == col or ws.cell(top + 1, c).value != "Currency")):   # the next table's columns
+                        headers.append(ws.cell(top + 1, c).value)
                         c += 1
                     n_rows = len(currencies) + 1
                     if not currencies:                                    # unknown bank: rows down to "Total"
@@ -1422,7 +1672,9 @@ def read_report(path: Path) -> dict:
                     tables[title] = t
                 if len(tables) == len(GS_SLOTS):
                     blocks.append((sheet, heading, tables))
-                k += 1
+                    col, slot = MERCHANT_SLOT
+                    if ws.cell(base + 2 + slot * GS_STEP, col).value == MERCHANT_TITLE:
+                        merchants[heading] = _read_merchant_table(ws, base + 2 + slot * GS_STEP, col)
         not_found = 0                                             # rows that went through the review
         if "Payment details" in wb.sheetnames:
             ws = wb["Payment details"]
@@ -1436,7 +1688,7 @@ def read_report(path: Path) -> dict:
         raise ReconError(f"{path.name}: this report cannot be shown (it was not made by this app).")
     return {"report_type": kind, "bank": bank_name(code), "full_name": BANKS[code].FULL_NAME if code in BANKS else code,
             "title": period_title(kind, report_label(path)), "blocks": blocks, "not_found": not_found,
-            "reconciled_on": reconciled_on}
+            "reconciled_on": reconciled_on, "merchants": merchants}
 
 
 # =====================================================================================================================
@@ -1444,37 +1696,57 @@ def read_report(path: Path) -> dict:
 # =====================================================================================================================
 def report_pdf(path: Path) -> bytes:
     """Summary-only PDF of a saved report: key figures + main summary on page 1, then one page per week."""
+    from reportlab.graphics.charts.barcharts import VerticalBarChart
+    from reportlab.graphics.shapes import Drawing
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4, landscape
     from reportlab.lib.styles import ParagraphStyle
     from reportlab.lib.units import mm
-    from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    from reportlab.platypus import KeepTogether, LongTable, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
     from xml.sax.saxutils import escape
 
     rep = read_report(path)
-    # ---- IremboPay colours and text styles
     teal, green = colors.HexColor("#123239"), colors.HexColor("#99E378")
     title_fill, grid = colors.HexColor("#D0DEE3"), colors.HexColor("#9AA8AD")
+    warning_fill, warning_stroke = colors.HexColor("#FFF3D6"), colors.HexColor("#D4A72C")
+    muted = colors.HexColor("#5B6B70")
     made = pd.Timestamp(Path(path).stat().st_mtime, unit="s")
     page_w, page_h = landscape(A4)
     margin = 14 * mm
     usable = page_w - 2 * margin
-    h1 = ParagraphStyle("h1", fontName="Helvetica-Bold", fontSize=17, textColor=green, leading=21)
+    h1 = ParagraphStyle("h1", fontName="Helvetica-Bold", fontSize=17, textColor=green, leading=22)
     sub = ParagraphStyle("sub", fontName="Helvetica", fontSize=9.5, textColor=colors.HexColor("#D6E4E6"), leading=12)
-    h2 = ParagraphStyle("h2", fontName="Helvetica-Bold", fontSize=13, textColor=teal, leading=16, spaceAfter=4)
-    cell = ParagraphStyle("cell", fontName="Helvetica", fontSize=8.5, leading=10)
+    h2 = ParagraphStyle("h2", fontName="Helvetica-Bold", fontSize=12.5, textColor=teal, leading=16, spaceAfter=4)
+    h3 = ParagraphStyle("h3", fontName="Helvetica-Bold", fontSize=9.2, textColor=teal, leading=12, spaceAfter=3)
+    small = ParagraphStyle("small", fontName="Helvetica", fontSize=8.1, textColor=muted, leading=10)
+    cell = ParagraphStyle("cell", fontName="Helvetica", fontSize=8.2, leading=10)
 
-    def band(subtitle):
-        """The dark teal title band at the top of a page."""
-        t = Table([[Paragraph(f"{escape(rep['full_name'])} Reconciliation", h1)], [Paragraph(subtitle, sub)]],
-                  colWidths=[usable])
-        t.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), teal), ("LEFTPADDING", (0, 0), (-1, -1), 10),
-                               ("TOPPADDING", (0, 0), (0, 0), 8), ("BOTTOMPADDING", (0, -1), (-1, -1), 8),
-                               ("LINEBEFORE", (0, 0), (0, -1), 5, green)]))
+    def title_band(subtitle, warning=False):
+        """Balanced title band with the current report metadata."""
+        label = (rep.get("full_name") or "Bank Reconciliation").strip()
+        t = Table([[Paragraph(f"{escape(label)} Reconciliation", h1)], [Paragraph(subtitle, sub)]], colWidths=[usable])
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), teal),
+            ("LEFTPADDING", (0, 0), (-1, -1), 12),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, -1), (-1, -1), 8),
+            ("LINEBEFORE", (0, 0), (0, -1), 5, green if not warning else warning_stroke),
+            ("TEXTCOLOR", (0, 0), (-1, -1), colors.white),
+        ]))
         return t
 
-    def one_table(title, t, width):
-        """One of the 5 summary tables."""
+    def fmt_value(v):
+        if v is None or (not isinstance(v, str) and pd.isna(v)):
+            return ""
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            if abs(v) >= 1000:
+                return f"{v:,.0f}"
+            return f"{v:,.2f}" if isinstance(v, float) and not v.is_integer() else f"{v:,.0f}"
+        return str(v)
+
+    def one_table(title, t, width, warning=False):
+        """One summary table with consistent numeric alignment and a clear total row."""
         cols = list(t.columns)
         head = {"Number of Transactions": "Transactions", "Total Amount": "Total amount", "%": "% of processed"}
         rows = [[title] + [""] * (len(cols) - 1), [head.get(c, c) for c in cols]]
@@ -1492,73 +1764,162 @@ def report_pdf(path: Path) -> bytes:
                 else:
                     out.append("" if v is None or (isinstance(v, float) and pd.isna(v)) else str(v))
             rows.append(out)
-        first = 0.22 * width
+        first = 0.24 * width
         widths = [first] + [(width - first) / (len(cols) - 1)] * (len(cols) - 1)
-        tb = Table(rows, colWidths=widths)
-        tb.setStyle(TableStyle([
-            ("SPAN", (0, 0), (-1, 0)), ("BACKGROUND", (0, 0), (-1, 0), title_fill),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"), ("FONTSIZE", (0, 0), (-1, 0), 10),
+        tb = LongTable(rows, colWidths=widths, repeatRows=2)
+        title_bg = warning_fill if warning else title_fill
+        title_line = warning_stroke if warning else grid
+        style = [
+            ("SPAN", (0, 0), (-1, 0)),
+            ("BACKGROUND", (0, 0), (-1, 0), title_bg),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, 0), 9.2),
+            ("TEXTCOLOR", (0, 0), (-1, 0), teal if not warning else colors.HexColor("#563B00")),
             ("ALIGN", (0, 0), (-1, 0), "CENTER"),
-            ("FONTNAME", (0, 1), (-1, 1), "Helvetica-Bold"), ("FONTSIZE", (0, 1), (-1, -1), 8.5),
-            ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+            ("FONTNAME", (0, 1), (-1, 1), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 1), (-1, -1), 8.2),
+            ("FONTNAME", (-1, 2), (-1, -1), "Helvetica-Bold"),
             ("ALIGN", (1, 2), (-1, -1), "RIGHT"),
-            ("GRID", (0, 0), (-1, -1), 0.5, grid), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3)]))
+            ("GRID", (0, 0), (-1, -1), 0.45, title_line),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("ROWBACKGROUNDS", (0, 2), (-1, -1), [colors.white, colors.HexColor("#F7FAFB")]),
+        ]
+        if warning:
+            style.extend([
+                ("LINEABOVE", (0, 1), (-1, 1), 1.4, warning_stroke),
+                ("TEXTCOLOR", (0, 2), (-1, -1), colors.HexColor("#563B00")),
+            ])
+        tb.setStyle(TableStyle(style))
         return tb
 
     def summary_grid(tables):
-        """The 5 tables two by two, like the Excel summary."""
+        """The 5 summary tables, arranged in a compact 2-column grid."""
         half = (usable - 8 * mm) / 2
         order = [["Overall processed payments", "Overall notifications received by Irembo"],
                  ["SLA Violated", "Pending notifications"], ["Duplicate Payment", None]]
-        rows = [[one_table(a, tables[a], half), one_table(b, tables[b], half) if b else ""] for a, b in order]
+        rows = [[one_table(a, tables[a], half, warning=(a == "SLA Violated")),
+                 one_table(b, tables[b], half, warning=(b == "SLA Violated")) if b else ""]
+                for a, b in order]
         g = Table(rows, colWidths=[half + 4 * mm, half + 4 * mm])
-        g.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-                               ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 8 * mm)]))
+        g.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 8 * mm),
+        ]))
         return g
 
+    def distribution_chart(tables, width, height):
+        """Small compact distribution chart for received, pending, duplicate and not-found totals."""
+        counts = counts_of(tables)
+        labels = ["Received", "Pending", "Duplicate", "Not found"]
+        values = [
+            counts.get("Overall notifications received by Irembo", {}).get("Total", 0),
+            counts.get("Pending notifications", {}).get("Total", 0),
+            counts.get("Duplicate Payment", {}).get("Total", 0),
+            rep.get("not_found", 0),
+        ]
+        if sum(values) <= 0:
+            return None
+        d = Drawing(width, height)
+        bc = VerticalBarChart()
+        bc.x = 22
+        bc.y = 16
+        bc.height = max(52, height - 30)
+        bc.width = width - 32
+        bc.data = [values]
+        bc.categoryAxis.categoryNames = labels
+        bc.categoryAxis.labels.fontName = "Helvetica"
+        bc.categoryAxis.labels.fontSize = 7
+        bc.categoryAxis.strokeColor = grid
+        bc.categoryAxis.visibleTicks = False
+        bc.valueAxis.valueMin = 0
+        bc.valueAxis.visibleGrid = True
+        bc.valueAxis.gridStrokeColor = colors.HexColor("#E3ECEF")
+        bc.valueAxis.strokeColor = grid
+        bc.valueAxis.labels.fontName = "Helvetica"
+        bc.valueAxis.labels.fontSize = 7
+        bc.valueAxis.labelTextFormat = lambda v: f"{int(v):,}"
+        bc.bars[0].fillColor = teal
+        bc.bars[0].strokeColor = colors.HexColor("#122E36")
+        bc.groupSpacing = 18
+        d.add(bc)
+        return d
+
     def kpis(tables, not_found):
-        """The 6 key figures, as in the app."""
+        """The six key figures, styled as a compact KPI grid."""
         def total(title):
             t = tables[title]
             row = t[t["Currency"].isna()]
             return int(row["Number of Transactions"].iloc[0]), (row["%"].iloc[0] if "%" in t else None)
+
         processed, _ = total("Overall processed payments")
         _, rec_pct = total("Overall notifications received by Irembo")
         sla, _ = total("SLA Violated")
-        values = [("Processed", f"{processed:,}"), ("Received", f"{rec_pct:.2%}"), ("SLA violated", f"{sla:,}"),
-                  ("Pending (NEW)", f"{total('Pending notifications')[0]:,}"),
-                  ("Duplicate", f"{total('Duplicate Payment')[0]:,}"), ("Not found", f"{not_found:,}")]
-        k = Table([[v for _, v in values], [n for n, _ in values]], colWidths=[usable / 6] * 6)
-        k.setStyle(TableStyle([("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"), ("FONTSIZE", (0, 0), (-1, 0), 16),
-                               ("TEXTCOLOR", (0, 0), (-1, 0), teal), ("FONTSIZE", (0, 1), (-1, 1), 8.5),
-                               ("TEXTCOLOR", (0, 1), (-1, 1), colors.HexColor("#5B6B70")),
-                               ("ALIGN", (0, 0), (-1, -1), "CENTER"), ("BOX", (0, 0), (-1, -1), 0.6, grid),
-                               ("LINEBEFORE", (1, 0), (-1, -1), 0.6, grid),
-                               ("TOPPADDING", (0, 0), (-1, 0), 7), ("BOTTOMPADDING", (0, 1), (-1, 1), 7)]))
-        return k
+        values = [
+            ("Processed", f"{processed:,}"),
+            ("Received", f"{rec_pct:.2%}"),
+            ("SLA violated", f"{sla:,}"),
+            ("Pending (NEW)", f"{total('Pending notifications')[0]:,}"),
+            ("Duplicate", f"{total('Duplicate Payment')[0]:,}"),
+            ("Not found", f"{not_found:,}"),
+        ]
 
-    # ---- the pages: page 1 = key figures + main summary, then one page per week
+        cards = []
+        for label, value in values:
+            cards.append(Table([[Paragraph(escape(label), small)], [Paragraph(escape(value), ParagraphStyle("kpi", fontName="Helvetica-Bold", fontSize=14, textColor=teal, leading=18))]], colWidths=[usable / 6]))
+            cards[-1].setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, -1), colors.white),
+                ("BOX", (0, 0), (-1, -1), 0.6, grid),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+            ]))
+        row = Table([cards], colWidths=[usable / 6] * 6)
+        row.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("LEFTPADDING", (0, 0), (-1, -1), 0)]))
+        return row
+
     main = next((b for b in rep["blocks"] if b[0] in ("Summary-Monthly", "Summary-Daily")), rep["blocks"][0])
     weeks = [b for b in rep["blocks"] if b[0] == "Summary-Weekly" and b is not main]
     when = f"reconciled on {rep['reconciled_on']}" if rep["reconciled_on"] else f"made on {made:%d/%m/%Y %H:%M}"
-    story = [band(f"{rep['title']} · {when}"),Spacer(1, 6 * mm), kpis(main[2], rep["not_found"]), Spacer(1, 6 * mm),
-             Paragraph(main[1], h2), summary_grid(main[2])]
+    report_title = rep.get("title") or "Report"
+    subtitle = f"{report_title} · {when}"
+
+    story = [title_band(subtitle)]
+    story += [Spacer(1, 5 * mm), kpis(main[2], rep["not_found"])]
+
+    chart = distribution_chart(main[2], usable * 0.52, 70 * mm)
+    if chart is not None:
+        chart_block = Table([[Paragraph("Transaction distribution", h3), ""], [chart, ""]], colWidths=[usable * 0.52, usable * 0.48])
+        chart_block.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ]))
+        story += [Spacer(1, 5 * mm), chart_block]
+
+    story += [Spacer(1, 5 * mm), Paragraph(main[1], h2), KeepTogether(summary_grid(main[2]))]
+
     for _, heading, tables in weeks:
-        story += [PageBreak(), band(f"{rep['title']} · {heading.split(':')[0]}"), Spacer(1, 6 * mm),
-                  Paragraph(heading, h2), summary_grid(tables)]
+        story += [PageBreak(), title_band(f"{report_title} · {heading.split(':')[0]}", warning=heading.startswith("Week") and "SLA" in str(tables))]
+        story += [Spacer(1, 5 * mm), Paragraph(heading, h2), KeepTogether(summary_grid(tables))]
 
     def footer(canvas, doc):
-        """Page number at the bottom right."""
+        """Page number and report identity on every page."""
         canvas.saveState()
+        canvas.setFont("Helvetica-Bold", 8)
+        canvas.setFillColor(teal)
+        canvas.drawString(margin, 8 * mm, f"{report_title} · {rep.get('full_name') or 'Report'}")
         canvas.setFont("Helvetica", 8)
-        canvas.setFillColor(colors.HexColor("#5B6B70"))
+        canvas.setFillColor(muted)
         canvas.drawRightString(page_w - margin, 8 * mm, f"Page {doc.page}")
         canvas.restoreState()
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=landscape(A4), leftMargin=margin, rightMargin=margin,
-                            topMargin=margin, bottomMargin=margin, title=f"{rep['bank']} reconciliation {rep['title']}")
+                            topMargin=margin, bottomMargin=margin, title=f"{rep.get('full_name') or 'Reconciliation'} {report_title}")
     doc.build(story, onFirstPage=footer, onLaterPages=footer)
     return buf.getvalue()
 
@@ -1567,7 +1928,7 @@ def report_pdf(path: Path) -> bytes:
 # 14. CUSTOM REPORT (step 6, "Custom report": the user picks the sections, how each is shown, and the layout)
 #    custom_content() builds the content once from the run; the app's preview, custom_pdf() and custom_excel() all
 #    draw that same content, so they always match. The standard report in output/ is never changed.
-#    Charts are drawn in the PDF and the preview only; the Excel file shows the same numbers as tables.
+#    Charts are drawn in the PDF, the preview and the Excel file (real Excel charts, with their numbers beside).
 # =====================================================================================================================
 TABLE, BAR, LINE, KPI = "Table", "Bar chart", "Line chart", "KPI summary"
 CHART_TEAL = "#123239"           # bars and lines of the PDF charts (IremboPay teal: 13.6:1 contrast on white paper)
@@ -1579,8 +1940,8 @@ CUSTOM_SECTIONS = {
     "sla": ("SLA Violations", "SLA Violated", [TABLE, BAR, LINE]),
     "pending": ("Pending Notifications", "Pending notifications", [TABLE, BAR, LINE]),
     "duplicates": ("Duplicate Payments", None, [TABLE]),                       # credited twice on the statement
-    "exceptions": ("Exceptions", None, [TABLE]),                               # not found in IremboPay + decision
     "other_channel": ("Other Channel Payments", "Duplicate Payment", [TABLE, BAR, LINE]),   # paid another way
+    "merchants": ("Payment per Merchant", None, [TABLE, BAR]),       # notifications received, by merchant
 }
 # report type: (description, {section: how it is shown}) - choosing a type fills in the sections and views
 REPORT_TYPES = {
@@ -1588,11 +1949,12 @@ REPORT_TYPES = {
                     {k: v[2][0] for k, v in CUSTOM_SECTIONS.items() if k != "other_channel"}),
     "Management Summary": ("KPIs & trends", {"overview": KPI, "payments": TABLE, "received": BAR, "sla": BAR,
                                              "pending": TABLE}),
-    "Exceptions Report": ("Exception details", {"exceptions": TABLE, "pending": TABLE, "duplicates": TABLE,
-                                                "other_channel": TABLE}),
+    "Pending & Duplicates Report": ("Pending, duplicate & other-channel payments",
+                                    {"pending": TABLE, "duplicates": TABLE, "other_channel": TABLE}),
 }
-CUSTOM_INCLUDE = {"kpis": "Summary KPIs", "currency": "Currency breakdown", "timestamp": "Reconciliation timestamp",
-                  "exceptions": "Exception summary"}
+CUSTOM_INCLUDE = {"kpis": "Summary KPIs", "currency": "Currency breakdown", "timestamp": "Reconciliation timestamp"}
+# once the report is made, the reviewed rows are simply in the table their decision chose: the custom report does not
+# list or count them again (the decisions are seen in Exception Resolution only)
 
 
 def chart_groups(period: Period) -> list:
@@ -1631,7 +1993,7 @@ def _series(res: RunResult, main, weeks, table_title: str, view: dict):
 def custom_content(res: RunResult, opts: dict, bank=None) -> dict:
     """Everything a custom report shows, from the run and the options chosen in the app:
     opts = {"type", "sections": [keys], "views": {key: {"as", "group", "currency"}}, "orientation", "density",
-            "include": {"kpis", "currency", "timestamp", "exceptions": True/False}}"""
+            "include": {"kpis", "currency", "timestamp": True/False}}"""
     bank = get_bank(bank)
     c = bank.COLUMNS
     period = res.period
@@ -1646,18 +2008,15 @@ def custom_content(res: RunResult, opts: dict, bank=None) -> dict:
            "file_stem": f"{bank.CODE}_{opts['type'].lower().replace(' ', '_')}_{period.label}"}
     chosen = [k for k in CUSTOM_SECTIONS if k in opts["sections"]]
 
-    # ---- the overview: key figures, one line per currency, what the exceptions became
+    # ---- the overview: key figures and one line per currency
     if "overview" in chosen:
         if inc.get("kpis"):
             rate = res.matched / res.bank_rows if res.bank_rows else 0
             out["kpis"] = [("Processed", f"{res.bank_rows:,}"), ("Matched", f"{res.matched:,}"),
-                           ("Exceptions", f"{res.not_found:,}"), ("Match rate", f"{rate:.2%}")]
+                           ("Match rate", f"{rate:.2%}")]
         if inc.get("currency"):
-            out["currency_lines"] = [f"{cur} · {d['rows']:,} rows · {d['matched']:,} matched · "
-                                     f"{d['not_found']:,} exceptions" for cur, d in res.by_currency.items()]
-        if inc.get("exceptions") and res.review_counts:
-            out["exceptions_line"] = "Exceptions resolved: " + " · ".join(
-                f"{n:,} {what}" for what, n in sorted(res.review_counts.items(), key=lambda x: -x[1]))
+            out["currency_lines"] = [f"{cur} · {d['rows']:,} rows · {d['matched']:,} matched"
+                                     for cur, d in res.by_currency.items()]
 
     # ---- the other sections: a summary table or a chart, and the list of invoices when there is one
     details = res.sheets.get("Payment details", pd.DataFrame())
@@ -1671,15 +2030,33 @@ def custom_content(res: RunResult, opts: dict, bank=None) -> dict:
             view["as"] = views[0]
         sec = {"key": key, "title": title, "as": view["as"], "table": None, "series": [], "group": "",
                "currency": view["currency"], "list": None, "list_title": ""}
+        if key == "merchants":                            # the Payment per merchant table of the main block
+            m = res.merchants.get(main[1])
+            if m is not None and len(m):
+                if view["as"] == TABLE:
+                    sec["table"] = pd.DataFrame({"Merchant": m["Merchant name"].values, "Currency": m["Currency"].values,
+                                                 "Transactions": m["Number of Transactions"].astype(int).values,
+                                                 "Total amount": m["Total Amount"].values,
+                                                 "% of received": [f"{v:.2%}" for v in m["%"]]})
+                else:                                     # the 10 merchants with the most transactions
+                    part = m[m["Merchant name"].ne("All")]
+                    if view["currency"] != "All":
+                        part = part[part["Currency"].eq(view["currency"])]
+                    top = (part.groupby("Merchant name")["Number of Transactions"].sum()
+                           .sort_values(ascending=False).head(10))
+                    sec["series"], sec["group"] = [(str(k), int(v)) for k, v in top.items()], "Merchant"
+            out["sections"].append(sec)
+            continue
         if table_title and view["as"] == TABLE:
             sec["table"] = _summary_frame(main[2][table_title])
         elif table_title:
             sec["series"], sec["group"] = _series(res, main, weeks, table_title, view)
-        if key == "pending":
+        # the invoice list goes with the "Table" view only: a section shown as a chart shows the chart alone
+        if key == "pending" and view["as"] == TABLE:
             sec["list"] = _list_frame(res.sheets.get("Pending notification", pd.DataFrame()),
                                       {**base, "payment_status": "Status", "name": "Merchant"})
             sec["list_title"] = "Pending invoices"
-        elif key == "other_channel":
+        elif key == "other_channel" and view["as"] == TABLE:
             sec["list"] = _list_frame(res.sheets.get("Duplicate payment other channel", pd.DataFrame()),
                                       {**base, "payment_provider": "Provider", "payment_status": "Status"})
             sec["list_title"] = "Invoices paid with another channel"
@@ -1691,10 +2068,6 @@ def custom_content(res: RunResult, opts: dict, bank=None) -> dict:
                 sec["list"] = _list_frame(details[details["times_on_statement"] > 1],
                                           {**base, ref: "Bank reference", "times_on_statement": "Times on statement"})
             sec["list_title"] = "Invoices credited more than once"
-        elif key == "exceptions" and "review_status" in details:
-            sec["list"] = _list_frame(details[details["review_status"].fillna("").astype(str).ne("")],
-                                      {**base, "review_status": "Decision", "review_comment": "Comment"})
-            sec["list_title"] = "Invoices not found in IremboPay, with the decision taken"
         out["sections"].append(sec)
     return out
 
@@ -1734,60 +2107,225 @@ def cell_text(name: str, value) -> str:
     return str(value)
 
 
-def _xl_table(ws, top: int, df: pd.DataFrame) -> int:
-    """Write a table at row `top` (bold header, borders, number formats); returns the first free row after it."""
-    for j, name in enumerate(df.columns, 1):
-        cell = ws.cell(top, j, name)
-        cell.font, cell.fill, cell.border = BOLD, HEADER_FILL, BOX
-        width = max([len(str(name))] + [len(cell_text(name, v)) for v in df[name].head(200)])
-        letter = get_column_letter(j)
-        ws.column_dimensions[letter].width = max(ws.column_dimensions[letter].width or 0, min(max(width + 2, 10), 45))
+# ---- the custom report as Excel: the same look as the PDF (IremboPay teal band, KPI cards, styled tables) and the
+#      charts as real Excel charts, drawn from the numbers written on the section's sheet
+XL_TEAL, XL_GREEN, XL_WARN = "123239", "99E378", "D4A72C"
+XL_INK, XL_MUTED, XL_RULE, XL_HAIR = "1D2B2F", "5B6B70", "9AA8AD", "E1E8EA"
+XL_TITLE_FILL, XL_TOTAL_FILL, XL_WARN_FILL = "E8F0F2", "F2F6F7", "FFF3D6"
+NO_AMOUNT_XL = "—"            # the Total row has no amount: currencies are never added together
+
+
+def _xl_fill(color: str) -> PatternFill:
+    return PatternFill("solid", start_color=color, end_color=color)
+
+
+def _xl_band(ws, title: str, sub: str, last_col: int, fs: float, back: str = ""):
+    """The teal title band across the top of a sheet (+ a link back to the Overview)."""
+    fill = _xl_fill(XL_TEAL)
+    for r in (1, 2, 3):
+        for c in range(1, last_col + 1):
+            ws.cell(r, c).fill = fill
+    ws.row_dimensions[1].height, ws.row_dimensions[2].height, ws.row_dimensions[3].height = 8, 26, 20
+    ws.cell(2, 2, title).font = Font(size=fs + 7, bold=True, color="FFFFFF")
+    ws.cell(3, 2, sub).font = Font(size=fs, color=XL_GREEN)
+    if back:
+        cell = ws.cell(2, last_col, "← Overview")
+        cell.hyperlink, cell.font = f"#'{back}'!A1", Font(size=fs, color="FFFFFF", underline="single")
+        cell.alignment = Alignment(horizontal="right")
+    ws.column_dimensions["A"].width = 2
+
+
+def _xl_page(ws, content: dict):
+    """Print setup: the orientation chosen in the app, one page wide, no grid lines on screen."""
+    ws.sheet_view.showGridLines = False
+    ws.page_setup.orientation = content["orientation"].lower()
+    ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    ws.page_setup.fitToWidth, ws.page_setup.fitToHeight = 1, 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.oddFooter.center.text = f"{content['title']} · {content['period']} · Page &P of &N"
+
+
+def _xl_table(ws, top: int, left: int, df: pd.DataFrame, fs: float, title: str = "", total_row: bool = False,
+              warning: bool = False, filters: bool = False) -> int:
+    """A table like the PDF's: optional title row, tinted header with a teal rule, hairlines between rows, numbers
+    on the right, bold tinted Total row (its amount is '—': currencies are never added together).
+    Returns the first free row after it."""
+    line = XL_WARN if warning else XL_TEAL
+    hair, rule = Side(style="thin", color=XL_HAIR), Side(style="medium", color=line)
+    cols = list(df.columns)
+    numeric = {c for c in cols if pd.api.types.is_numeric_dtype(df[c]) or c == "% of processed"
+               or (len(df) and df[c].astype(str).str.endswith("%").all())}
+    if title:
+        cell = ws.cell(top, left, title)
+        cell.font = Font(size=fs + 1, bold=True, color=XL_INK)
+        cell.border = Border(left=Side(style="thick", color=line))
+        top += 1
+    for j, name in enumerate(cols):
+        cell = ws.cell(top, left + j, name)
+        cell.font = Font(size=fs - 0.5, bold=True, color=XL_MUTED)
+        cell.fill = _xl_fill(XL_WARN_FILL if warning else XL_TITLE_FILL)
+        cell.border = Border(bottom=rule, top=hair)
+        cell.alignment = Alignment(horizontal="right" if name in numeric else "left", vertical="center",
+                                   wrap_text=True)
+        width = max([len(str(name))] + [len(cell_text(name, v)) for v in df[name].head(300)])
+        letter = get_column_letter(left + j)
+        ws.column_dimensions[letter].width = max(ws.column_dimensions[letter].width or 0, min(max(width + 3, 11), 45))
+    ws.row_dimensions[top].height = 20
     for i, rec in enumerate(df.itertuples(index=False), 1):
-        for j, (name, value) in enumerate(zip(df.columns, rec), 1):
+        is_total = total_row and str(rec[0]) in ("Total", "All")
+        for j, (name, value) in enumerate(zip(cols, rec)):
             empty = value is None or (not isinstance(value, str) and pd.isna(value))
-            cell = ws.cell(top + i, j, None if empty else (value.to_pydatetime() if isinstance(value, pd.Timestamp)
-                                                         else value))
-            cell.border = BOX
+            if empty and is_total and name == "Total amount":
+                value, empty = NO_AMOUNT_XL, False
+            cell = ws.cell(top + i, left + j, None if empty else (value.to_pydatetime() if isinstance(value, pd.Timestamp)
+                                                                else value))
+            cell.font = Font(size=fs, bold=is_total, color="7A4E00" if warning else XL_INK)
+            cell.border = Border(bottom=hair, top=rule if is_total else None)
+            if is_total:
+                cell.fill = _xl_fill(XL_TOTAL_FILL)
+            cell.alignment = Alignment(horizontal="right" if name in numeric else "left", vertical="center")
             if name == "% of processed":
                 cell.number_format = "0.00%"
             elif isinstance(value, pd.Timestamp):
-                cell.number_format = "yyyy-mm-dd hh:mm" if (value.hour or value.minute) else "yyyy-mm-dd"
+                cell.number_format = "dd/mm/yyyy hh:mm" if (value.hour or value.minute) else "dd/mm/yyyy"
             elif isinstance(value, (int, float)) and not isinstance(value, bool):
                 cell.number_format = "#,##0"
-    return top + len(df) + 2
+    last = top + len(df)
+    if filters and len(df):
+        ws.auto_filter.ref = f"{get_column_letter(left)}{top}:{get_column_letter(left + len(cols) - 1)}{last}"
+    return last + 2
+
+
+
+def _xl_chart(sec: dict, ws, head: int, n: int):
+    """A one-series Excel bar or line chart of the section's numbers (written on `ws` at rows head..head+n, columns
+    B:C), teal like the PDF (amber for SLA), values on the bars when there are few, no legend."""
+    from openpyxl.chart import BarChart, LineChart, Reference
+    from openpyxl.chart.label import DataLabelList
+    color = XL_WARN if sec["key"] == "sla" else XL_TEAL
+    ch = BarChart() if sec["as"] == BAR else LineChart()
+    if sec["as"] == BAR:
+        ch.type, ch.gapWidth = "col", 60
+    ch.add_data(Reference(ws, min_col=3, min_row=head, max_row=head + n), titles_from_data=True)
+    ch.set_categories(Reference(ws, min_col=2, min_row=head + 1, max_row=head + n))
+    s = ch.series[0]
+    s.graphicalProperties.line.solidFill = color
+    if sec["as"] == BAR:
+        s.graphicalProperties.solidFill = color
+    else:
+        s.graphicalProperties.line.width = 28575                          # 2.25 pt
+        s.marker.symbol, s.marker.size = "circle", 6
+        s.marker.graphicalProperties.solidFill = color
+        s.marker.graphicalProperties.line.solidFill = "FFFFFF"
+        s.smooth = False
+    if n <= 12:
+        s.dLbls = DataLabelList()
+        s.dLbls.showVal = True
+        for flag in ("showSerName", "showCatName", "showLegendKey", "showPercent"):
+            setattr(s.dLbls, flag, False)
+        if sec["as"] == LINE:
+            s.dLbls.position = "t"
+    ch.title = f"{sec['title']} · {series_label(sec)}"
+    ch.legend = None
+    ch.y_axis.title = "Transactions"
+    ch.y_axis.number_format = "#,##0"
+    ch.x_axis.delete = ch.y_axis.delete = False                          # Excel hides the axes otherwise
+    ch.y_axis.majorGridlines.spPr = None
+    ch.width, ch.height = 16, 8
+    return ch
 
 
 def custom_excel(content: dict) -> bytes:
-    """The custom report as an Excel file: an Overview sheet, then one sheet per section (tables only)."""
+    """The custom report as an Excel file, laid out like the PDF:
+    Overview - title band, key figures as cards, the line per currency, a linked list of the sections and every
+               chosen chart (two per row, real Excel charts);
+    then one sheet per section - its table, or the numbers behind its chart with the chart beside them, and its
+               invoice list (with filters). Orientation and density chosen in the app are kept for printing."""
     from openpyxl import Workbook
+    fs = 9 if content["density"] == "Compact" else 10
+    sheet_of = {sec["key"]: sec["title"][:31] for sec in content["sections"]}
     wb = Workbook()
-    ws = wb.active
-    ws.title = "Overview"
-    ws.column_dimensions["A"].width = 60
-    ws["A1"] = content["title"]
-    ws["A1"].font = Font(size=14, bold=True)
-    ws["A2"] = f"{content['period']} · {content['type']}"
-    ws["A3"] = content["stamp"]
+    ov = wb.active
+    ov.title = "Overview"
+    _xl_page(ov, content)
+    for c in range(2, 18):
+        ov.column_dimensions[get_column_letter(c)].width = 11
+    _xl_band(ov, content["title"], f"{content['period']}  ·  {content['type']}"
+             + (f"  ·  {content['stamp']}" if content["stamp"] else ""), 17, fs)
     row = 5
+
+    # ---- key figures: one card each (label over a large value, green bar on the left), like the PDF
     if content["kpis"]:
-        row = _xl_table(ws, row, pd.DataFrame(content["kpis"], columns=["Measure", "Value"]))
-    for line in content["currency_lines"] + ([content["exceptions_line"]] if content["exceptions_line"] else []):
-        ws.cell(row, 1, line)
+        side = Side(style="thin", color=XL_RULE)
+        for i, (label, value) in enumerate(content["kpis"]):
+            c0 = 2 + i * 4
+            for r in (row, row + 1):
+                ov.merge_cells(start_row=r, start_column=c0, end_row=r, end_column=c0 + 2)
+                for c in range(c0, c0 + 3):
+                    ov.cell(r, c).border = Border(top=side if r == row else None, bottom=side if r > row else None,
+                                                  left=Side(style="thick", color=XL_GREEN) if c == c0 else None,
+                                                  right=side if c == c0 + 2 else None)
+            ov.cell(row, c0, label.upper()).font = Font(size=fs - 1, bold=True, color=XL_MUTED)
+            ov.cell(row + 1, c0, value).font = Font(size=fs + 8, bold=True, color=XL_TEAL)
+            for r in (row, row + 1):
+                ov.cell(r, c0).alignment = Alignment(indent=1, vertical="center")
+        ov.row_dimensions[row].height, ov.row_dimensions[row + 1].height = 18, 30
+        row += 3
+    lines = content["currency_lines"] + ([content["exceptions_line"]] if content["exceptions_line"] else [])
+    for line in lines:
+        for c in range(2, 14):
+            ov.cell(row, c).fill = _xl_fill(XL_TOTAL_FILL)
+        ov.cell(row, 2, line).font = Font(size=fs, color=XL_INK)
         row += 1
+    row += 1 if lines else 0
+
+    # ---- the sections of this report, each a link to its sheet
+    if content["sections"]:
+        ov.cell(row, 2, "Sections").font = Font(size=fs + 2, bold=True, color=XL_INK)
+        row += 1
+        for sec in content["sections"]:
+            shown = sec["as"] if sec["as"] != TABLE else "Table"
+            cell = ov.cell(row, 2, sec["title"])
+            cell.hyperlink, cell.font = f"#'{sheet_of[sec['key']]}'!A1", Font(size=fs, color="0563C1",
+                                                                             underline="single")
+            ov.cell(row, 5, shown).font = Font(size=fs, color=XL_MUTED)
+            if sec["list"] is not None:
+                ov.cell(row, 7, f"{len(sec['list']):,} invoices").font = Font(size=fs, color=XL_MUTED)
+            row += 1
+        row += 1
+
+    # ---- one sheet per section; the charts are also placed on the Overview, two per row
+    charts = []
     for sec in content["sections"]:
-        s = wb.create_sheet(sec["title"][:31])
-        s["A1"] = sec["title"]
-        s["A1"].font = Font(size=14, bold=True)
-        row = 3
+        s = wb.create_sheet(sheet_of[sec["key"]])
+        _xl_page(s, content)
+        width = max(8, len(sec["list"].columns) + 1 if sec["list"] is not None else 0,
+                    len(sec["table"].columns) + 1 if sec["table"] is not None else 0)
+        _xl_band(s, sec["title"], series_label(sec) if sec["series"] else content["period"], width + 1, fs,
+                 back="Overview")
+        r = 5
         if sec["table"] is not None:
-            row = _xl_table(s, row, sec["table"])
+            r = _xl_table(s, r, 2, sec["table"], fs, title="Summary", total_row=True, warning=sec["key"] == "sla")
         if sec["series"]:
-            s.cell(row, 1, series_label(sec)).font = BOLD
-            row = _xl_table(s, row + 1, pd.DataFrame(sec["series"], columns=[sec["group"], "Transactions"]))
+            data = pd.DataFrame(sec["series"], columns=[sec["group"], "Transactions"])
+            _xl_table(s, r, 2, data, fs, title="Numbers behind the chart")
+            head = r + 1
+            s.add_chart(_xl_chart(sec, s, head, len(data)), f"E{r}")
+            charts.append(_xl_chart(sec, s, head, len(data)))
+            r = max(r + len(data) + 3, r + 18)
         if sec["list"] is not None:
-            s.cell(row, 1, f"{sec['list_title']} ({len(sec['list']):,})").font = BOLD
+            title = f"{sec['list_title']} ({len(sec['list']):,})"
             if len(sec["list"]):
-                _xl_table(s, row + 1, sec["list"])
+                _xl_table(s, r, 2, sec["list"], fs, title=title, filters=True)
+                s.freeze_panes = s.cell(r + 2, 1)
+            else:
+                s.cell(r, 2, title).font = Font(size=fs + 1, bold=True, color=XL_INK)
+                s.cell(r + 1, 2, "None.").font = Font(size=fs, color=XL_MUTED)
+    if charts:
+        ov.cell(row, 2, "Charts").font = Font(size=fs + 2, bold=True, color=XL_INK)
+        row += 1
+        for i, ch in enumerate(charts):
+            ov.add_chart(ch, f"{'B' if i % 2 == 0 else 'J'}{row + (i // 2) * 17}")
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
