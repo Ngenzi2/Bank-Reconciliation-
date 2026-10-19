@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import itertools
 import re
 import time
 from dataclasses import dataclass, field
@@ -106,6 +107,10 @@ def present(*cols):
 # 2. SETTINGS
 #    Column names of the IremboPay file, the review choices, the report sheets and file names.
 # =====================================================================================================================
+# ---- re-sends: a bank statement row whose invoice was already credited this many days before the period is still
+#      read (to recognise the re-send), but excluded from Processed (see run(), step C)
+RESEND_LOOKBACK_DAYS = 45
+
 # ---- IremboPay payment file
 TEXT_COLUMNS = ["invoice_number", "transaction_id", "provider_reference", "transaction_reference"]  # kept as text
 DATE_COLUMNS = ["created_at", "paid_at", "settled_at", "expiry_at"]                                  # read as dates
@@ -262,6 +267,9 @@ def bank_cols(bank=None) -> list:
 # 5. READING THE UPLOADED FILES (in memory, never saved)
 #    A bank statement is read by the bank's own read_statement(); the IremboPay file is the same for every bank.
 # =====================================================================================================================
+_FILE_ORDER = itertools.count()            # read order (section 9: across several payment files, the newest wins)
+
+
 @dataclass
 class UploadedFile:
     name: str
@@ -275,6 +283,8 @@ class UploadedFile:
     other_credits: int = 0                 # credits on the statement that are not IremboPay payments
     bank: str = ""                         # bank code (bank files only)
     providers: frozenset | None = None     # payment_provider values found (payment files only, e.g. {"I_M"})
+    reference: bool = False    # bank file read only to spot re-sends (section 9); never required, never counted
+    order: float = field(default_factory=lambda: next(_FILE_ORDER))   # read order, or a file's own mtime (newer wins)
 
 
 def file_digest(content: bytes) -> str:
@@ -362,6 +372,8 @@ def accept_file(period: Period, f: UploadedFile, accepted: list, bank=None) -> s
         return f"{f.name}: this is a {bank_name(f.bank)} statement, not {bank.NAME}."
     if f.kind == "payments" and f.providers is not None and bank.PROVIDER.upper() not in f.providers:
         return f"{f.name}: this IremboPay file has no {bank.NAME} payments (payment_provider {bank.PROVIDER})."
+    if f.reference:            # read only to spot re-sends (engine.RESEND_LOOKBACK_DAYS back): no window to check
+        return None
     # the days a file may cover: statements from the day before (late payments) to the Monday after a weekend
     if f.kind == "bank":
         window_start, window_end = period.day_before, extra_monday(period, bank) or period.last_day
@@ -382,7 +394,7 @@ def check_period(period: Period, files: list, bank=None, today=None) -> Check:
     bank = get_bank(bank)
     chk = Check()
     today = pd.Timestamp(today if today is not None else pd.Timestamp.today()).normalize()
-    statements = [f for f in files if f.kind == "bank"]
+    statements = [f for f in files if f.kind == "bank" and not f.reference]
     pays = [f for f in files if f.kind == "payments"]
     not_ended = period_not_ended(period, today)
     if not_ended:
@@ -915,17 +927,27 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
     if not_ended:
         raise ReconError(not_ended.replace("\n", " "))
     statements = [f.data for f in files if f.kind == "bank"]
-    pays = [f.data for f in files if f.kind == "payments"]
+    pay_files = [f for f in files if f.kind == "payments"]
     if not statements:
         raise ReconError("No bank file was added.")
-    if not pays:
+    if not pay_files:
         raise ReconError("No IremboPay payment file was added.")
 
-    # ---- A. payments: one per invoice (the successful transaction, else the latest one) ----
-    payments = pd.concat(pays, ignore_index=True)
+    # ---- A. payments: one per invoice. Within one file, the successful transaction wins (else the latest one: a
+    #         file can list retries of the same invoice). Across several files, the newest file wins (its order) ----
+    parts = []
+    for f in pay_files:
+        d = f.data.copy()
+        d["_file_order"] = f.order
+        parts.append(d)
+    payments = pd.concat(parts, ignore_index=True)
     payments["_successful"] = payments["transaction_status"].astype(str).str.upper().eq("SUCCESSFUL")
-    payments = (payments.sort_values(["invoice_number", "_successful", "created_at"], ascending=[True, False, False])
-                .drop_duplicates("invoice_number", keep="first").drop(columns="_successful").reset_index(drop=True))
+    payments = payments.sort_values(["_file_order", "invoice_number", "_successful", "created_at"],
+                                    ascending=[True, True, False, False])
+    payments = payments.drop_duplicates(["_file_order", "invoice_number"], keep="first")
+    payments = (payments.sort_values("_file_order", ascending=True)
+                .drop_duplicates("invoice_number", keep="last")
+                .drop(columns=["_successful", "_file_order"]).reset_index(drop=True))
 
     # ---- B. bank statement: all files together, repeated rows dropped (by default the period is set by the
     #         payment date); some banks keep one row per invoice ----
@@ -943,10 +965,19 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
     merged = statement.merge(payments, on="invoice_number", how="left", indicator=True)
     merged["found_in_irembopay"] = merged["_merge"].eq("both")
     merged = merged.drop(columns="_merge")
+
+    # ---- re-send: an invoice already credited on an earlier day (within RESEND_LOOKBACK_DAYS, read by the
+    #      reference files) is not Processed again; neither is one IremboPay already shows paid before this period
+    #      (a bank that already keeps one row per invoice, e.g. Ecobank, never has an earlier day here) ----
+    first_seen = statement.dropna(subset=["invoice_number"]).groupby("invoice_number")[paid_on].min()
+    first_day = merged["invoice_number"].map(first_seen).dt.normalize()
+    is_resend = (merged[paid_on].dt.normalize() > first_day) | merged["paid_at"].lt(start).fillna(False)
+
     if hasattr(bank, "in_period"):                        # the bank's own rule
         in_period = bank.in_period(merged, attempts, start, end)
     else:                                                 # default: payment date inside the period
         in_period = merged[paid_on].between(start, end, inclusive="left")
+    in_period = in_period & ~is_resend
     merged["period"] = None
     merged.loc[in_period, "period"] = "current"
     current = merged["period"].eq("current")
