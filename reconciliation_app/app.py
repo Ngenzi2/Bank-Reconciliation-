@@ -59,7 +59,7 @@ APP_DIR = Path(__file__).resolve().parent
 # integrations/ and config.py are not reloaded: a connected Drive client and its error class must stay the same.
 RELOADED = ["services.app_settings", "pdf_report", "integrations.irembopay_checkout", "integrations.slack", "services.session_files",
             "services.report_history", "services.dashboard", "services.dashboard_view", "services.pay_files",
-            "services.slack_message", "services.folder_files"]
+            "services.slack_message", "services.folder_files", "services.auto_review"]
 
 
 def _code_mtime():
@@ -91,7 +91,7 @@ import config                                  # Google Drive settings (no secre
 from integrations import google_drive
 from integrations.google_drive import DriveClient, DriveError
 from integrations import irembopay_checkout, slack
-from services import app_settings, dashboard, dashboard_view, folder_files, pay_files, report_history, slack_message
+from services import app_settings, auto_review, dashboard, dashboard_view, folder_files, pay_files, report_history, slack_message
 from services.session_files import SessionFolder
 
 
@@ -740,9 +740,11 @@ def previous_counts():
 
 
 def run_reconciliation(acc):
-    """engine.run for the current period, with the report written in the session's temporary folder. When a report
-    is made, its Excel and PDF are read into memory (state.report_mem) and the file is deleted; the previous report
-    (Compare) is written there only for the run. Errors are raised like engine.run."""
+    """engine.run for the current period, with the report written in the session's temporary folder. Rows not
+    found in IremboPay are classified automatically before the report is made (no invoice number, or the
+    IremboPay checkout check: services/auto_review.py); state.needs_a_look lists what still deserves a look.
+    When a report is made, its Excel and PDF are read into memory (state.report_mem) and the file is deleted;
+    the previous report (Compare) is written there only for the run. Errors are raised like engine.run."""
     session = state.session_folder
     res, prev_file, prev_info = None, None, None
     try:
@@ -754,6 +756,15 @@ def run_reconciliation(acc):
             prev_file = previous_file(prev, prev_info, session)
         res = engine.run(BASE_DIR, period, acc, sla_days=sla_days, compare=compare, bank=bank,
                          report_dir=session.path, previous_report=prev_file)
+        state.needs_a_look = []
+        if res.stopped_for_review:
+            todo = res.review.loc[~res.review["Reviewed (Yes/No)"].map(engine.is_yes), "invoice_number"]
+            with st.spinner("Checking the invoices not found in IremboPay…"):
+                answers = irembopay_checkout.check_many(todo.dropna().astype(str))
+            filled, state.needs_a_look = auto_review.classify(res.review, answers)
+            engine.save_decisions(BASE_DIR, period, filled, bank)
+            res = engine.run(BASE_DIR, period, acc, sla_days=sla_days, compare=compare, bank=bank,
+                             report_dir=session.path, previous_report=prev_file)
         if prev_info is not None:
             res.compared_with = f"{period.previous().name} (report {prev_info['where']})"
         if res.report_file is not None:
@@ -2833,22 +2844,33 @@ elif state.step == 4:
         k[1].metric("Matched", f"{res.matched:,}")
         k[1].caption(f"{res.matched / res.bank_rows:.2%}" if res.bank_rows else "–")
         k[2].metric("Not found", f"{res.not_found:,}")
-        k[2].caption("exceptions to resolve" if res.not_found else "none")
+        k[2].caption("classified automatically" if res.not_found and not res.not_reviewed
+                     else "exceptions to resolve" if res.not_found else "none")
         k[3].metric("Amount", amounts[0] if amounts else "–")
         k[3].caption(" · ".join(amounts[1:]) or "")
         st.markdown("  \n".join(f"**{cur}** · {d['rows']:,} rows · {d['matched']:,} matched · "
                                 f"{d['not_found']:,} not found" for cur, d in res.by_currency.items()))
         if res.not_found == 0:
             st.success("All rows matched. No exceptions to resolve.", icon="✅")
+        elif not res.not_reviewed:
+            st.success(f"{res.not_found:,} row(s) not found in IremboPay were classified automatically "
+                       "(no invoice number, or the IremboPay checkout check).", icon="✅")
+        if state.get("needs_a_look"):
+            n = len(state.needs_a_look)
+            with st.expander(f"👀 Needs a look later ({n}): the IremboPay checkout could not be asked",
+                             expanded=False):
+                st.caption("These are counted as Pending for now; nothing is blocked. Check again when IremboPay "
+                          "or the internet connection is back.")
+                st.write(", ".join(state.needs_a_look))
     c1, _, c3 = st.columns([1, 1.5, 1.8])
     if c1.button("← Back", width="stretch"):
         go(3)
-    if res.not_found:
-        n = res.not_found
+    if res.not_reviewed:
+        n = res.not_reviewed
         if c3.button(f"Review & Resolve {n:,} Exception{'s' if n > 1 else ''} →", type="primary", width="stretch"):
             go(5)
     elif c3.button("Next: download →", type="primary", width="stretch"):
-        go(6)                                   # nothing to resolve: Exception Resolution is skipped
+        go(6)                                   # nothing left to resolve: Exception Resolution is skipped
 
 # =====================================================================================================================
 # 13. STEP 5 - EXCEPTION RESOLUTION: the rows not found in IremboPay; "Save decisions" saves and runs again
