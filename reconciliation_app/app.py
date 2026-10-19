@@ -576,9 +576,10 @@ state.setdefault("prev_reports", {})     # (bank, period key) -> the previous re
 if "session_folder" not in state:        # this session's own temporary folder (see services/session_files.py)
     state.session_folder = SessionFolder()
 if "report_label" not in state:
-    state.report_label = "Month"
-if "picked" not in state:                # default: last month
-    state.picked = (pd.Timestamp.today().normalize().replace(day=1) - pd.offsets.MonthBegin(1)).date()
+    state.report_label = "Week"
+if "picked" not in state:                # default: last full week
+    _today = pd.Timestamp.today().normalize()
+    state.picked = (_today - pd.Timedelta(days=_today.weekday() + 7)).date()
 
 
 if state.get("toast"):
@@ -1602,7 +1603,7 @@ if not viewing and PAGE == "reconciliation":
                 unsafe_allow_html=True)
 
 # the period chosen in step 1 (used by every step)
-period = engine.make_period((state.report_label or "Month").lower(), state.picked)
+period = engine.make_period((state.report_label or "Week").lower(), state.picked)
 compare = state.compare
 
 
@@ -2429,6 +2430,49 @@ def render_no_tx_preview(period, bank, made_at, previous=None):
 </table></div>""", unsafe_allow_html=True)
 
 
+def _week_label(start):
+    """A week by its own name (the month of its Thursday), e.g. 'First week of October 2026 (28 Sep - 4 Oct)'."""
+    thursday = start + pd.Timedelta(days=3)
+    name = ["First", "Second", "Third", "Fourth", "Fifth"][(thursday.day - 1) // 7]
+    last = start + pd.Timedelta(days=6)
+    return f"{name} week of {thursday:%B %Y} ({start:%d %b} – {last:%d %b})"
+
+
+def period_options(kind, today):
+    """The last 12 full periods of this kind (most recent first), as [(label, start date)]."""
+    today = pd.Timestamp(today).normalize()
+    if kind == "week":
+        this_monday = today - pd.Timedelta(days=today.weekday())
+        starts = [this_monday - pd.Timedelta(days=7 * i) for i in range(1, 13)]
+        return [(_week_label(s), s) for s in starts]
+    first_of_month = today.replace(day=1)
+    starts = [pd.Timestamp(first_of_month - pd.DateOffset(months=i)) for i in range(1, 13)]
+    return [(f"{s:%B %Y}", s) for s in starts]
+
+
+CUSTOM_DATE = "Custom date…"
+
+
+def period_picker(kind, column):
+    """A visible way to pick any past day/week/month: a dropdown of the last 12, named the way the team names
+    them, or 'Custom date' for anything older (never hidden behind a link)."""
+    if kind == "day":
+        column.date_input("Date", key="picked", format="DD/MM/YYYY", help="Any day you want")
+        return
+    options = period_options(kind, pd.Timestamp.today())
+    starts = {label: start for label, start in options}
+    labels = [label for label, _ in options] + [CUSTOM_DATE]
+    current = pd.Timestamp(state.picked)
+    current_start = current - pd.Timedelta(days=current.weekday()) if kind == "week" else current.replace(day=1)
+    default = next((label for label, start in options if start.normalize() == current_start.normalize()), CUSTOM_DATE)
+    choice = column.selectbox(kind.capitalize(), labels, index=labels.index(default))
+    if choice == CUSTOM_DATE:
+        column.date_input("Custom date", key="picked", format="DD/MM/YYYY",
+                          help="Any day inside the week or month you want")
+    else:
+        state.picked = starts[choice].date()
+
+
 if state.step == 1 and state.get("no_tx_preview"):
     mem = state.no_tx_mem
     made_at = mem["made_at"]
@@ -2472,10 +2516,10 @@ elif state.step == 1:
             st.markdown(f"**Bank:** {bank.FULL_NAME}")
         if state.result is not None and state.result.bank != bank.CODE:     # bank changed: old result no longer valid
             state.result = None
-        c1, c2, c3 = st.columns([1.3, 1, 1.7], vertical_alignment="bottom")
+        c1, c2, c3 = st.columns([1.3, 1.6, 1.4], vertical_alignment="bottom")
         c1.segmented_control("Report type", ["Day", "Week", "Month"], key="report_label", selection_mode="single")
-        c2.date_input("Date", key="picked", format="DD/MM/YYYY", help="Any day inside the day / week / month you want")
-        period = engine.make_period((state.report_label or "Month").lower(), state.picked)
+        period_picker((state.report_label or "Week").lower(), c2)
+        period = engine.make_period((state.report_label or "Week").lower(), state.picked)
         c3.markdown(f"**{period.name[0].upper() + period.name[1:]}**  \n<span class='muted'>"
                     f"{period.start:%d/%m/%Y} to {period.last_day:%d/%m/%Y}</span>", unsafe_allow_html=True)
 
