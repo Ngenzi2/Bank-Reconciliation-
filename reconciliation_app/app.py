@@ -58,7 +58,8 @@ APP_DIR = Path(__file__).resolve().parent
 # the app's own code besides app.py; reloaded in this order (each one only uses the ones before it).
 # integrations/ and config.py are not reloaded: a connected Drive client and its error class must stay the same.
 RELOADED = ["services.app_settings", "pdf_report", "integrations.irembopay_checkout", "integrations.slack", "services.session_files",
-            "services.report_history", "services.dashboard", "services.dashboard_view", "services.pay_files", "services.slack_message"]
+            "services.report_history", "services.dashboard", "services.dashboard_view", "services.pay_files",
+            "services.slack_message", "services.folder_files"]
 
 
 def _code_mtime():
@@ -90,7 +91,7 @@ import config                                  # Google Drive settings (no secre
 from integrations import google_drive
 from integrations.google_drive import DriveClient, DriveError
 from integrations import irembopay_checkout, slack
-from services import app_settings, dashboard, dashboard_view, pay_files, report_history, slack_message
+from services import app_settings, dashboard, dashboard_view, folder_files, pay_files, report_history, slack_message
 from services.session_files import SessionFolder
 
 
@@ -1258,6 +1259,21 @@ def accepted_files():
         else:
             acc.append(f)
     return acc, rej
+
+
+def bank_has_folders():
+    """True when this bank has a statements and/or exports folder set in folders.toml."""
+    spec = config.load_folders().get(bank.CODE) or {}
+    return bool(spec.get("statements") or spec.get("exports"))
+
+
+def found_files_for_period():
+    """The statement/export files folders.toml finds for the current bank and period (None: no folder is set,
+    so the app falls back to uploading files by hand)."""
+    if not bank_has_folders():
+        return None
+    client, _ = drive_client()
+    return folder_files.find_files(period, bank, config.load_folders(), drive=client)
 
 
 # ---- key figures + summary tables (step 5 and a saved report)
@@ -2529,11 +2545,12 @@ elif state.step == 1:
                                "previous": previous, "compared_with": compared_with, "problem": problem}
             state.no_tx_drive = None
             st.rerun()
-    elif c3.button("Next: upload files →", type="primary", width="stretch", disabled=not ready,
+    elif c3.button("Next: check →" if bank_has_folders() else "Next: upload files →", type="primary",
+                   width="stretch", disabled=not ready,
                    help=None if ready else "This period has not ended yet" if not_ended
                    else "Add the previous report first, or untick the comparison"):
         state.run_error = None
-        go(2)
+        go(3 if bank_has_folders() else 2)
 
 # =====================================================================================================================
 # 10. STEP 2 - UPLOAD: the bank statements + the IremboPay payment file (read in memory, never saved)
@@ -2712,23 +2729,35 @@ elif state.step == 2:
 # 11. STEP 3 - CHECK: the checklist (engine.check_period), then "Run reconciliation"
 # =====================================================================================================================
 elif state.step == 3:
-    acc, _ = accepted_files()
+    from_folders = bank_has_folders()
+    if from_folders:
+        found = found_files_for_period()
+        acc = folder_files.all_files(found) if found is not None else []
+    else:
+        acc, _ = accepted_files()
+        found = None
     chk = engine.check_period(period, acc, bank)
     with st.container(border=True):
         st.markdown(f'<div class="card-title">③ Check: {period.name}</div>', unsafe_allow_html=True)
+        if found is not None:
+            for line in folder_files.describe(found):
+                st.markdown(f"📁 {line}")
+            for problem in found.problems:
+                st.warning(problem, icon="⚠️")
         for ok, text in chk.lines:
             st.markdown(f"{'✅' if ok else '❌'} {text}")
         for w in chk.warnings:
             st.warning(w, icon="⚠️")
         if chk.blocking:
-            st.error("Run is blocked until the missing bank files are added. Go back to Upload.", icon="⛔")
+            st.error("Run is blocked until the missing bank files are added."
+                     + (" Check the folder." if from_folders else " Go back to Upload."), icon="⛔")
         if compare:
             st.caption(f"The report will be compared with {period.previous().name}.")
         if state.run_error:
             st.error(state.run_error, icon="⚠️")
     c1, _, c3 = st.columns([1, 1.5, 1.8])
     if c1.button("← Back", width="stretch"):
-        go(2)
+        go(1 if from_folders else 2)
     if c3.button("▶  Run reconciliation", type="primary", width="stretch", disabled=bool(chk.blocking)):
         try:
             with st.spinner(f"Reconciling {period.name}…"):
