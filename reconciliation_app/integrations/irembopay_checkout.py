@@ -1,9 +1,8 @@
 """
-IREMBOPAY CHECKOUT CHECK (step 5, Exception Resolution - every bank)
+IREMBOPAY CHECKOUT CHECK (every bank)
 ======================================================================
 For an invoice not found in the IremboPay payment file, asks IremboPay's checkout what it knows about it, the way
-the page https://checkout.irembopay.com/<invoice> does. The answer is only SHOWN to the reviewer ("IremboPay check"
-column): it never fills a decision, and it is not saved with the decisions or in the report.
+the page https://checkout.irembopay.com/<invoice> does.
 
     Paid                       IremboPay says the invoice has already been paid (the channel is not given)
     Expired                    the invoice has expired
@@ -11,8 +10,9 @@ column): it never fills a decision, and it is not saved with the decisions or in
     Not an IremboPay invoice   IremboPay does not know this number
     Could not check            no answer (no internet, the site is down, an unexpected reply)
 
-The lookups run in a background thread, up to 10 invoices at the same time and about 10 per second (still light on
-IremboPay's site), so the page stays usable. Each invoice is looked up once per browser session.
+check_many() looks up a batch at once (services/auto_review.py: the automatic classification of a reconciliation
+run, up to WORKERS invoices at a time). The Checker class is the step 5 (Exception Resolution) screen's own way of
+doing the same lookups progressively, in a background thread, while the page stays usable.
 """
 from __future__ import annotations
 
@@ -61,6 +61,15 @@ def check(invoice: str) -> str:
     if errors and errors[0].get("detail"):
         return f"Other: {errors[0]['detail']}"
     return COULD_NOT
+
+
+def check_many(invoices, workers: int = WORKERS) -> dict:
+    """{invoice: answer} for every distinct invoice (blank ones left out); up to `workers` at a time."""
+    uniq = sorted({str(i).strip() for i in invoices if str(i).strip() not in ("", "nan", "None", "<NA>")})
+    if not uniq:
+        return {}
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="irembopay-check") as pool:
+        return dict(zip(uniq, pool.map(check, uniq)))
 
 
 class Checker:

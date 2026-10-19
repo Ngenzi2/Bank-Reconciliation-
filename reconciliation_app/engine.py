@@ -127,6 +127,11 @@ PAYMENT_REQUIRED = ["invoice_number", "amount", "currency", "payment_status", "p
 # ---- review (step 4 of the app): the 5 choices and the columns the user fills in
 TABLE_CHOICES = ["Notification received", "Pending notification", "Paid with other channel",
                  "Failed notification", "Exclude"]
+# Pending notification: two statuses besides the bank's own PENDING_STATUSES (dianah branch, automatic
+# classification, services/auto_review.py) - a bank credit with no invoice number, and one whose IremboPay
+# checkout answer could not be had (it is still Pending; "Needs a look" shows it, but it never blocks the report)
+NO_INVOICE_STATUS = "no invoice number"
+COULD_NOT_CHECK_STATUS = "Could not check"
 EDIT_COLS = ["Reviewed (Yes/No)", "Report table", "SLA violated (Yes/No)", "Correct invoice number",
              "payment_status", "payment_provider", "paid_at (YYYY-MM-DD HH:MM:SS)", "Merchant name", "Comment"]
 SUGGEST_COL = "Suggestion from"            # filled when an earlier review already decided the invoice
@@ -729,9 +734,16 @@ def apply_review(merged: pd.DataFrame, not_found: pd.DataFrame, payments: pd.Dat
             merged.loc[rows, "found_in_irembopay"] = True
         elif table_choice == "Pending notification":
             merged.loc[rows, "payment_provider"] = bank.PROVIDER
-            # NEW, unless the status typed in the review is one the bank counts as pending (Ecobank: EXPIRED too)
-            merged.loc[rows, "payment_status"] = (manual["payment_status"] if manual["payment_status"]
-                                                  in option(bank, "PENDING_STATUSES", {"NEW"}) else "NEW")
+            # NEW, unless the status typed in the review is one the bank counts as pending (Ecobank: EXPIRED too),
+            # or one of the two automatic statuses above (manual["payment_status"] is upper-cased; these are not)
+            sentinels = {s.upper(): s for s in (NO_INVOICE_STATUS, COULD_NOT_CHECK_STATUS)}
+            status = manual["payment_status"]
+            if status in option(bank, "PENDING_STATUSES", {"NEW"}):
+                merged.loc[rows, "payment_status"] = status
+            elif status in sentinels:
+                merged.loc[rows, "payment_status"] = sentinels[status]
+            else:
+                merged.loc[rows, "payment_status"] = "NEW"
             merged.loc[rows, "found_in_irembopay"] = True
         elif table_choice == "Paid with other channel":
             provider = manual["payment_provider"]
@@ -1065,7 +1077,8 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
     rep["is_extra_credit"] = has_invoice & rep.duplicated("invoice_number", keep="first")
     rep["paid_other_channel"] = bank.duplicate(rep)
     rep["notification_received"] = bank.received(rep)
-    rep["is_pending"] = bank.pending(rep)
+    # Pending regardless of the bank's own rule: the two automatic statuses above are never Notified or Duplicate
+    rep["is_pending"] = bank.pending(rep) | rep["payment_status"].isin({NO_INVOICE_STATUS, COULD_NOT_CHECK_STATUS})
     found_ = rep["found_in_irembopay"]
     provider_ = rep["payment_provider"].astype(object).where(rep["payment_provider"].notna(), "none").astype(str)
     status_ = rep["payment_status"].astype(object).where(rep["payment_status"].notna(), "none").astype(str)
@@ -1087,13 +1100,17 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
     rep["Reason"] = combined.where(found_, "Not found in IremboPay")
 
     def table_rows(a, b):
-        """Rows of each of the 5 tables for [a, b): the bank's own rule, or by payment date (default)."""
-        if hasattr(bank, "tables"):
-            return bank.tables(rep, attempts, a, b)
+        """Rows of each of the 5 tables for [a, b): the bank's own rule, or by payment date (default). The two
+        automatic statuses are always Pending, even for a bank whose own rule would not say so."""
         window = (rep[paid_on] >= a) & (rep[paid_on] < b)
-        return {"processed": window, "received": window & rep["notification_received"],
+        if hasattr(bank, "tables"):
+            m = bank.tables(rep, attempts, a, b)
+        else:
+            m = {"processed": window, "received": window & rep["notification_received"],
                 "sla": window & rep["sla_status"].eq("SLA violated"), "pending": window & rep["is_pending"],
                 "duplicate": window & rep["paid_other_channel"]}
+        m["pending"] = m["pending"] | (window & rep["payment_status"].isin({NO_INVOICE_STATUS, COULD_NOT_CHECK_STATUS}))
+        return m
 
     def build_summary5(a, b):
         """The 5 summary tables for [a, b): one row per currency + a total row (count only, no amount).
