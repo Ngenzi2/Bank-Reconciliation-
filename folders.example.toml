@@ -1,0 +1,23 @@
+# Where each bank's files are found on this computer (dianah branch: folders instead of uploads).
+# Copy this file to folders.toml (same folder) and fill in the paths. folders.toml is ignored by Git: the paths
+# are local to this computer and are not team settings (those stay in the app, Settings -> Bank Management).
+#
+# Each value is either a local folder (any sub-folders allowed) or "drive:<FOLDER ID>" for a Google Drive folder
+# (the last part of the folder's link: https://drive.google.com/drive/folders/<FOLDER ID>).
+# A bank left out, or with no folders set, falls back to uploading files by hand.
+
+[banks.IM]
+statements = "C:/Users/you/Documents/Irembopay_report/data/I&M Bank"
+exports = "C:/Users/you/Documents/Irembopay_report/data/I&M"
+
+[banks.ECO]
+statements = "C:/Users/you/Documents/Irembopay_report/data/irembo"
+exports = "C:/Users/you/Documents/Irembopay_report/data/Ecobank"
+
+[banks.BOA]
+statements = "C:/Users/you/Documents/Irembopay_report/data/Bank of Africa"
+exports = "drive:1AbCdEfGhIjKlMnOpQrStUvWxYz"
+
+[banks.BPR]
+statements = "C:/Users/you/Documents/Irembopay_report/data/Bpr-irembo"
+exports = "C:/Users/you/Documents/Irembopay_report/data/Bpr"

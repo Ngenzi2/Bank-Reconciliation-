@@ -9,6 +9,11 @@ __pycache__/
 # (they are kept in ~/.config/bank-reconciliation/, outside the project; these rules are a safety net)
 drive_settings.toml
 drive_settings.toml.*
+
+# ---- where each bank's files are found on this computer (local paths, not team settings; folders.example.toml
+# shows the format)
+folders.toml
+folders.toml.*
 *service-account*.json
 *service_account*.json
 oauth-client*.json

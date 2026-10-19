@@ -22,6 +22,9 @@ Each setting is taken from (first found):
     credentials_file          BANK_RECON_CREDENTIALS           ~/.config/bank-reconciliation/service-account.json
     reports_root_folder_id    BANK_RECON_REPORTS_FOLDER_ID     (none) the "Reconciliation Reports" folder
     irembopay_folder_id       BANK_RECON_IREMBOPAY_FOLDER_ID   (none) the folder of the IremboPay payment files
+
+Each bank's statements and IremboPay exports folder (dianah branch: folders instead of uploads) is set the same
+way, in folders.toml (ignored by Git; folders.example.toml shows the format) - see load_folders().
 """
 from __future__ import annotations
 
@@ -32,6 +35,7 @@ from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 SETTINGS_FILE = PROJECT_DIR / "drive_settings.toml"
+FOLDERS_FILE = PROJECT_DIR / "folders.toml"
 SECRETS_DIR = Path.home() / ".config" / "bank-reconciliation"
 DEFAULT_CREDENTIALS = SECRETS_DIR / "service-account.json"
 DEFAULT_OAUTH_CLIENT = SECRETS_DIR / "oauth-client.json"
@@ -96,6 +100,41 @@ def load(settings_file: Path = SETTINGS_FILE, env=None) -> DriveSettings:
                          auth=get("auth", "oauth").lower(),
                          oauth_client_file=path("oauth_client_file", DEFAULT_OAUTH_CLIENT),
                          token_file=path("token_file", DEFAULT_TOKEN))
+
+
+@dataclass(frozen=True)
+class FolderSpec:
+    """Where a bank's statements or exports are found: a local folder, or a Google Drive folder."""
+    kind: str                  # "local" or "drive"
+    value: str                 # a folder path (local) or a folder ID (drive)
+
+
+def _folder_spec(value: str) -> FolderSpec | None:
+    value = str(value or "").strip()
+    if not value:
+        return None
+    if value.lower().startswith("drive:"):
+        return FolderSpec("drive", value.split(":", 1)[1].strip())
+    return FolderSpec("local", value)
+
+
+def load_folders(settings_file: Path = FOLDERS_FILE) -> dict:
+    """{bank code: {"statements": FolderSpec|None, "exports": FolderSpec|None}}, from folders.toml:
+        [banks.IM]
+        statements = "C:/Users/.../data/I&M Bank"    # a local folder ...
+        exports = "drive:1AbCdEfGhIjKlMnOpQrStUvWxYz"   # ... or "drive:<folder ID>" for a Google Drive folder
+    folders.toml is ignored by Git (local paths differ by computer); folders.example.toml shows the format.
+    A missing or unreadable file means no bank has a folder set: the app falls back to uploads."""
+    settings_file = Path(settings_file)
+    if not settings_file.is_file():
+        return {}
+    try:
+        banks = tomllib.loads(settings_file.read_text()).get("banks", {})
+    except (tomllib.TOMLDecodeError, OSError):
+        return {}
+    return {str(code).upper(): {"statements": _folder_spec(v.get("statements", "")),
+                                "exports": _folder_spec(v.get("exports", ""))}
+            for code, v in banks.items() if isinstance(v, dict)}
 
 
 def load_admins(settings_file: Path = SETTINGS_FILE, env=None) -> set:

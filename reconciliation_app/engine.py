@@ -285,6 +285,7 @@ class UploadedFile:
     providers: frozenset | None = None     # payment_provider values found (payment files only, e.g. {"I_M"})
     reference: bool = False    # bank file read only to spot re-sends (section 9); never required, never counted
     order: float = field(default_factory=lambda: next(_FILE_ORDER))   # read order, or a file's own mtime (newer wins)
+    taken_at: pd.Timestamp | None = None   # payments file: when it was downloaded (folder-found files only)
 
 
 def file_digest(content: bytes) -> str:
@@ -457,7 +458,31 @@ def check_period(period: Period, files: list, bank=None, today=None) -> Check:
         if first > period.start or last < period.last_day:
             chk.warnings.append(f"The payment file looks short: it covers {first:%d/%m} to {last:%d/%m}, the period is "
                                 f"{period.start:%d/%m} to {period.last_day:%d/%m}. Invoices outside it will show as not found.")
+        taken = [f.taken_at for f in pays if f.taken_at is not None]
+        if taken and statements:
+            newest_taken, newest_statement = max(taken), max(f.last for f in statements)
+            if newest_taken.normalize() < newest_statement:
+                chk.warnings.append(f"The IremboPay export was taken {newest_taken:%d/%m/%Y %H:%M}, before the "
+                                    f"newest statement ({newest_statement:%d/%m/%Y}): late payments may look like "
+                                    "duplicates. Take a fresh export if you can.")
+
+    # ---- currency: a statement row's currency must match IremboPay's currency for the same invoice
+    if statements and pays:
+        _currency_check(statements, pays, bank, chk)
     return chk
+
+
+def _currency_check(statements: list, pays: list, bank, chk: Check):
+    """A statement row whose invoice is paid in IremboPay with another currency (e.g. a USD file read as RWF)."""
+    stmt = bank.clean_statement(pd.concat([f.data for f in statements], ignore_index=True))
+    pay = pd.concat([f.data for f in pays], ignore_index=True).drop_duplicates("invoice_number", keep="last")
+    known = stmt["invoice_number"].map(pay.set_index("invoice_number")["currency"])
+    wrong = stmt[known.notna() & known.ne(stmt["Currency"])]
+    if len(wrong):
+        by_file = wrong["Source file"].value_counts()
+        shown = ", ".join(f"{name} ({n})" for name, n in by_file.items())
+        chk.warnings.append(f"{len(wrong)} payment(s) don't match IremboPay's currency for the same invoice: "
+                            f"{shown}. Check the file (a USD file may be read as RWF, or the other way round).")
 
 
 def _reverse_check(period: Period, bank, statements: list, pays: list, chk: Check):
