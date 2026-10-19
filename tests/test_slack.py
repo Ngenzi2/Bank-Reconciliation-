@@ -62,6 +62,7 @@ def test_sla_below_90_is_red():
     assert "SLA Performance (within SLA): :red_circle:" in text and "which is below 90%" in text
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows has no POSIX permission bits to check")
 def test_webhook_is_kept_as_a_secret(tmp_path, monkeypatch):
     path = tmp_path / "slack-webhook.txt"
     monkeypatch.setenv("BANK_RECON_SLACK_WEBHOOK_FILE", str(path))
