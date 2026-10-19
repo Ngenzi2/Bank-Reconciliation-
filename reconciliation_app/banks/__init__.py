@@ -60,6 +60,9 @@ COLUMN_KEYS = ["posted_date", "payment_date", "description", "reference", "amoun
 # 3. OPTIONAL SETTINGS: a bank leaves these out to work like I&M (see ecobank.py for an example of each)
 # =====================================================================================================================
 OPTIONAL = {
+    # ---- identity
+    "PROVIDERS": "payment_provider values that count as this bank (default: [PROVIDER]); use when IremboPay gives "
+                 "the same bank more than one code (e.g. BPR: 'BPR' and 'BPR_RW')",
     # ---- files and checks (steps 2 and 3)
     "ONE_FILE_PER_CURRENCY": "False when one statement holds every currency (default True)",
     "MISSING_DAYS_BLOCK": "False to allow Run with a warning when days have no statement (default True)",

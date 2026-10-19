@@ -98,6 +98,13 @@ def option(bank, name, default):
     return getattr(get_bank(bank), name, default)
 
 
+def providers(bank) -> set:
+    """The payment_provider value(s) that count as this bank: {PROVIDER}, or PROVIDERS when a bank uses more than
+    one code for itself (e.g. BPR: "BPR" and "BPR_RW")."""
+    bank = get_bank(bank)
+    return {p.upper() for p in option(bank, "PROVIDERS", [bank.PROVIDER])}
+
+
 def present(*cols):
     """Columns that the bank has (a bank may have no posted date)."""
     return [c for c in cols if c]
@@ -371,7 +378,7 @@ def accept_file(period: Period, f: UploadedFile, accepted: list, bank=None) -> s
         return f"{f.name}: the same file was already added."
     if f.kind == "bank" and f.bank != bank.CODE:
         return f"{f.name}: this is a {bank_name(f.bank)} statement, not {bank.NAME}."
-    if f.kind == "payments" and f.providers is not None and bank.PROVIDER.upper() not in f.providers:
+    if f.kind == "payments" and f.providers is not None and not (providers(bank) & f.providers):
         return f"{f.name}: this IremboPay file has no {bank.NAME} payments (payment_provider {bank.PROVIDER})."
     if f.reference:            # read only to spot re-sends (engine.RESEND_LOOKBACK_DAYS back): no window to check
         return None
@@ -489,7 +496,7 @@ def _reverse_check(period: Period, bank, statements: list, pays: list, chk: Chec
     """IremboPay payments made through this bank in the period that are on no uploaded statement."""
     on_statement = set(bank.clean_statement(pd.concat([f.data for f in statements], ignore_index=True))["invoice_number"])
     p = pd.concat([f.data for f in pays], ignore_index=True)
-    p = p[p["payment_provider"].eq(bank.PROVIDER) & p["payment_status"].isin(bank.COMPLETED_STATUSES)
+    p = p[p["payment_provider"].astype(str).str.upper().isin(providers(bank)) & p["payment_status"].isin(bank.COMPLETED_STATUSES)
           & p["paid_at"].between(period.start, period.end, inclusive="left")]
     missing = p[~p["invoice_number"].isin(on_statement)].drop_duplicates("invoice_number")
     if missing.empty:
@@ -1065,7 +1072,8 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
     amount_diff = rep["amount"].notna() & (rep["amount"] - rep[amount]).abs().gt(0.005)
     currency_diff = rep["currency"].notna() & rep["currency"].ne(rep["Currency"])
     parts = [
-        ("Other channel (" + provider_ + ")").where(found_ & rep["payment_provider"].ne(bank.PROVIDER), ""),
+        ("Other channel (" + provider_ + ")").where(
+            found_ & ~rep["payment_provider"].astype(str).str.upper().isin(providers(bank)), ""),
         ("Not settled (" + status_ + ")").where(found_ & ~rep["payment_status"].isin(bank.COMPLETED_STATUSES), ""),
         ("Amount difference (bank " + rep[amount].map("{:,.2f}".format) + " vs IremboPay "
          + rep["amount"].fillna(0).map("{:,.2f}".format) + ")").where(found_ & amount_diff, ""),
