@@ -261,7 +261,10 @@ def in_period(rows, attempts, start, end) -> pd.Series:
     Also records on the rows the first attempt of each invoice inside the period (used by _paid_when)."""
     inside = attempts[(attempts["Request Date"] >= start) & (attempts["Request Date"] < end)]
     first_in = inside.groupby("invoice_number")["Request Date"].min()
-    rows[FIRST_IN_PERIOD] = rows["invoice_number"].map(first_in)
+    # .map() on an empty mapper crashes (pandas tries to cast it to float64): no attempt is inside the period then,
+    # so every invoice's first-in-period date is simply unknown (NaT)
+    rows[FIRST_IN_PERIOD] = (rows["invoice_number"].map(first_in) if len(first_in)
+                             else pd.Series(pd.NaT, index=rows.index, dtype=first_in.dtype))
     paid = _paid_when(rows)
     return _requested(rows, attempts, start, end) | ((paid >= start) & (paid < end))
 
