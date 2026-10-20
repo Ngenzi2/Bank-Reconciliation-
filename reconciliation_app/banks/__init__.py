@@ -8,6 +8,8 @@ engine.py. The app checks every bank file at start-up and says exactly what is m
     ecobank.py   Ecobank    (an example of every optional setting)
     boa.py       Bank of Africa Rwanda (works like I&M: credits only, Value Date vs paid_at; statement checked
                  against its own totals; matching by invoice, or by Ref no when the description has none)
+    bpr.py       BPR (works like I&M, but every credit counts, not only ones with Irembo wording; two
+                 payment_provider codes count as the same bank: PROVIDERS)
 
 To add a bank
     1. copy im.py to a new file (e.g. bk.py)
@@ -21,13 +23,13 @@ CONTENTS
     3. Optional settings (OPTIONAL): leave them out to work like I&M
     4. Checking the bank files at start-up
 """
-from . import boa, ecobank, im
+from . import boa, bpr, ecobank, im
 
 
 # =====================================================================================================================
 # 1. ACTIVE BANKS
 # =====================================================================================================================
-ACTIVE = [im, ecobank, boa]     # the first one is the default
+ACTIVE = [im, ecobank, boa, bpr]     # the first one is the default
 
 
 # =====================================================================================================================
