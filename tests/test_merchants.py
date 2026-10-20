@@ -1,7 +1,7 @@
 """Payment per merchant (approved 2026-10-12): the 6th table of every summary block, for every bank - the
 notifications received by merchant and currency (amounts never added across currencies), with "VS prev" - and
-everything that shows a report (PDF, custom report, dashboard). Real samples are used when they are on this
-computer (skipped otherwise)."""
+everything that shows a report (PDF, custom report, dashboard). Real samples are used when BANK_RECON_SAMPLES
+points to them (skipped otherwise)."""
 import glob
 import os
 from pathlib import Path
@@ -14,15 +14,17 @@ import engine as e
 import pdf_report
 from services import dashboard
 
-D = Path(os.path.expanduser("~/Downloads"))
-IM_AUG = (sorted(glob.glob(str(D / "I&M Bank/2026-08/statements/*.xls"))),
-          D / "_SELECT_pi_invoice_number_pi_transaction_id_pi_amount_pi_currenc_202610021501.csv")
+SAMPLES = os.environ.get("BANK_RECON_SAMPLES")
+D = Path(SAMPLES) if SAMPLES else None
+IM_AUG = (sorted(glob.glob(str(D / "I&M Bank/2026-08/statements/*.xls"))), None) if D else ([], None)
+if D:
+    IM_AUG = (IM_AUG[0], next(D.glob("_SELECT_pi_invoice_number*.csv"), None))
 
 
 def run_im_august(tmp_path, **kw):
     stm, pay = IM_AUG
-    if not stm or not pay.exists():
-        pytest.skip("real samples not on this computer")
+    if not stm or pay is None or not pay.exists():
+        pytest.skip("BANK_RECON_SAMPLES not set, or missing the I&M sample")
     files = [e.read_bank_file(Path(p).name, Path(p).read_bytes(), "IM") for p in stm] + \
             [e.read_payment_file(pay.name, pay.read_bytes(), "IM")]
     period = e.make_period("month", "2026-08-01")

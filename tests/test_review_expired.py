@@ -1,6 +1,6 @@
 """Review rule (approved 2026-10-12): an invoice the IremboPay check found EXPIRED is put in "Pending notification"
 and keeps EXPIRED as its status in the report - Ecobank first, then I&M and Bank of Africa too.
-Uses the real August 2026 samples when they are on this computer (skipped otherwise)."""
+Uses the real August 2026 samples when BANK_RECON_SAMPLES points to them (skipped otherwise)."""
 import glob
 import os
 from pathlib import Path
@@ -11,12 +11,13 @@ import pytest
 import engine as e
 from banks import ecobank
 
-D = Path(os.path.expanduser("~/Downloads"))
+_ROOT = os.environ.get("BANK_RECON_SAMPLES")
+D = Path(_ROOT) if _ROOT else None
 SAMPLES = {
-    "ECO": (sorted(glob.glob(str(D / "data/August 2026 21-35-06-731/IREMBO PAY*.xlsx"))),
-            D / "_SELECT_pi_invoice_number_pi_transaction_id_pi_amount_pi_currenc_202609291459.csv"),
-    "IM": (sorted(glob.glob(str(D / "I&M Bank/2026-08/statements/*.xls"))),
-           D / "_SELECT_pi_invoice_number_pi_transaction_id_pi_amount_pi_currenc_202610021501.csv"),
+    "ECO": (sorted(glob.glob(str(D / "data/August 2026 21-35-06-731/IREMBO PAY*.xlsx"))) if D else [],
+            (D / "_SELECT_pi_invoice_number_pi_transaction_id_pi_amount_pi_currenc_202609291459.csv") if D else None),
+    "IM": (sorted(glob.glob(str(D / "I&M Bank/2026-08/statements/*.xls"))) if D else [],
+           (D / "_SELECT_pi_invoice_number_pi_transaction_id_pi_amount_pi_currenc_202610021501.csv") if D else None),
 }
 
 
@@ -27,8 +28,8 @@ def test_ecobank_counts_expired_as_pending_not_received():
 
 def run_with_decisions(tmp_path, bank, decide):
     stm, pay = SAMPLES[bank]
-    if not stm or not pay.exists():
-        pytest.skip("real samples not on this computer")
+    if not stm or pay is None or not pay.exists():
+        pytest.skip("BANK_RECON_SAMPLES not set, or missing the sample")
     files = [e.read_bank_file(Path(p).name, Path(p).read_bytes(), bank) for p in stm] + \
             [e.read_payment_file(pay.name, pay.read_bytes(), bank)]
     period = e.make_period("month", "2026-08-01")

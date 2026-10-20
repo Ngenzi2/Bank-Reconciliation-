@@ -1,6 +1,9 @@
 """Bank of Africa (BOA): reading and checking the statement, categories, matching with IremboPay, the period, the
-SLA, the report, the app. Made-up files with the real structure (boa_fixtures.py), plus the real samples when they
-are on this computer (skipped otherwise)."""
+SLA, the report, the app. Made-up files with the real structure (boa_fixtures.py), plus the real samples when
+BANK_RECON_SAMPLES points to them (skipped otherwise)."""
+import os
+from pathlib import Path
+
 import pandas as pd
 import pytest
 
@@ -8,6 +11,8 @@ import engine as e
 from banks import boa
 from boa_fixtures import payments, statement
 from conftest import APP_DIR, ROOT
+
+SAMPLES = Path(os.environ["BANK_RECON_SAMPLES"]) if os.environ.get("BANK_RECON_SAMPLES") else None
 
 SEP = e.make_period("month", "2026-09-01")
 
@@ -221,11 +226,12 @@ def test_app_offers_boa_and_checks_its_files():
     assert "Bank of Africa Rwanda Reconciliation" in text and "Bank RWF: 01/09 to 30/09 covered" in text
 
 
-# ---- the real samples (only on the computer that has them; never in Git) --------------------------------------------
-REAL = ROOT / "Bank of Africe"
+# ---- the real samples: BANK_RECON_SAMPLES / "Bank of Africe" / Account_history_2026-10-08.xlsx + Payment details.csv
+REAL = (SAMPLES / "Bank of Africe") if SAMPLES else None
 
 
-@pytest.mark.skipif(not (REAL / "Account_history_2026-10-08.xlsx").exists(), reason="real BOA sample not here")
+@pytest.mark.skipif(not REAL or not (REAL / "Account_history_2026-10-08.xlsx").exists(),
+                    reason="BANK_RECON_SAMPLES not set, or missing the BOA sample")
 def test_real_boa_samples(tmp_path):
     st = read((REAL / "Account_history_2026-10-08.xlsx").read_bytes(), "Account_history_2026-10-08.xlsx")
     pay = e.read_payment_file("Payment details.csv", (REAL / "Payment details.csv").read_bytes(), "BOA")
@@ -239,14 +245,15 @@ def test_real_boa_samples(tmp_path):
     assert (rows, matched, not_found) == (345, 345, 0)
 
 
-# ---- the other banks are unchanged (real samples, when on this computer) ------------------------------------------
-DL = ROOT.parent.parent / "Downloads"
+# ---- the other banks are unchanged (real samples: BANK_RECON_SAMPLES / "I&M Bank" / "2026-08" / "statements") ------
+DL = SAMPLES
 
 
-@pytest.mark.skipif(not (DL / "I&M Bank" / "2026-08" / "statements").exists(), reason="real I&M samples not here")
+@pytest.mark.skipif(not DL or not (DL / "I&M Bank" / "2026-08" / "statements").exists(),
+                    reason="BANK_RECON_SAMPLES not set, or missing the I&M sample")
 def test_im_unchanged(tmp_path):
     stm = sorted((DL / "I&M Bank" / "2026-08" / "statements").glob("*.xls"))
-    pay = DL / "_SELECT_pi_invoice_number_pi_transaction_id_pi_amount_pi_currenc_202610021501.csv"
+    pay = next(DL.glob("_SELECT_pi_invoice_number*.csv"))
     files = [e.read_bank_file(p.name, p.read_bytes(), "IM") for p in stm] + \
         [e.read_payment_file(pay.name, pay.read_bytes(), "IM")]
     res = e.run(tmp_path, e.make_period("month", "2026-08-01"), files, require_review=False, bank="IM",
