@@ -2712,10 +2712,19 @@ elif state.step == 1:
             st.error(not_ended.replace("\n", "  \n"), icon="⛔")
 
         # ---- files: a folder found for this bank, or "Use a file instead" (always available, so nobody is blocked)
+        # the key carries a "round" number so the checkbox's displayed value can be forced (a checkbox that gets
+        # unmounted - e.g. while Check is shown - and remounted with the same key can keep its old frontend value
+        # otherwise, the same reason state.uploader_round exists for the file uploaders below).
         has_folders = bank_has_folders()
+        if state.get("use_upload_bank") != bank.CODE:        # a new bank: start from its own folder, not the last
+            state.use_upload = not has_folders
+            state.use_upload_bank = bank.CODE
+            state.use_upload_round = state.get("use_upload_round", 0) + 1
         if has_folders:
-            st.checkbox("Use a file instead of the folder for this run", key="use_upload",
-                        help="Upload the files by hand this once, instead of the folder set for this bank.")
+            checked = st.checkbox("Use a file instead of the folder for this run", value=state.use_upload,
+                                  key=f"use_upload_cb_{state.get('use_upload_round', 0)}",
+                                  help="Upload the files by hand this once, instead of the folder set for this bank.")
+            state.use_upload = checked
         else:
             state.use_upload = True
     if not has_folders:
@@ -2819,6 +2828,8 @@ elif state.step == 2:
             st.error(state.run_error, icon="⚠️")
     c1, _, c3 = st.columns([1, 1.5, 1.8])
     if c1.button("← Back", width="stretch"):
+        state.use_upload = found is None     # back to Choose with the same choice this screen was shown with
+        state.use_upload_round = state.get("use_upload_round", 0) + 1
         go(1)
     if c3.button("▶  Run reconciliation", type="primary", width="stretch", disabled=bool(chk.blocking)):
         try:
