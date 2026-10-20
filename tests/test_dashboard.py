@@ -1,11 +1,18 @@
 """Reports Dashboard (manager view): every figure comes from the saved reports' tables.
 Facts are built from small report dicts shaped like engine.read_report() and checked by hand."""
+import io
+import os
+from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
 import pytest
+from openpyxl import Workbook
 
-from services import dashboard as d
+import config
+import engine as e
+from boa_fixtures import payments
+from services import auto_review, dashboard as d, folder_files
 
 
 def table(counts, amounts):
@@ -189,3 +196,75 @@ def test_complete_periods_and_the_reports_to_make():
     assert ("ECO", pd.Timestamp("2026-08-01")) in todo and ("IM", pd.Timestamp("2026-09-01")) not in todo
     assert d.last_ended_month("2026-10-14") == pd.Timestamp("2026-09-01")
     assert "Aug 2026 – Sep 2026 saved" in d.coverage_line(facts, today="2026-10-14")
+
+
+# ---- dashboard totals vs. the report's own tables (real engine.run(), not hand-built dicts) ------------------------
+ECO_COLUMNS = ["Source Channel", "Biller Code", "Bill Ref No", "Ccy", "Amount", "Request Date", "Cba Rsp Code",
+               "Cba Rsp Msg", "Biller Rsp Code", "Biller Rsp Msg", "Cba Ref No", "Customer Ref No"]
+
+
+def ecobank_statement(rows):
+    """rows: [(Bill Ref No, Ccy, Amount, Request Date UTC 'YYYY-MM-DD HH:MM:SS', Cba Ref No)], all SUCCESS."""
+    wb = Workbook()
+    ws = wb.active
+    ws.append(ECO_COLUMNS)
+    for ref, ccy, amount, request_date, cba_ref in rows:
+        ws.append(["AGENCYBANKING", "B1", ref, ccy, amount, request_date, "000", "SUCCESS", "000", "SUCCESS",
+                  cba_ref, ""])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_dashboard_totals_match_the_report_for_one_ecobank_week(tmp_path):
+    period = e.make_period("week", "2026-09-07")
+    rows = [
+        ("880000000701", "RWF", 1000, "2026-09-08 08:00:00", "C701"),    # -> Kigali 10:00, paid 10:00:30: on time
+        ("880000000702", "RWF", 2000, "2026-09-09 09:00:00", "C702"),    # -> Kigali 11:00, paid 11:00:10: on time
+    ]
+    pays = [
+        dict(invoice="880000000701", amount=1000, paid_at="2026-09-08 10:00:30", ref="C701", provider="ECOBANK"),
+        dict(invoice="880000000702", amount=2000, paid_at="2026-09-09 11:00:10", ref="C702", provider="ECOBANK"),
+    ]
+    files = [e.read_bank_file("eco.xlsx", ecobank_statement(rows), "ECO"),
+            e.read_payment_file("p.csv", payments(pays), "ECO")]
+    res = e.run(tmp_path / "base", period, files, require_review=False, bank="ECO", report_dir=tmp_path / "r")
+    report_totals = e.counts_of(next(t for s, _, t in res.blocks if s == "Summary-Weekly"))
+
+    rep = e.read_report(res.report_file)
+    facts = d.facts_from_report(rep, record("ECO", "week", f"{period.start:%Y-%m-%d}"))
+    totals = d.totals(facts)
+
+    assert totals["processed"] == report_totals["Overall processed payments"]["Total"] == 2
+    assert totals["received"] == report_totals["Overall notifications received by Irembo"]["Total"]
+    assert totals["sla"] == report_totals["SLA Violated"]["Total"]
+    assert totals["pending"] == report_totals["Pending notifications"]["Total"]
+    assert totals["duplicate"] == report_totals["Duplicate Payment"]["Total"]
+
+
+def test_dashboard_totals_match_the_known_bpr_august_report(tmp_path):
+    """The same agreed numbers as tests/test_bpr.py's real-sample test: 537/512/13/25/0."""
+    samples = os.environ.get("BANK_RECON_SAMPLES")
+    if not samples:
+        pytest.skip("BANK_RECON_SAMPLES not set")
+    data = Path(samples)
+    folders = {"statements": config.FolderSpec("local", str(data / "Bpr-irembo")),
+              "exports": config.FolderSpec("local", str(data / "Bpr"))}
+    if not (data / "Bpr-irembo").is_dir() or not (data / "Bpr").is_dir():
+        pytest.skip("real samples not found under BANK_RECON_SAMPLES")
+    period = e.make_period("month", "2026-08-01")
+    found = folder_files.find_files(period, "BPR", {"BPR": folders})
+    acc = folder_files.all_files(found)
+    first = e.run(tmp_path / "base", period, acc, require_review=True, bank="BPR", report_dir=tmp_path / "r1")
+    answers = {inv: "Open, not paid yet" for inv in
+              ["876239124919", "886233705544", "886236247937", "886237258713", "886237993535"]}
+    filled, _ = auto_review.classify(first.review, answers)
+    e.save_decisions(tmp_path / "base", period, filled, "BPR")
+    res = e.run(tmp_path / "base", period, acc, require_review=True, bank="BPR", report_dir=tmp_path / "r2")
+    assert not res.stopped_for_review
+
+    rep = e.read_report(res.report_file)
+    facts = d.facts_from_report(rep, record("BPR", "month", "2026-08-01"))
+    totals = d.totals([f for f in facts if f.kind == "month"])
+    assert (totals["processed"], totals["received"], totals["sla"], totals["pending"], totals["duplicate"]) == \
+        (537, 512, 13, 25, 0)
