@@ -1687,7 +1687,8 @@ if viewing:
 #     reports are downloaded once per session (then "Refresh"); the "Compare" option of step 1 is not changed.
 # =====================================================================================================================
 
-BANK_COLORS = {"IM": BRAND, "ECO": "#5FAF3C", "BOA": "#2B8A99"}       # I&M dark teal, Ecobank green, BOA light teal
+# I&M dark teal, Ecobank green, BOA light teal, BPR purple
+BANK_COLORS = {"IM": BRAND, "ECO": "#5FAF3C", "BOA": "#2B8A99", "BPR": "#8E6FB5"}
 
 
 def bank_color(code):
@@ -1732,7 +1733,7 @@ def dashboard_facts(client, root):
             state.history_index = (root, report_history.drive_index(client, root))
             state.history_index_at = pd.Timestamp.now()
     records = [r for r in dashboard.report_records(state.history_index[1].records)
-               if r.kind == "month"]                    # the dashboard works by month: the monthly reports
+               if r.kind in ("month", "week")]           # weekly reports are used too (dashboard.combine sorts it out)
     cache = state.setdefault("dash_facts", {})
     key = lambda r: (r.file_id, str(r.modified))       # a replaced report (same file, new content) is read again
     todo = [r for r in records if key(r) not in cache]
@@ -1765,10 +1766,10 @@ def _seg(label, options, key, default=None, fmt=None, help=None, wrap=False):
 
 
 def tile_groups(tiles) -> str:
-    """The key figures in three groups: what happened (payments, amounts), against the targets (receipt rate,
+    """The key figures in three groups: what happened (payments, amounts), against the targets (notified,
     on time), to follow up (money at risk, needs attention). A group's top line takes its worst colour."""
     groups = [("📦", "Activity", "what happened", [t for t in tiles if t[0].startswith(("PAYMENTS", "AMOUNT"))]),
-              ("🎯", "Against the targets", "how well", [t for t in tiles if t[0] in ("RECEIPT RATE", "ON TIME (SLA)")]),
+              ("🎯", "Against the targets", "how well", [t for t in tiles if t[0] in ("NOTIFIED", "ON TIME (SLA)")]),
               ("🔎", "To follow up", "what needs action", [t for t in tiles if t[0] in ("MONEY AT RISK",
                                                                                          "NEEDS ATTENTION")])]
     rank = {"bad": 3, "warn": 2, "good": 1, "": 0}
@@ -1960,15 +1961,15 @@ def dashboard_page():
                                       and dashboard.period_label(dashboard.period_key(f.start, base), base, True) == lb))
                                 for lb in labels] for nm in names_here}
                    for c in (found if cur == "All" else [cur])},
-        "status": [("Received by Irembo", now["received"], now["received"] / now["processed"] if now["processed"] else 0.0),
+        "status": [("Notified", now["received"], now["received"] / now["processed"] if now["processed"] else 0.0),
                    ("Pending notification", now["pending"], now["pending"] / now["processed"] if now["processed"] else 0.0),
                    ("Paid via another channel", now["duplicate"],
                     now["duplicate"] / now["processed"] if now["processed"] else 0.0)],
         "sla": [(engine.BANKS[c].FULL_NAME, t["sla"], t["sla"] / t["processed"] if t["processed"] else 0.0)
                 for c, t in now_by.items() if t is not None],
-        "report_columns": ["Bank", "Status", "Payments", "Received %", "On time %", "Pending", "Other channel"],
+        "report_columns": ["Bank", "Status", "Payments", "Notified %", "On time %", "Pending", "Other channel"],
         "reports": [(r["Bank"], r["Status"], "–" if pd.isna(r.get("Payments")) else f"{int(r['Payments']):,}",
-                     "–" if pd.isna(r.get("Received %")) else f"{r['Received %']:.2f}%",
+                     "–" if pd.isna(r.get("Notified %")) else f"{r['Notified %']:.2f}%",
                      "–" if pd.isna(r.get("On time %")) else f"{r['On time %']:.1f}%",
                      "–" if pd.isna(r.get("Pending")) else int(r["Pending"]),
                      "–" if pd.isna(r.get("Other channel")) else int(r["Other channel"])) for _, r in sc.iterrows()],

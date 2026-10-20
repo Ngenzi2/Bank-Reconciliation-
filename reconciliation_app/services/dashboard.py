@@ -412,9 +412,9 @@ def attention(now_by_bank: dict, before_by_bank: dict, label: str) -> list:
                                     + (f" · before: {rb['ontime']:.1%}" if rb.get("ontime") is not None else "")})
         if r["receipt"] is not None and r["receipt"] < TARGET_RECEIPT:
             items.append({"kind": "bad", "bank": code, "metric": "receipt", "score": 3 + (TARGET_RECEIPT - r["receipt"]),
-                          "title": f"{name} · receipt rate {r['receipt']:.2%} (target {pct_target(TARGET_RECEIPT)})",
-                          "detail": f"{t['processed'] - t['received']:,} of {t['processed']:,} notifications not "
-                                    "received by Irembo"})
+                          "title": f"{name} · Notified {r['receipt']:.2%} (target {pct_target(TARGET_RECEIPT)})",
+                          "detail": f"{t['processed'] - t['received']:,} of {t['processed']:,} payments not yet "
+                                    "notified"})
         for metric, what in (("pending", "notifications still pending"), ("duplicate", "paid with another channel")):
             if t[metric]:
                 money = " · ".join(f"{c} {a.get(metric, 0.0):,.0f}" for c, a in t["amounts"].items() if a.get(metric))
@@ -443,11 +443,11 @@ def tiles(now: dict, before: dict | None, now_by_bank: dict, compared: str) -> l
         a0 = (before or {}).get("amounts", {}).get(c, {}).get("processed") if before else None
         out.append((f"AMOUNT · {c}", _fmt_amount(a), ch(a, a0), ""))
     if r["receipt"] is None:
-        out.append(("RECEIPT RATE", "N/A", "no transactions", ""))
+        out.append(("NOTIFIED", "N/A", "no transactions", ""))
         out.append(("ON TIME (SLA)", "N/A", "no transactions", ""))
     else:
-        out.append(("RECEIPT RATE", f"{r['receipt']:.2%}",
-                    f"target {pct_target(TARGET_RECEIPT)} · {now['processed'] - now['received']:,} not received",
+        out.append(("NOTIFIED", f"{r['receipt']:.2%}",
+                    f"target {pct_target(TARGET_RECEIPT)} · {now['processed'] - now['received']:,} not yet notified",
                     "good" if r["receipt"] >= TARGET_RECEIPT else "bad"))
         out.append(("ON TIME (SLA)", f"{r['ontime']:.1%}",
                     f"target {pct_target(TARGET_ONTIME)} · {now['sla']:,} late"
@@ -484,7 +484,7 @@ def scorecard(now_by_bank: dict, before_by_bank: dict, currencies: list) -> pd.D
         for c in currencies:
             row[f"Amount {c}"] = t["amounts"].get(c, {}).get("processed")
         risk = _money_at_risk(t)
-        row.update({"Received %": None if r["receipt"] is None else round(r["receipt"] * 100, 2),
+        row.update({"Notified %": None if r["receipt"] is None else round(r["receipt"] * 100, 2),
                     "On time %": None if r["ontime"] is None else round(r["ontime"] * 100, 1),
                     "Late": t["sla"], "Pending": t["pending"], "Other channel": t["duplicate"],
                     "Money at risk": " · ".join(f"{c} {a:,.0f}" for c, a in risk.items()) or "0"})
@@ -696,7 +696,7 @@ def breakdown(facts: list, kind: str, first, last, currency: str, banks=None) ->
         cut = key < first or period_end(key, child) > end      # e.g. a week across the month end: its part only
         rows.append({"key": key, "Period": period_label(key, child) + (" (part in this period)" if cut else ""),
                      "Payments": t["processed"],
-                     "Received %": None if r["receipt"] is None else round(r["receipt"] * 100, 2),
+                     "Notified %": None if r["receipt"] is None else round(r["receipt"] * 100, 2),
                      "On time %": None if r["ontime"] is None else round(r["ontime"] * 100, 1),
                      "Late": t["sla"], "Pending": t["pending"], "Other channel": t["duplicate"],
                      "Status": STATUS_TEXT[status(t)]})

@@ -232,10 +232,14 @@ def view(facts, sel, bef, now, before, now_by, bef_by, kind, first, last, span, 
     risk = {c: a.get("pending", 0.0) + a.get("duplicate", 0.0) for c, a in now["amounts"].items()}
     risk_txt = " · ".join(f"{c} {v:,.0f}" for c, v in risk.items() if v) or "None"
     usd = amt(now, "USD") if "USD" in now["currencies"] and amt_cur != "USD" else None
+    DEFINE = {"rec": "Notified = found and confirmed paid in the IremboPay export.",
+             "ont": "On time = paid_at within the bank's SLA of its payment date.",
+             "amt": "The amount of the payments counted as Processed.",
+             "risk": "Pending + paid with another channel: not yet confirmed received."}
     cards = [
-        ("rec", "Receipt rate", "N/A" if r["receipt"] is None else f"{r['receipt'] * 100:.2f}%",
+        ("rec", "Notified", "N/A" if r["receipt"] is None else f"{r['receipt'] * 100:.2f}%",
          change_pill(r["receipt"], rb["receipt"] if rb else None, points=True) or pill(no_change, "n"),
-         f"target ≥ {d.pct_target(d.TARGET_RECEIPT)} · {now['processed'] - now['received']:,} not received"),
+         f"target ≥ {d.pct_target(d.TARGET_RECEIPT)} · {now['processed'] - now['received']:,} not yet notified"),
         ("ont", "On time (SLA)", "N/A" if r["ontime"] is None else f"{r['ontime'] * 100:.1f}%",
          change_pill(r["ontime"], rb["ontime"] if rb else None, points=True) or pill(no_change, "n"),
          f"target ≥ {d.pct_target(d.TARGET_ONTIME)} · {now['sla']:,} late"),
@@ -246,7 +250,8 @@ def view(facts, sel, bef, now, before, now_by, bef_by, kind, first, last, span, 
         ("risk", "Money at risk", risk_txt if len(risk_txt) < 18 else f"{amt_cur} {short(risk.get(amt_cur, 0.0))}",
          pill("to follow up", "a") if any(risk.values()) else pill("nothing at risk", "g"),
          f"{now['pending']:,} pending · {now['duplicate']:,} paid twice")]
-    card_html = "".join(f'<div class="dv-card dv-k"><div class="dv-ic">{ICON[i]}</div><div class="dv-kl">{escape(l)}</div>'
+    card_html = "".join(f'<div class="dv-card dv-k"><div class="dv-ic">{ICON[i]}</div><div class="dv-kl">{escape(l)} '
+                        f'<span class="dv-info" title="{escape(DEFINE[i])}">ⓘ</span></div>'
                         f'<div class="dv-kv">{escape(v)}</div><div class="dv-kf">{p}<span class="dv-go">›</span>'
                         f'</div><div class="dv-ks">{s if "<span" in s else escape(s)}</div></div>'
                         for i, l, v, p, s in cards)
@@ -344,6 +349,7 @@ STYLE = f'''<style>
 .dv-card{{background:#fff;border:1px solid #E1EEF0;border-radius:18px;padding:18px 18px;box-shadow:0 4px 16px rgba(18,50,57,.06);min-width:0}}
 .dv-s2{{grid-column:span 2}}
 .dv-k .dv-ic svg{{width:38px;height:38px}} .dv-kl{{font-size:13.5px;font-weight:800;color:{MUT};margin-top:10px}}
+.dv-info{{cursor:help;font-weight:600;color:{ACC}}}
 .dv-kv{{font-size:26px;font-weight:800;margin:4px 0 10px;color:{TEAL}}}
 .dv-kf{{display:flex;justify-content:space-between;align-items:center;gap:6px}}
 .dv-go{{width:28px;height:28px;border-radius:50%;background:{PALE};display:flex;align-items:center;justify-content:center;
