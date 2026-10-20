@@ -1,6 +1,6 @@
 """
-THE SLACK MESSAGE OF A REPORT (step 6, "Send to Slack")
-======================================================
+THE SLACK MESSAGE OF A REPORT (Results, "Send to Slack")
+=========================================================
 Builds the team message from a reconciliation run, in the format agreed on 2026-10-12. Every number is read from
 the report (the summary tables of the main block, its Payment per merchant table); nothing is reconciled again.
 
@@ -37,18 +37,6 @@ def _amounts(tables: dict, title: str) -> str:
     return " · ".join(parts) or "N/A"
 
 
-def _within_amounts(tables: dict, currencies: list) -> str:
-    """Amount within SLA = processed amount - SLA violated amount, per currency."""
-    out = []
-    for cur in currencies:
-        p, s = tables[P], tables[S]
-        n = _count(tables, P, cur) - _count(tables, S, cur)
-        if n > 0:
-            a = float(p.loc[p["Currency"] == cur, "Total Amount"].sum()) - float(s.loc[s["Currency"] == cur, "Total Amount"].sum())
-            out.append(f"{a:,.0f} {cur}")
-    return " · ".join(out) or "N/A"
-
-
 def _vs(now: int, before: int) -> str:
     if not before:
         return "0.00%" if not now else "+100.00%"
@@ -63,92 +51,107 @@ def _dot(good: bool) -> str:
     return GREEN if good else RED
 
 
+def _short_week(day) -> str:
+    """'2026-09-07' -> 'Sep-Week2' (the week belongs to the month of its Thursday, same rule as the rest of the app)."""
+    thursday = pd.Timestamp(day) + pd.Timedelta(days=3)
+    return thursday.strftime("%b") + "-Week" + str((thursday.day - 1) // 7 + 1)
+
+
 def period_names(period) -> tuple[str, str, str, str]:
     """(kind word, this period, the previous one, Prev-label): 'weekly', 'Aug-Week4', 'Aug-Week3', 'Prev-Week'."""
-    def week_name(start):
-        first = start.replace(day=1)
-        n = sum(1 for d in pd.date_range(first, start) if d.dayofweek == 0) + (0 if first.dayofweek == 0 else 1)
-        return f"{start:%b}-Week{n}"
     prev = period.previous()
     if period.report_type == "week":
-        return "weekly", week_name(period.start), week_name(prev.start), "Prev-Week"
+        return "weekly", _short_week(period.start), _short_week(prev.start), "Prev-Week"
     if period.report_type == "day":
         return "daily", f"{period.start:%d/%m/%Y}", f"{prev.start:%d/%m/%Y}", "Prev-Day"
     return "monthly", f"{period.start:%B %Y}", f"{prev.start:%B %Y}", "Prev-Month"
 
 
-def build(bank, period, blocks: list, merchants: dict, previous_counts: dict | None = None,
-          link: str | None = None) -> str:
-    """The message of the report's main block (the month, the week or the day)."""
+def _team_amounts(t) -> str:
+    """'5,330,838 RWF ; 500 USD' (every currency with a nonzero count), or '0'."""
+    parts = [f"{a:,.0f} {c}" for c, n, a in zip(t["Currency"], t["Number of Transactions"], t["Total Amount"])
+             if pd.notna(c) and n]
+    return " ; ".join(parts) if parts else "0"
+
+
+def _team_vs(now: int, before) -> str:
+    if before in (None, 0):
+        return "N/A"
+    return f"{(now - before) / before * 100:+.2f}%"
+
+
+def _team_pct(part: int, whole: int) -> str:
+    return f"{part / whole * 100:.2f}%" if whole else "0.00%"
+
+
+def build(bank, period, blocks: list, merchants: dict, pending_statuses: dict | None = None,
+         previous_counts: dict | None = None, link: str | None = None) -> str:
+    """The team message exactly as the reconciliation notebooks print it: same wording, emojis and number
+    format, ready to paste into Slack. pending_statuses: {status: count} of the Pending notification sheet, for
+    the optional "Pending by status" line."""
     main = next((b for b in blocks if b[0] in ("Summary-Monthly", "Summary-Daily")), blocks[0])
     t = main[2]
-    kind, name, prev_name, prev_label = period_names(period)
-    compare = previous_counts is not None
-    pc = previous_counts or {}
-
-    def before(title):
-        return int((pc.get(title) or {}).get("Total", 0))
-
-    proc, rec, sla_bad = _count(t, P), _count(t, R), _count(t, S)
-    pend, dup = _count(t, PE), _count(t, DU)
-    within = proc - sla_bad
-    proc0, within0 = before(P), before(P) - before(S)
-    pend0, dup0 = before(PE), before(DU)
-    rate = rec / proc if proc else 0.0
-    sla_rate = within / proc if proc else 0.0
-    share = lambda n: f"{n / proc if proc else 0:.2%} OF OVERALL"
-
-    def change(now, prev_n, arrow=True):
-        if not compare:
-            return ""
-        return f" {_trend(now, prev_n) + ' ' if arrow and _trend(now, prev_n) else ''}{_vs(now, prev_n)} vs {prev_label}"
-
-    m = merchants.get(main[1])
-    names = sorted(set(m.loc[m["Merchant name"] != "All", "Merchant name"].astype(str))) if m is not None and len(m) else []
-    title = f"{name} vs {prev_name}" if compare else name
-    lines = [
-        f"Hello Team, here is the {kind} report on",
-        f"{bank.NAME} payments processed in {title}",
-        "",
-        f"• Merchants who used this channel: [{', '.join(names) if names else 'none'}]",
-        "",
-        f"• Overall processed payments ({bank.NAME}):",
-        f"   • Total number of Transactions: {proc:,}{change(proc, proc0)}",
-        f"   • Total Amount: {_amounts(t, P)}",
-        "",
-        "• Overall notifications received by Irembo:",
-        f"   • Total number of Transactions: {rec:,} {_dot(rate >= SUCCESS_OK)} {rate:.2%} Success rate "
-        f"{_dot(rate >= SUCCESS_OK)} with a failure rate of {1 - rate:.2%}",
-        f"   • Total Amount: {_amounts(t, R)}",
-        "",
-        f"• SLA Performance (within SLA): {_dot(sla_rate >= SLA_OK)}",
-        f"   • Total number of transactions: {within:,} {share(within)} {change(within, within0)}".rstrip(),
-        f"   • Total Amount: {_within_amounts(t, list(bank.CURRENCIES))}",
-        "",
-        f"• Pending notifications: {_dot(pend == 0)}",
-        f"   • Total number of transactions: {pend:,} {share(pend)} {change(pend, pend0, arrow=False)}".rstrip(),
-        f"   • Total Amount: {_amounts(t, PE)}",
-        "",
-        f"• Paid with other channels (potential double payments): {_dot(dup == 0)}",
-        f"   • Total number of transactions: {dup:,} {share(dup)} {change(dup, dup0, arrow=False)}".rstrip(),
-        f"   • Total Amount: {_amounts(t, DU)}",
-        "",
-        "• Findings and updates",
-    ]
-    if compare:
-        arrow = f" {_trend(proc, proc0)}" if _trend(proc, proc0) else ""
-        lines.append(f"   • Overall, there was a {_vs(proc, proc0)}{arrow} in the successfully processed "
-                     f"transactions vs previous {kind.replace('ly', '').replace('dai', 'day')}, with a success rate of "
-                     f"{rate:.2%} {_dot(rate >= SUCCESS_OK)},")
+    report_type = {"week": "weekly", "month": "monthly", "day": "daily"}[period.report_type]
+    if period.report_type == "week":
+        prev = period.previous()
+        title = f"*{bank.NAME} payments* processed in `{_short_week(period.start)}` vs `{_short_week(prev.start)}`"
+        vs_label = "vs Prev-Week"
+    elif period.report_type == "month":
+        title = f"*{bank.NAME} payments* processed in `{period.start:%B %Y}` vs previous month"
+        vs_label = "vs Prev-Month"
     else:
-        lines.append(f"   • Overall, {proc:,} transactions were processed, with a success rate of {rate:.2%} "
-                     f"{_dot(rate >= SUCCESS_OK)},")
-    lines += [f"     and the SLA performance over the last {kind.replace('ly', '').replace('dai', 'day')} was "
-              f"{sla_rate:.2%} {_dot(sla_rate >= SLA_OK)} which is {'above' if sla_rate >= SLA_OK else 'below'} "
-              f"{SLA_OK * 100:g}%",
-              f"   • We have {pend:,} pending transactions {_dot(pend == 0)}",
-              f"   • Full details in the Google Sheets report <{link}|Here>" if link
-              else "   • Full details in the report on Google Drive"]
+        prev = period.previous()
+        title = f"*{bank.NAME} payments* processed on `{period.start:%d/%m/%Y}` vs `{prev.start:%d/%m/%Y}`"
+        vs_label = "vs Prev-Day"
+
+    n = {"overall": _count(t, P), "notified": _count(t, R), "sla": _count(t, S),
+        "pending": _count(t, PE), "duplicate": _count(t, DU)}
+    before = {}
+    for key, table_title in (("overall", P), ("notified", R), ("sla", S), ("pending", PE), ("duplicate", DU)):
+        v = ((previous_counts or {}).get(table_title) or {}).get("Total")
+        if v is not None:
+            before[key] = int(v)
+
+    success = n["notified"] / n["overall"] * 100 if n["overall"] else 0
+    sla_share = n["sla"] / n["overall"] * 100 if n["overall"] else 0
+    m = merchants.get(main[1])
+    names = (sorted(set(m.loc[m["Merchant name"] != "All", "Merchant name"].astype(str)))
+            if m is not None and len(m) else [])
+    trend = "📈" if (before.get("overall") or 0) <= n["overall"] else "📉"
+
+    lines = [
+        f"Hello Team, here is the {report_type} report on {title}",
+        f"• *Merchants who used this channel:* [{', '.join(names)}]",
+        "• *Overall processed payments:*",
+        f"    • Total number of Transactions: `{n['overall']:,}` {trend} "
+        f"{_team_vs(n['overall'], before.get('overall'))} {vs_label}",
+        f"    • Total Amount: {_team_amounts(t[P])}",
+        "• *Overall notifications received by Irembo:*",
+        f"    • Total number of Transactions: `{n['notified']:,}` ✅ `{success:.2f}% Success rate` 🔴 with a "
+        f"failure rate of `{100 - success:.2f}%`",
+        f"    • Total Amount: {_team_amounts(t[R])}",
+        f"• *SLA Violated:* {'🟢' if sla_share < 10 else '🔴'}",
+        f"    • Total number of transactions: `{n['sla']:,}` `{_team_pct(n['sla'], n['overall'])} OF OVERALL` "
+        f"{_team_vs(n['sla'], before.get('sla'))} {vs_label}",
+        f"    • Total Amount: {_team_amounts(t[S])}",
+        "• *Pending notifications:* ⚠️",
+        f"    • Total number of transactions: `{n['pending']:,}` `{_team_pct(n['pending'], n['overall'])} "
+        f"OF OVERALL` {_team_vs(n['pending'], before.get('pending'))} {vs_label}",
+        f"    • Total Amount: {_team_amounts(t[PE])}",
+        "• *Paid with other channels, which results in double payments:* ⚠️",
+        f"    • Total number of transactions: `{n['duplicate']:,}` `{_team_pct(n['duplicate'], n['overall'])} "
+        f"OF OVERALL` {_team_vs(n['duplicate'], before.get('duplicate'))} {vs_label}",
+        f"    • Total Amount: {_team_amounts(t[DU])}",
+        "• *Findings and updates*",
+        f"    • Overall, there was a `{_team_vs(n['overall'], before.get('overall'))}` {trend} in the processed "
+        f"transactions {vs_label}, with a success rate of `{success:.2f}%` ✅, and the SLA violation was "
+        f"`{sla_share:.2f}%` {'🟢 which is below `10%`' if sla_share < 10 else '🔴 which is above `10%`'}",
+        f"    • We have {n['pending']} pending transaction{'s' if n['pending'] != 1 else ''} ⚠️",
+    ]
+    if n["pending"] and pending_statuses:
+        lines.append("    • Pending by status: " + ", ".join(f"{k}: {v}" for k, v in pending_statuses.items()))
+    lines.append(f"    • Full details in the Google Sheets report {link or '(link)'}")
+    lines.append("CC: ")
     return "\n".join(lines)
 
 

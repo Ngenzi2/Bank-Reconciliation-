@@ -1,5 +1,5 @@
-"""Send to Slack (step 6): the message format agreed on 2026-10-12 and the webhook kept as a secret. Nothing is sent
-to Slack: the web call is faked."""
+"""Send to Slack (Results): the team message matching the notebooks, the automatic-delivery block format agreed
+on 2026-10-15, and the webhook kept as a secret. Nothing is sent to Slack: the web call is faked."""
 import io
 import json
 import os
@@ -32,34 +32,45 @@ WEEK = e.make_period("week", "2026-08-17")
 HEAD = "Week 1: 17/08/2026 - 23/08/2026"
 
 
-def msg(previous=None, link=None, **kw):
-    return M.build(e.get_bank("ECO"), WEEK, [("Summary-Weekly", HEAD, block(**kw))], {HEAD: MERCH}, previous, link)
+def msg(previous=None, link=None, pending_statuses=None, **kw):
+    return M.build(e.get_bank("ECO"), WEEK, [("Summary-Weekly", HEAD, block(**kw))], {HEAD: MERCH},
+                   pending_statuses, previous, link)
 
 
-def test_message_with_comparison_follows_the_agreed_format():
+def test_message_with_comparison_follows_the_notebook_format():
     prev = {M.P: {"Total": 1376}, M.R: {"Total": 1376}, M.S: {"Total": 0}, M.PE: {"Total": 0}, M.DU: {"Total": 0}}
     text = msg(prev, link="https://drive.google.com/file/d/ID/view")
-    assert text.startswith("Hello Team, here is the weekly report on\nEcobank payments processed in Aug-Week4 vs Aug-Week3")
-    assert "• Merchants who used this channel: [GOR, RSSB]" in text
-    assert "Total number of Transactions: 1,824 :chart_with_upwards_trend: +32.56% vs Prev-Week" in text
-    assert "100.00% Success rate :large_green_circle: with a failure rate of 0.00%" in text
-    assert "Pending notifications: :large_green_circle:" in text and "0 0.00% OF OVERALL  0.00% vs Prev-Week" in text
-    assert "Paid with other channels (potential double payments): :red_circle:" in text
-    assert "19 1.04% OF OVERALL  +100.00% vs Prev-Week" in text
-    assert "Total Amount: 19,000 RWF" in text and "USD" not in text.split("Paid with other")[1]   # no empty currency
-    assert "which is above 90%" in text and "<https://drive.google.com/file/d/ID/view|Here>" in text
+    assert text.startswith("Hello Team, here is the weekly report on "
+                           "*Ecobank payments* processed in `Aug-Week3` vs `Aug-Week2`")
+    assert "• *Merchants who used this channel:* [GOR, RSSB]" in text
+    assert "Total number of Transactions: `1,824` \U0001F4C8 +32.56% vs Prev-Week" in text
+    assert "`100.00% Success rate` \U0001F534 with a failure rate of `0.00%`" in text
+    assert "• *Pending notifications:* ⚠️" in text
+    assert "Total number of transactions: `0` `0.00% OF OVERALL` N/A vs Prev-Week" in text
+    assert "• *Paid with other channels, which results in double payments:* ⚠️" in text
+    assert "Total number of transactions: `19` `1.04% OF OVERALL` N/A vs Prev-Week" in text
+    assert "Total Amount: 19,000 RWF" in text and "USD" not in text.split("other channels")[1]
+    assert "which is below `10%`" in text
+    assert "Full details in the Google Sheets report https://drive.google.com/file/d/ID/view" in text
+    assert text.endswith("CC: ")
 
 
-def test_message_without_comparison_has_no_vs():
+def test_message_without_comparison_shows_na():
     text = msg(None)
-    assert "Aug-Week4\n" in text and " vs " not in text.replace("vs previous", "")
-    assert "Overall, 1,824 transactions were processed" in text
-    assert "Full details in the report on Google Drive" in text
+    assert "`Aug-Week3`" in text
+    assert "`N/A` \U0001F4C8 in the processed transactions vs Prev-Week" in text
+    assert "Full details in the Google Sheets report (link)" in text
 
 
-def test_sla_below_90_is_red():
+def test_sla_above_10_percent_is_red():
     text = msg(None, sla=300)
-    assert "SLA Performance (within SLA): :red_circle:" in text and "which is below 90%" in text
+    assert "• *SLA Violated:* \U0001F534" in text and "which is above `10%`" in text
+
+
+def test_pending_by_status_is_listed_when_counted():
+    text = msg(None, pend=2, pending_statuses={"NEW": 1, "EXPIRED": 1})
+    assert "We have 2 pending transactions ⚠️" in text
+    assert "Pending by status: NEW: 1, EXPIRED: 1" in text
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows has no POSIX permission bits to check")
@@ -96,7 +107,7 @@ def test_send_posts_the_text_and_reports_refusals(monkeypatch):
         slack.send("hello", url="https://hooks.slack.com/services/T/B/x")
 
 
-# ---- the step 6 message (Slack blocks, approved on 2026-10-15) ------------------------------------------------------
+# ---- the automatic-delivery message (Slack blocks, approved on 2026-10-15) ------------------------------------------
 MONTH = e.make_period("month", "2026-08-01")
 MHEAD = "Month: August 2026 (01/08/2026 - 31/08/2026)"
 
