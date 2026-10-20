@@ -2870,10 +2870,11 @@ elif state.step == 4:
                        "(no invoice number, or the IremboPay checkout check).", icon="✅")
         if state.get("needs_a_look"):
             n = len(state.needs_a_look)
-            with st.expander(f"👀 Needs a look later ({n}): the IremboPay checkout could not be asked",
-                             expanded=False):
-                st.caption("These are counted as Pending for now; nothing is blocked. Check again when IremboPay "
-                          "or the internet connection is back.")
+            with st.expander(f"👀 Needs a look later ({n}): could not check these invoices on IremboPay's own "
+                             "payment page", expanded=False):
+                st.caption("They are already counted as Pending, and the report was made normally: nothing "
+                          "waited for this. Check them again later, once IremboPay's page or the internet "
+                          "connection is back.")
                 st.write(", ".join(state.needs_a_look))
     c1, _, c3 = st.columns([1, 1.5, 1.8])
     if c1.button("← Back", width="stretch"):
@@ -3063,9 +3064,11 @@ elif state.step == 6:
                 st.warning(text, icon="⚠️")
         if state.get("needs_a_look"):
             n = len(state.needs_a_look)
-            with st.expander(f"👀 Needs a look later ({n}): the IremboPay checkout could not be asked"):
-                st.caption("These are counted as Pending for now; nothing is blocked. Check again when IremboPay "
-                          "or the internet connection is back.")
+            with st.expander(f"👀 Needs a look later ({n}): could not check these invoices on IremboPay's own "
+                             "payment page"):
+                st.caption("They are already counted as Pending, and the report was made normally: nothing "
+                          "waited for this. Check them again later, once IremboPay's page or the internet "
+                          "connection is back.")
                 st.write(", ".join(state.needs_a_look))
         with st.expander("Summary tables"):
             render_summary(res.blocks, period.report_type, res.merchants)

@@ -150,9 +150,9 @@ def test_title_and_header_rows_repeat_on_a_new_page():
 
 
 # ---- key figures --------------------------------------------------------------------------------------------------
-def test_receipt_rate_and_sla_are_separate_figures():
+def test_notified_and_sla_are_separate_figures():
     values = {label: (value, sub, alert) for label, value, sub, alert in P.kpi_values(block())}
-    assert values["NOTIFICATION RECEIPT RATE"][0] == "100.00%"        # received / processed, as saved
+    assert values["NOTIFIED"][0] == "100.00%"        # received / processed, as saved
     assert values["SLA VIOLATIONS"][0] == "19"
     assert values["SLA VIOLATIONS"][1].startswith("0.35% of processed")
     assert values["SLA VIOLATIONS"][2] is True                         # highlighted
@@ -231,7 +231,7 @@ def test_after_the_report_reviewed_rows_are_not_counted_again(pdf_text):
     """The rows reviewed in Exception Resolution are in the table their decision chose: the report PDF has no
     'not found' figure and never says 'exception'."""
     labels = [label for label, _, _, _ in P.kpi_values(block())]
-    assert labels == ["PAYMENTS PROCESSED", "NOTIFICATION RECEIPT RATE", "SLA VIOLATIONS", "PENDING NOTIFICATIONS",
+    assert labels == ["PAYMENTS PROCESSED", "NOTIFIED", "SLA VIOLATIONS", "PENDING NOTIFICATIONS",
                       "DUPLICATE PAYMENTS"]
     text = pdf_text(report(weeks=2)).lower()
     assert "exception" not in text and "not found" not in text

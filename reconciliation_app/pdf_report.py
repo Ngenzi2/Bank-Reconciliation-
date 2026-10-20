@@ -258,7 +258,7 @@ def kpi_values(tables: dict) -> list:
 
     return [
         ("PAYMENTS PROCESSED", fmt_count(processed), per_currency, False),
-        ("NOTIFICATION RECEIPT RATE", pct(rate), f"{received:,} of {processed:,} notifications received", False),
+        ("NOTIFIED", pct(rate), f"{received:,} of {processed:,} notifications received", False),
         ("SLA VIOLATIONS", fmt_count(sla), f"{pct(sla_pct)} of processed payments", sla > 0),
         ("PENDING NOTIFICATIONS", fmt_count(pending), f"{pct(pending_pct)} of processed", False),
         ("DUPLICATE PAYMENTS", fmt_count(dup), f"{pct(dup_pct)} of processed · other channel", False),
@@ -306,8 +306,8 @@ def kpi_cards(tables: dict) -> Table:
 
 def definitions_box(width: float) -> Table:
     items = [
-        ("Notification receipt rate", "processed payments whose notification reached Irembo. It measures delivery, "
-                                      "not timeliness, and is not an SLA compliance rate."),
+        ("Notified", "processed payments whose notification reached Irembo. It measures delivery, "
+                     "not timeliness, and is not an SLA compliance rate."),
         ("SLA violations", "processed payments settled outside the agreed SLA window, as a share of processed."),
         ("Pending", "processed payments still waiting for their notification."),
         ("Duplicate payments", "paid at the bank while IremboPay records them as paid through another channel."),
@@ -328,7 +328,7 @@ def glance_box(tables: dict, width: float) -> Table:
     processed, _ = _total(tables["Overall processed payments"])
     received, rate = _total(tables["Overall notifications received by Irembo"])
     items = [("Payments processed", fmt_count(processed)),
-             ("Notification receipt rate", fmt_pct(rate) if rate is not None else "—")]
+             ("Notified", fmt_pct(rate) if rate is not None else "—")]
     for label, title in (("SLA violations", "SLA Violated"), ("Pending notifications", "Pending notifications"),
                          ("Duplicate payments", "Duplicate Payment")):
         n, pct = _total(tables[title])
