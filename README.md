@@ -75,16 +75,20 @@ python3 -m streamlit run reconciliation_app/app.py
 
 ## How to use it
 
-1. Select the bank and the reconciliation period.
-2. Upload the bank statement files from your computer. For the IremboPay payment file, choose **This computer**
-   (upload) or **Google Drive** (pick a file in the IremboPay folder or its month subfolders, then **☁ Add from
-   Drive**). Both go through the same checks: a file of another bank or outside the period is refused.
-3. Check that all required files are covered.
-4. Run the reconciliation.
-5. Review any exceptions if transactions are missing or unresolved.
-6. Download the report (Excel or PDF) and/or click **☁ Save to Google Drive**. If the report is already on Drive,
-   the app asks: **Replace the existing report** or **Save as a new version** (`_v2`, `_v3`, …). A file is shown as
-   saved only after Google Drive confirms it; if an upload fails, the report stays in the app and **↻ Retry** sends
+Three steps: **Choose**, **Check**, **Results**.
+
+1. **Choose**: pick the bank and the period (the default is the last full week; any older day, week or month can
+   be picked). If the bank's statements/exports folders are set (`folders.toml`), the app finds its files itself;
+   if not, set them right there, once. "Use a file instead" uploads the files by hand for this run, without
+   setting anything up.
+2. **Check**: the app lists what it found (or what was uploaded) and any warning (a missing day, an old export,
+   a file of another bank). **▶ Run reconciliation** turns on once everything is OK; the rules decide pending /
+   duplicate / no invoice number by themselves - nothing to review by hand for normal cases.
+3. **Results**: the five key figures, the report (Excel/PDF), **☁ Save to Google Drive** and **💬 Send to Slack**
+   happen automatically once the report is made. A short, optional **Needs a look** list shows the rare invoice
+   the rules truly could not decide (it never blocks the report). If the report is already on Drive, the app
+   asks: **Replace the existing report** or **Save as a new version** (`_v2`, `_v3`, …). A file is shown as saved
+   only after Google Drive confirms it; if an upload fails, the report stays in the app and **↻ Retry** sends
    only the files that failed.
 
 Saved reports are found again with **🗂 Report History** in the side panel: choose the bank and the month, select a
@@ -93,10 +97,9 @@ report, then **👁 View** or **⬇ Get file** (a report is downloaded only when
 
 ## Notes
 - Reconciliation periods must be complete before they can be processed.
-- Generated reports are **not kept on this computer**: they stay in the app's memory until you download them or
-  save them on Google Drive. While a report is made, a temporary file is used in the session's own private
-  temporary folder and deleted at once.
-- Exception decisions (`output/.review_store.csv`) and the run log (`output/run_log.csv`) stay on this computer.
+- A finished report is kept in `output/<day|week|month>/` on this computer (so the Dashboard still has something
+  to show when Google Drive is not connected), besides being saved on Drive when that is set up.
+- The review decisions (`output/.review_store.csv`) and the run log (`output/run_log.csv`) stay on this computer.
 - Nothing is sent to the internet unless Google Drive is used.
 
 ## Google Drive setup

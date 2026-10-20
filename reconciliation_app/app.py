@@ -1,23 +1,26 @@
 """
 BANK RECONCILIATION APP (IremboPay)
 ===================================
-The screens of the app: a side panel + 6 steps. It contains no reconciliation rules: those are in engine.py
+The screens of the app: a side panel + 3 steps. It contains no reconciliation rules: those are in engine.py
 (common rules) and banks/<bank>.py (what is specific to one bank).
 
-Start it with "Start Reconciliation.command" (double-click). The uploaded files are read in memory and never kept;
-only the reports, the review decisions and the run log are saved (see engine.py).
+Start it with "Start Reconciliation.command" (double-click). Files from a bank's folders (or uploaded by hand)
+are read in memory and never kept; only the reports, the review decisions and the run log are saved (engine.py).
 
 How Streamlit works (to read this file): the whole file runs again from top to bottom after every click. What must
 be remembered between clicks is kept in `state` (st.session_state, section 4). The page is drawn in the order of
 the code: side panel, banner, then the screen of the current step.
 
 The page
-    ┌ side panel ──────────┐ ┌ banner: iremboPay | <Bank> Reconciliation ───────────────────────────┐
-    │ Reports              │ │ 1. Period 2. Upload 3. Check 4. Reconcile 5. Exception Resolution 6. Report & Export │
-    │ Exception decisions  │ │                                                                       │
-    │ Recent runs          │ │ the screen of the current step (or a saved report, read only)        │
-    │ Settings             │ │                                                                       │
-    └──────────────────────┘ └───────────────────────────────────────────────────────────────────────┘
+    ┌ side panel ──────────┐ ┌ banner: iremboPay | <Bank> Reconciliation ───────────┐
+    │ Reports              │ │ 1. Choose  2. Check  3. Results                      │
+    │ Recent runs          │ │                                                       │
+    │ Settings             │ │ the screen of the current step (or a saved report)   │
+    └──────────────────────┘ └───────────────────────────────────────────────────────┘
+
+Reconciliation runs automatically once Check passes (no separate "Reconcile" screen); the rules decide pending /
+duplicate / no invoice number by themselves (services/auto_review.py) - only the rare row they truly cannot
+decide is listed as "Needs a look" on Results, and it never blocks the report.
 
 CONTENTS
     1.  Loading the engine and the banks
@@ -28,12 +31,9 @@ CONTENTS
     6.  Side panel
     7.  Banner and step bar
     8.  A saved report (read only, opened from the side panel)
-    9.  Step 1 - Period
-    10. Step 2 - Upload
-    11. Step 3 - Check
-    12. Step 4 - Reconcile
-    13. Step 5 - Exception Resolution
-    14. Step 6 - Report & Export (quick export + custom report)
+    9.  Step 1 - Choose
+    10. Step 2 - Check (runs the reconciliation)
+    11. Step 3 - Results (quick export + custom report)
 """
 import base64
 import hashlib
@@ -41,6 +41,7 @@ import importlib
 import os
 import io
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -115,7 +116,7 @@ SIDE_BG = "url(data:image/svg+xml;base64," + base64.b64encode(b"""<svg xmlns="ht
 SIDE_MENU = "url(data:image/svg+xml;base64," + base64.b64encode(b"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 30">
 <g stroke="#99E378" stroke-width="3.4" stroke-linecap="round"><path d="M4 5h32"/><path d="M4 15h22"/><path d="M4 25h32"/></g>
 </svg>""").decode() + ")"
-STEPS = ["Choose", "Upload", "Check", "Reconcile", "Exception Resolution", "Results"]
+STEPS = ["Choose", "Check", "Results"]
 PREVIEW_TEAL = "#2B8A99"   # charts of the custom report preview: 4.0:1 on the light theme, 4.7:1 on the dark one
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -771,6 +772,9 @@ def run_reconciliation(acc):
             state.report_mem = {"name": res.report_file.name, "xlsx": res.report_file.read_bytes(),
                                 "pdf": pdf_report.report_pdf(res.report_file)}
             state.drive_save = None                     # a new report: not saved on Drive yet
+            local_copy = engine.report_path(BASE_DIR, period, bank)      # kept so the Dashboard can read it
+            local_copy.parent.mkdir(parents=True, exist_ok=True)         # locally even when Drive is not connected
+            shutil.copy2(res.report_file, local_copy)
         return res
     finally:
         if res is not None:
@@ -1032,7 +1036,7 @@ def slack_send_card(text: str, report_name: str, link, note: str = "", key: str 
 
 
 def save_to_drive_card(mem, skey="drive_save"):
-    """Save the report on Google Drive: the standard Excel + PDF (step 6), or the Excel alone of a No-Transaction
+    """Save the report on Google Drive: the standard Excel + PDF (Results), or the Excel alone of a No-Transaction
     Report (skey "no_tx_drive"). state[skey] remembers where it stands:
     {"ask": True, "existing": [...]}       the report is already on Drive: replace it or save a new version?
     {"mode", "existing", "results": [...]}  what Drive confirmed for each file (failed ones can be retried)
@@ -1288,6 +1292,191 @@ def found_files_for_period():
     return folder_files.find_files(period, bank, config.load_folders(), drive=client)
 
 
+def folder_settings_editor():
+    """A small form to set this bank's statements/exports folder (Choose, shown only when none is set yet): a
+    local path, or "drive:<folder ID>" for a Google Drive folder. Saved straight to folders.toml."""
+    spec = config.load_folders().get(bank.CODE) or {}
+    cur_stm = spec.get("statements").value if spec.get("statements") else ""
+    cur_exp = spec.get("exports").value if spec.get("exports") else ""
+    with st.container(border=True):
+        st.markdown(f'<div class="card-title">📁 Set the {bank.FULL_NAME} folders</div>', unsafe_allow_html=True)
+        st.caption("No folder is set yet for this bank, so the app cannot find its files by itself. Set them "
+                   "once here (a local folder path, or \"drive:<folder ID>\" for a Google Drive folder) - or use "
+                   "a file instead, below, without setting anything.")
+        f1, f2 = st.columns(2)
+        stm = f1.text_input(f"{bank.FULL_NAME} statements folder", value=cur_stm, key="folder_stm_input")
+        exp = f2.text_input("IremboPay exports folder", value=cur_exp, key="folder_exp_input")
+        if st.button("💾 Save folder settings", key="folder_save"):
+            config.save_folders(bank.CODE, stm, exp)
+            st.toast(f"Folders saved for {bank.FULL_NAME}", icon="📁")
+            st.rerun()
+
+
+def render_upload_section():
+    """"Use a file instead" (Choose): the bank statements + the IremboPay payment file, read in memory and never
+    saved. Returns the files accepted for the current period (used by Check instead of a found folder)."""
+    acc, rej = accepted_files()
+    # ---- what to upload (depends on the bank)
+    monday = engine.extra_monday(period, bank)
+    need_to = monday or period.last_day
+    day_before = " and ".join(bank.DAY_BEFORE_CURRENCIES)
+    per_currency = engine.option(bank, "ONE_FILE_PER_CURRENCY", True)
+    pay_types = engine.option(bank, "PAYMENT_FILE_TYPES", ["csv"])
+    pay_label = ", ".join(f".{t}" for t in pay_types)
+    types = ", ".join(f".{t}" for t in bank.FILE_TYPES)
+    st.markdown(f'<div class="card-title">📎 Use a file instead: upload for {period.name}</div>', unsafe_allow_html=True)
+
+    # ---- the two cards; each new file is read at once and listed below
+    u1, u2 = st.columns(2)
+    with u1.container(border=True, key="up_bank_card"):        # 1. bank statements: from this computer
+        st.markdown(f'<div class="up-head"><div class="up-tile">{UP_SVG["bank"]}</div><div>'
+                    f'<div class="up-title">1. Bank statement</div><div class="up-sub">{_esc(bank.FULL_NAME)}</div>'
+                    f'</div></div>', unsafe_allow_html=True)
+        bank_files = sorted((f for f in acc if f.kind == "bank"), key=lambda x: (x.currency != "RWF", x.currency, x.first))
+        if bank_files:                 # the files added fill the upload area: one card each, ✕ removes it
+            with st.container(height=380, border=False, key="up_bank_files"):
+                for row in range(0, len(bank_files), 2):
+                    for col, f in zip(st.columns(2, gap="small"), bank_files[row:row + 2]):
+                        with col.container(border=True, key=f"upf_{f.digest}"):
+                            days = (f"{f.first:%d/%m}" if f.first.date() == f.last.date()
+                                    else f"{f.first:%d/%m} – {f.last:%d/%m}")
+                            cur_cls = "usd" if f.currency == "USD" else "rwf"
+                            st.markdown(f'<div class="upf" title="{_esc(f.name)}"><div class="upf-ic {cur_cls}">'
+                                        f'{_esc(f.name.rsplit(".", 1)[-1].upper()[:4])}</div><div class="upf-t">'
+                                        f'<div class="upf-d">{days}</div><div class="upf-n"><span class="upf-c {cur_cls}">'
+                                        f'{_esc(f.currency or "")}</span> {f.rows:,} rows</div></div></div>',
+                                        unsafe_allow_html=True)
+                            if st.button("✕", key=f"upf_x_{f.digest}", type="tertiary"):
+                                state.files.pop(f.digest, None)
+                                state.result = None
+                                state.uploader_round += 1
+                                st.rerun()
+            st.markdown(f'<div class="upf-foot">{len(bank_files)} file{"s" if len(bank_files) != 1 else ""}'
+                        + (" · scroll to see them all" if len(bank_files) > 10 else "") + " · ✕ removes one</div>",
+                        unsafe_allow_html=True)
+        else:
+            # the upload area on its own: it grows so this card has no empty space under its text (section 3 CSS)
+            st.markdown(f'<div class="up-drop up-drop-fill">{UP_SVG["file"]}<div class="up-drop-title">Upload bank file'
+                        f'</div><div class="up-drop-sub">{"Excel" if set(bank.FILE_TYPES) <= {"xls", "xlsx"} else "Bank"}'
+                        f' format · {types}</div></div>', unsafe_allow_html=True)
+        bank_up = st.file_uploader(f"{bank.NAME} bank files ({types})", type=bank.FILE_TYPES,
+                                   accept_multiple_files=True, key=f"bank_{state.uploader_round}",
+                                   label_visibility="collapsed")
+        help_lines = [f"Upload the {' and '.join(bank.CURRENCIES) + ' ' if per_currency else ''}statements "
+                      f"covering <b>{period.start:%d/%m} to {need_to:%d/%m/%Y}</b>."]
+        if monday is not None:
+            help_lines.append(f"Include <b>Monday {monday:%d/%m}</b>: late weekend payments are posted on Monday.")
+        if day_before:
+            help_lines.append(f"Recommended: the {day_before} statement of <b>{period.day_before:%d/%m/%Y}</b> "
+                              "(the day before).")
+        # once files are added, only their cards and the button stay (an empty block keeps the button's place, so
+        # it stays level with "Add selected file" of the other card)
+        st.markdown(f'<div class="up-help">{"<br>".join(help_lines) if not bank_files else ""}</div>',
+                    unsafe_allow_html=True)
+
+    pay_up, from_drive = None, None
+    with u2.container(border=True, key="up_pay_card"):         # 2. IremboPay file: Google Drive or this computer
+        st.markdown(f'<div class="up-head"><div class="up-tile">{UP_SVG["cloud"]}</div><div>'
+                    f'<div class="up-title">2. IremboPay file</div><div class="up-sub">Choose a source</div>'
+                    f'</div></div>', unsafe_allow_html=True)
+        drive_ready = drive_client()[0] is not None and bool(config.load().irembopay_folder_id)
+        if "pay_source" not in state:                          # Google Drive first when it is set up
+            state.pay_source = "Google Drive" if drive_ready else "This computer"
+        source = st.segmented_control("IremboPay file from", ["Google Drive", "This computer"], key="pay_source",
+                                      label_visibility="collapsed") or "Google Drive"
+        if source == "This computer":
+            st.markdown(f'<div class="up-drop">{UP_SVG["file"]}<div class="up-drop-title">Upload IremboPay file</div>'
+                        f'<div class="up-drop-sub">{pay_label.replace(".", "").upper()} format · {pay_label}</div>'
+                        '</div>', unsafe_allow_html=True)
+            pay_up = st.file_uploader(f"IremboPay payment file ({pay_label})", type=pay_types,
+                                      accept_multiple_files=True, key=f"pay_{state.uploader_round}",
+                                      label_visibility="collapsed")
+            st.markdown(f'<div class="up-help">The IremboPay payment file for <b>{period.name}</b>.</div>',
+                        unsafe_allow_html=True)
+        else:
+            from_drive = irembopay_from_drive(pay_types)
+
+    with st.container(border=bool(acc or rej or state.read_errors)):   # what was added, and what was refused
+        new = ([(u.name, u.getvalue(), "bank") for u in bank_up or []]
+               + [(u.name, u.getvalue(), "payments") for u in pay_up or []] + ([from_drive] if from_drive else []))
+        if new:
+            with st.spinner("Reading the files…"):
+                for name, content, kind in new:
+                    digest = engine.file_digest(content)
+                    if digest in state.files:
+                        state.read_errors.append(f"{name}: the same file was already added.")
+                        continue
+                    try:
+                        if kind == "bank":
+                            state.files[digest] = engine.read_bank_file(name, content, bank)
+                        else:
+                            state.files[digest] = engine.read_payment_file(name, content, bank)
+                            state.toast = f"IremboPay file added: {name}"      # a short pop-up after the reload
+                    except engine.ReconError as err:
+                        state.read_errors.append(str(err))
+                    except Exception as err:
+                        state.read_errors.append(f"{name}: could not be read ({err}).")
+            state.uploader_round += 1          # empty the upload boxes; the files are listed below
+            state.result = None
+            st.rerun()
+
+        # ---- one summary line ----
+        if per_currency:
+            n_cur = {f"Bank {cur}": sum(f.kind == "bank" and f.currency == cur for f in acc) for cur in bank.CURRENCIES}
+        else:
+            n_cur = {"Bank statements": sum(f.kind == "bank" for f in acc)}
+        n_pay = sum(f.kind == "payments" for f in acc)
+        if acc:
+            line = (f"**{len(acc)} file(s) added** · "
+                    + " · ".join(f"{label}: **{n}**" for label, n in n_cur.items())
+                    + f" · Payment file: **{n_pay}**")
+            if all(n_cur.values()) and n_pay:
+                st.success(line, icon="✅")
+            else:
+                st.warning(line, icon="⚠️")
+
+        # ---- added files: one compact table (select rows to remove them) ----
+        if acc:
+            ordered = sorted(acc, key=lambda x: (x.kind, x.currency, x.first))
+            table = pd.DataFrame({
+                "File": [f.name for f in ordered],
+                "Type": ["Bank" if f.kind == "bank" else "Payments" for f in ordered],
+                "Currency": [f.currency or "–" for f in ordered],
+                "From": [f.first.date() for f in ordered],
+                "To": [f.last.date() for f in ordered],
+                "Rows": [f.rows for f in ordered]})
+            event = st.dataframe(
+                table, hide_index=True, width="stretch", height=min(38 + 35 * len(table), 300),
+                on_select="rerun", selection_mode="multi-row", key=f"files_{state.uploader_round}",
+                column_config={"File": st.column_config.TextColumn("File", width="large"),
+                               "From": st.column_config.DateColumn("From", format="DD/MM/YYYY"),
+                               "To": st.column_config.DateColumn("To", format="DD/MM/YYYY"),
+                               "Rows": st.column_config.NumberColumn("Rows", format="localized")})
+            picked_rows = event.selection.rows
+            if picked_rows and st.button(f"🗑 Remove {len(picked_rows)} selected file(s)"):
+                for i in picked_rows:
+                    state.files.pop(ordered[i].digest, None)
+                state.result = None
+                state.uploader_round += 1
+                st.rerun()
+            elif not picked_rows:
+                st.caption("Tick a row on the left to remove a file.")
+
+        # ---- ignored files: folded away ----
+        ignored = [m.split(": ", 1) if ": " in m else [m, ""] for m in state.read_errors + rej]
+        if ignored:
+            with st.expander(f"⛔ {len(ignored)} file(s) ignored", expanded=False):
+                st.dataframe(pd.DataFrame(ignored, columns=["File", "Why"]), hide_index=True, width="stretch",
+                             column_config={"Why": st.column_config.TextColumn("Why", width="large")})
+                if st.button(f"🗑 Remove all {len(ignored)} ignored file(s)"):
+                    accepted_ids = {f.digest for f in acc}
+                    for digest in [d for d in state.files if d not in accepted_ids]:
+                        state.files.pop(digest)         # files outside the period
+                    state.read_errors = []              # wrong files and files added twice
+                    st.rerun()
+    return acc
+
+
 def files_for_run():
     """The files to reconcile with: folder-found files when the bank has folders, else the uploaded ones."""
     if bank_has_folders():
@@ -1297,7 +1486,7 @@ def files_for_run():
     return acc
 
 
-# ---- key figures + summary tables (step 5 and a saved report)
+# ---- key figures + summary tables (Results, and a saved report)
 def _count(tables, title, cur=None):
     """(transactions, amount, %) of one table: the total row, or the row of one currency."""
     t = tables[title]
@@ -1306,8 +1495,8 @@ def _count(tables, title, cur=None):
 
 
 def render_kpis(tables):
-    """The 5 key figures at the top: processed, received %, SLA violated, pending, duplicate (the rows reviewed in
-    Exception Resolution are already in the table their decision chose: they are not counted again)."""
+    """The 5 key figures at the top: processed, received %, SLA violated, pending, duplicate (the rows the rules
+    decided automatically are already in the table their decision chose: they are not counted again)."""
     processed, _, _ = _count(tables, "Overall processed payments")
     rec_n, _, rec_pct = _count(tables, "Overall notifications received by Irembo")
     sla_n, _, sla_pct = _count(tables, "SLA Violated")
@@ -1381,7 +1570,7 @@ def render_summary(blocks, report_type, merchants=None):
         _show_merchants(merchants.get(main[1]))
 
 
-# ---- short figures (step 4) and the result of the exception resolution (steps 5 and 6)
+# ---- short figures (Results)
 def short_amount(value):
     """68,166,357 -> '68.2M', 470,064 -> '470K', 950 -> '950'."""
     if abs(value) >= 1e9:
@@ -1393,13 +1582,7 @@ def short_amount(value):
     return f"{value:,.0f}"
 
 
-def result_line(counts: dict) -> str:
-    """{'Pending notification': 6, 'Paid with other channel': 9} -> '9 Paid with other channel · 6 Pending
-    notification' (largest first)."""
-    return " · ".join(f"{n:,} {what}" for what, n in sorted(counts.items(), key=lambda x: -x[1]) if n)
-
-
-# ---- custom report (step 6): the choices are widgets with keys "cr_..."; a report type fills them in
+# ---- custom report (Results): the choices are widgets with keys "cr_..."; a report type fills them in
 def apply_report_type():
     """A report type was chosen: tick its sections and set how each one is shown."""
     preset = engine.REPORT_TYPES[state.get("cr_type") or "Full Report"][1]
@@ -1617,11 +1800,9 @@ if not viewing:
         'settings': 'Settings'}.get(PAGE, _h(bank.FULL_NAME) + ' Reconciliation')}</h1></div></div>""",
                 unsafe_allow_html=True)
 if not viewing and PAGE == "reconciliation":
-    # folders instead of uploads: Upload, Reconcile and Exception Resolution are skipped, so the bar shows 3 steps
-    shown = [(i, name) for i, name in enumerate(STEPS) if not bank_has_folders() or i not in (1, 3, 4)]
     st.markdown('<div class="steps">' + "".join(
         f'<span class="step {"done" if i + 1 < state.step else "now" if i + 1 == state.step else ""}">'
-        f'{"✓ " if i + 1 < state.step else ""}{n}. {name}</span>' for n, (i, name) in enumerate(shown, 1)) + "</div>",
+        f'{"✓ " if i + 1 < state.step else ""}{i + 1}. {name}</span>' for i, name in enumerate(STEPS)) + "</div>",
                 unsafe_allow_html=True)
 
 # the period chosen in step 1 (used by every step)
@@ -1725,26 +1906,34 @@ def _delta(ch, *, pct=True, lower_is_better=False, points=False):
 
 
 def dashboard_facts(client, root):
-    """The facts of every monthly report on Drive (first version), each report read once per session
-    (services/dashboard.py). -> (facts to use, [problems])."""
-    cached = state.get("history_index")
-    if not cached or cached[0] != root:
-        with st.spinner("Reading Reconciliation Reports on Google Drive…"):
-            state.history_index = (root, report_history.drive_index(client, root))
-            state.history_index_at = pd.Timestamp.now()
-    records = [r for r in dashboard.report_records(state.history_index[1].records)
+    """The facts of every monthly/weekly report, from Google Drive (when connected: client and root are set) and
+    from the reports still kept locally in output/, merged without duplicates (services/dashboard.report_records:
+    the same bank, kind and period counted once; Drive's copy wins a tie). Each report is read once per session.
+    -> (facts to use, [problems])."""
+    drive_records = []
+    if client is not None and root:
+        cached = state.get("history_index")
+        if not cached or cached[0] != root:
+            with st.spinner("Reading Reconciliation Reports on Google Drive…"):
+                state.history_index = (root, report_history.drive_index(client, root))
+                state.history_index_at = pd.Timestamp.now()
+        drive_records = state.history_index[1].records
+    local_records = report_history.local_records(BASE_DIR, None)
+    records = [r for r in dashboard.report_records(drive_records + local_records)
                if r.kind in ("month", "week")]           # weekly reports are used too (dashboard.combine sorts it out)
     cache = state.setdefault("dash_facts", {})
-    key = lambda r: (r.file_id, str(r.modified))       # a replaced report (same file, new content) is read again
+    # a replaced report (same file, new content) is read again; local and Drive copies never share a key
+    key = lambda r: (r.source, r.file_id or str(r.path), str(r.modified))
     todo = [r for r in records if key(r) not in cache]
     if todo:
-        bar = st.progress(0.0, text=f"Reading {len(todo)} report{'s' if len(todo) > 1 else ''} from Google Drive…")
+        bar = st.progress(0.0, text=f"Reading {len(todo)} report{'s' if len(todo) > 1 else ''}…")
         for i, r in enumerate(todo, 1):
             try:
-                cache[key(r)] = report_history.read_drive_facts(client, r, state.session_folder)
-            except (DriveError, engine.ReconError, KeyError, ValueError) as err:
+                cache[key(r)] = (report_history.read_drive_facts(client, r, state.session_folder)
+                                 if r.source == "Google Drive" else report_history.read_local_facts(r))
+            except (DriveError, engine.ReconError, KeyError, ValueError, OSError) as err:
                 cache[key(r)] = f"{r.name}: {err}"
-            bar.progress(i / len(todo), text=f"Reading reports from Google Drive… {i} of {len(todo)}")
+            bar.progress(i / len(todo), text=f"Reading reports… {i} of {len(todo)}")
         bar.empty()
     facts = [f for r in records if isinstance(cache.get(key(r)), list) for f in cache[key(r)]]
     return dashboard.combine(facts), [cache[key(r)] for r in records if isinstance(cache.get(key(r)), str)]
@@ -1787,21 +1976,22 @@ def dashboard_page():
     st.markdown("<style>.block-container {max-width: 1600px;}</style>", unsafe_allow_html=True)   # this page is wide
     client, problem = drive_client()
     root = config.load().reports_root_folder_id
-    if client is None or not root:
-        problem = problem or "No reports folder is set (reports_root_folder_id in drive_settings.toml)."
-    if problem:
-        st.markdown(f'<div class="rh-empty">☁️ {_esc(problem)}</div>', unsafe_allow_html=True)
-        return
+    drive_on = client is not None and bool(root)
     try:
-        facts, errors = dashboard_facts(client, root)
+        facts, errors = dashboard_facts(client if drive_on else None, root if drive_on else None)
     except DriveError as err:
-        st.markdown(f'<div class="rh-empty">☁️ {_esc(str(err))}</div>', unsafe_allow_html=True)
-        return
+        drive_on = False
+        facts, errors = dashboard_facts(None, None)
+        errors = [f"Google Drive: {err}"] + errors
+    if not drive_on:
+        st.caption(f"☁️ Google Drive not connected ({problem or 'no reports folder set'}) - showing the reports "
+                   f"kept locally in {_esc(BASE_DIR / 'output')} only.")
     for e in errors:
         st.warning(f"Left out (could not be read): {e}", icon="⚠️")
     if not facts:
-        st.markdown('<div class="rh-empty">📊 No monthly or weekly report on Google Drive yet.<br>Reports saved with '
-                    '<b>☁ Save to Google Drive</b> appear here.</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="rh-empty">📊 No monthly or weekly report found.<br>Save one with '
+                    f'<b>☁ Save to Google Drive</b>, or check that reports exist in '
+                    f'<code>{_esc(BASE_DIR / "output")}</code>.</div>', unsafe_allow_html=True)
         return
 
     # ---- the filters (pills at the top right): they apply to every figure, chart and table of the page.
@@ -2391,41 +2581,8 @@ if PAGE == "settings":
     st.stop()
 
 
-# ---- step 5, every bank: the IremboPay checkout check (integrations/irembopay_checkout.py)
-CHECKOUT_BANKS = set(engine.BANKS)           # the banks whose not-found invoices are looked up on IremboPay: all
-CHECK_COL = "IremboPay check"
-# what an answer fills in an empty Report table cell: (Report table, payment status in the report; "" = the usual)
-CHECK_FILL = {"Paid": ("Paid with other channel", ""), "Expired": ("Pending notification", "EXPIRED"),
-              "Open, not paid yet": ("Pending notification", "NEW")}     # "Not an IremboPay invoice": left empty
-
-
-def checkout_progress(checker, invoices):
-    """The progress line of the background check. While it runs, it refreshes itself every 2 seconds; when every
-    invoice is answered, the page is redrawn once so the column shows all the answers."""
-    done, total, failed = checker.progress(invoices)
-    running = done < total
-
-    @st.fragment(run_every=2 if running else None)
-    def line():
-        d, t, f = checker.progress(invoices)
-        if d < t:
-            st.caption(f"🔎 IremboPay check: {d} of {t} invoices checked… (you can keep reviewing)")
-            return
-        if state.get("checkout_shown") != (tuple(invoices), d):   # everything answered: show it in the table once
-            state.checkout_shown = (tuple(invoices), d)
-            st.rerun()
-        st.caption(f"🔎 IremboPay check: done ({t} invoice{'s' if t != 1 else ''})"
-                   + (f" · {f} could not be checked" if f else ""))
-        if f and st.button(f"↻ Check again ({f})", key="checkout_retry"):
-            checker.retry_failed(invoices)
-            state.checkout_shown = None
-            st.rerun()
-
-    line()
-
-
 # =====================================================================================================================
-# 9. STEP 1 - PERIOD: the bank, day / week / month, the date, and the optional comparison
+# 9. STEP 1 - CHOOSE: the bank, day / week / month, the date, and the optional comparison
 #    (+ the No-Transaction Report: "Generate" first opens its preview page, the Excel is downloaded from there)
 # =====================================================================================================================
 def render_no_tx_preview(period, bank, made_at, previous=None):
@@ -2514,7 +2671,7 @@ if state.step == 1 and state.get("no_tx_preview"):
         st.download_button("⬇ Download Excel report", data=mem["xlsx"], file_name=mem["name"], mime=XLSX_MIME,
                            type="primary", key="no_tx_download")
 
-    # ---- ☁ Save to Google Drive and 💬 Send to Slack: the same as step 6 (Excel only: there is no PDF here)
+    # ---- ☁ Save to Google Drive and 💬 Send to Slack: the same as Results (Excel only: there is no PDF here)
     with st.container(border=True):
         st.markdown('<div class="card-title">☁ Save to Google Drive</div>', unsafe_allow_html=True)
         save_to_drive_card(mem, skey="no_tx_drive")
@@ -2531,7 +2688,10 @@ if state.step == 1 and state.get("no_tx_preview"):
 
 elif state.step == 1:
     with st.container(border=True):
-        st.markdown('<div class="card-title">① Choose the period</div>', unsafe_allow_html=True)
+        st.markdown('<div class="card-title">① Choose the bank and period</div>', unsafe_allow_html=True)
+        st.caption("How it works: pick the bank and period, the app finds the files itself (set a folder below "
+                   "once), Check lists what it found, then Reconcile runs by itself - only the rare row the "
+                   "rules truly cannot decide needs a look, on Results, and it never blocks the report.")
         if MANY_BANKS:
             st.segmented_control("Bank", list(engine.BANKS), key="bank_code", selection_mode="single",
                                  format_func=engine.bank_name)
@@ -2551,7 +2711,16 @@ elif state.step == 1:
         if not_ended:
             st.error(not_ended.replace("\n", "  \n"), icon="⛔")
 
-        # ---- comparison: the previous report of this bank must exist (on Drive, in output/, or uploaded) or be made
+        # ---- files: a folder found for this bank, or "Use a file instead" (always available, so nobody is blocked)
+        has_folders = bank_has_folders()
+        if has_folders:
+            st.checkbox("Use a file instead of the folder for this run", key="use_upload",
+                        help="Upload the files by hand this once, instead of the folder set for this bank.")
+        else:
+            state.use_upload = True
+    if not has_folders:
+        folder_settings_editor()
+    with st.container(border=True):
         prev = period.previous()
         st.checkbox(f"Compare with previous period ({prev.name})", key="compare",
                     help="Adds a 'VS prev' column to each table. When not ticked, the report is unchanged.")
@@ -2612,200 +2781,25 @@ elif state.step == 1:
                                "previous": previous, "compared_with": compared_with, "problem": problem}
             state.no_tx_drive = None
             st.rerun()
-    elif c3.button("Next: check →" if bank_has_folders() else "Next: upload files →", type="primary",
-                   width="stretch", disabled=not ready,
+    elif c3.button("Next: check →", type="primary", width="stretch", disabled=not ready,
                    help=None if ready else "This period has not ended yet" if not_ended
                    else "Add the previous report first, or untick the comparison"):
         state.run_error = None
-        go(3 if bank_has_folders() else 2)
+        go(2)
 
 # =====================================================================================================================
-# 10. STEP 2 - UPLOAD: the bank statements + the IremboPay payment file (read in memory, never saved)
+# 10. STEP 2 - CHECK: files (a folder, or "Use a file instead"), the checklist, then "Run reconciliation"
 # =====================================================================================================================
 elif state.step == 2:
-    acc, rej = accepted_files()
-    # ---- what to upload (depends on the bank)
-    monday = engine.extra_monday(period, bank)
-    need_to = monday or period.last_day
-    day_before = " and ".join(bank.DAY_BEFORE_CURRENCIES)
-    per_currency = engine.option(bank, "ONE_FILE_PER_CURRENCY", True)
-    pay_types = engine.option(bank, "PAYMENT_FILE_TYPES", ["csv"])
-    pay_label = ", ".join(f".{t}" for t in pay_types)
-    types = ", ".join(f".{t}" for t in bank.FILE_TYPES)
-    st.markdown(f'<div class="card-title">② Upload the files for {period.name}</div>', unsafe_allow_html=True)
-
-    # ---- the two cards; each new file is read at once and listed below
-    u1, u2 = st.columns(2)
-    with u1.container(border=True, key="up_bank_card"):        # 1. bank statements: from this computer
-        st.markdown(f'<div class="up-head"><div class="up-tile">{UP_SVG["bank"]}</div><div>'
-                    f'<div class="up-title">1. Bank statement</div><div class="up-sub">{_esc(bank.FULL_NAME)}</div>'
-                    f'</div></div>', unsafe_allow_html=True)
-        bank_files = sorted((f for f in acc if f.kind == "bank"), key=lambda x: (x.currency != "RWF", x.currency, x.first))
-        if bank_files:                 # the files added fill the upload area: one card each, ✕ removes it
-            with st.container(height=380, border=False, key="up_bank_files"):
-                for row in range(0, len(bank_files), 2):
-                    for col, f in zip(st.columns(2, gap="small"), bank_files[row:row + 2]):
-                        with col.container(border=True, key=f"upf_{f.digest}"):
-                            days = (f"{f.first:%d/%m}" if f.first.date() == f.last.date()
-                                    else f"{f.first:%d/%m} – {f.last:%d/%m}")
-                            cur_cls = "usd" if f.currency == "USD" else "rwf"
-                            st.markdown(f'<div class="upf" title="{_esc(f.name)}"><div class="upf-ic {cur_cls}">'
-                                        f'{_esc(f.name.rsplit(".", 1)[-1].upper()[:4])}</div><div class="upf-t">'
-                                        f'<div class="upf-d">{days}</div><div class="upf-n"><span class="upf-c {cur_cls}">'
-                                        f'{_esc(f.currency or "")}</span> {f.rows:,} rows</div></div></div>',
-                                        unsafe_allow_html=True)
-                            if st.button("✕", key=f"upf_x_{f.digest}", type="tertiary"):
-                                state.files.pop(f.digest, None)
-                                state.result = None
-                                state.uploader_round += 1
-                                st.rerun()
-            st.markdown(f'<div class="upf-foot">{len(bank_files)} file{"s" if len(bank_files) != 1 else ""}'
-                        + (" · scroll to see them all" if len(bank_files) > 10 else "") + " · ✕ removes one</div>",
-                        unsafe_allow_html=True)
-        else:
-            # the upload area on its own: it grows so this card has no empty space under its text (section 3 CSS)
-            st.markdown(f'<div class="up-drop up-drop-fill">{UP_SVG["file"]}<div class="up-drop-title">Upload bank file'
-                        f'</div><div class="up-drop-sub">{"Excel" if set(bank.FILE_TYPES) <= {"xls", "xlsx"} else "Bank"}'
-                        f' format · {types}</div></div>', unsafe_allow_html=True)
-        bank_up = st.file_uploader(f"{bank.NAME} bank files ({types})", type=bank.FILE_TYPES,
-                                   accept_multiple_files=True, key=f"bank_{state.uploader_round}",
-                                   label_visibility="collapsed")
-        help_lines = [f"Upload the {' and '.join(bank.CURRENCIES) + ' ' if per_currency else ''}statements "
-                      f"covering <b>{period.start:%d/%m} to {need_to:%d/%m/%Y}</b>."]
-        if monday is not None:
-            help_lines.append(f"Include <b>Monday {monday:%d/%m}</b>: late weekend payments are posted on Monday.")
-        if day_before:
-            help_lines.append(f"Recommended: the {day_before} statement of <b>{period.day_before:%d/%m/%Y}</b> "
-                              "(the day before).")
-        # once files are added, only their cards and the button stay (an empty block keeps the button's place, so
-        # it stays level with "Add selected file" of the other card)
-        st.markdown(f'<div class="up-help">{"<br>".join(help_lines) if not bank_files else ""}</div>',
-                    unsafe_allow_html=True)
-
-    pay_up, from_drive = None, None
-    with u2.container(border=True, key="up_pay_card"):         # 2. IremboPay file: Google Drive or this computer
-        st.markdown(f'<div class="up-head"><div class="up-tile">{UP_SVG["cloud"]}</div><div>'
-                    f'<div class="up-title">2. IremboPay file</div><div class="up-sub">Choose a source</div>'
-                    f'</div></div>', unsafe_allow_html=True)
-        drive_ready = drive_client()[0] is not None and bool(config.load().irembopay_folder_id)
-        if "pay_source" not in state:                          # Google Drive first when it is set up
-            state.pay_source = "Google Drive" if drive_ready else "This computer"
-        source = st.segmented_control("IremboPay file from", ["Google Drive", "This computer"], key="pay_source",
-                                      label_visibility="collapsed") or "Google Drive"
-        if source == "This computer":
-            st.markdown(f'<div class="up-drop">{UP_SVG["file"]}<div class="up-drop-title">Upload IremboPay file</div>'
-                        f'<div class="up-drop-sub">{pay_label.replace(".", "").upper()} format · {pay_label}</div>'
-                        '</div>', unsafe_allow_html=True)
-            pay_up = st.file_uploader(f"IremboPay payment file ({pay_label})", type=pay_types,
-                                      accept_multiple_files=True, key=f"pay_{state.uploader_round}",
-                                      label_visibility="collapsed")
-            st.markdown(f'<div class="up-help">The IremboPay payment file for <b>{period.name}</b>.</div>',
-                        unsafe_allow_html=True)
-        else:
-            from_drive = irembopay_from_drive(pay_types)
-
-    with st.container(border=bool(acc or rej or state.read_errors)):   # what was added, and what was refused
-        new = ([(u.name, u.getvalue(), "bank") for u in bank_up or []]
-               + [(u.name, u.getvalue(), "payments") for u in pay_up or []] + ([from_drive] if from_drive else []))
-        if new:
-            with st.spinner("Reading the files…"):
-                for name, content, kind in new:
-                    digest = engine.file_digest(content)
-                    if digest in state.files:
-                        state.read_errors.append(f"{name}: the same file was already added.")
-                        continue
-                    try:
-                        if kind == "bank":
-                            state.files[digest] = engine.read_bank_file(name, content, bank)
-                        else:
-                            state.files[digest] = engine.read_payment_file(name, content, bank)
-                            state.toast = f"IremboPay file added: {name}"      # a short pop-up after the reload
-                    except engine.ReconError as err:
-                        state.read_errors.append(str(err))
-                    except Exception as err:
-                        state.read_errors.append(f"{name}: could not be read ({err}).")
-            state.uploader_round += 1          # empty the upload boxes; the files are listed below
-            state.result = None
-            st.rerun()
-
-        # ---- one summary line ----
-        if per_currency:
-            n_cur = {f"Bank {cur}": sum(f.kind == "bank" and f.currency == cur for f in acc) for cur in bank.CURRENCIES}
-        else:
-            n_cur = {"Bank statements": sum(f.kind == "bank" for f in acc)}
-        n_pay = sum(f.kind == "payments" for f in acc)
-        if acc:
-            line = (f"**{len(acc)} file(s) added** · "
-                    + " · ".join(f"{label}: **{n}**" for label, n in n_cur.items())
-                    + f" · Payment file: **{n_pay}**")
-            if all(n_cur.values()) and n_pay:
-                st.success(line, icon="✅")
-            else:
-                st.warning(line, icon="⚠️")
-
-        # ---- added files: one compact table (select rows to remove them) ----
-        if acc:
-            ordered = sorted(acc, key=lambda x: (x.kind, x.currency, x.first))
-            table = pd.DataFrame({
-                "File": [f.name for f in ordered],
-                "Type": ["Bank" if f.kind == "bank" else "Payments" for f in ordered],
-                "Currency": [f.currency or "–" for f in ordered],
-                "From": [f.first.date() for f in ordered],
-                "To": [f.last.date() for f in ordered],
-                "Rows": [f.rows for f in ordered]})
-            event = st.dataframe(
-                table, hide_index=True, width="stretch", height=min(38 + 35 * len(table), 300),
-                on_select="rerun", selection_mode="multi-row", key=f"files_{state.uploader_round}",
-                column_config={"File": st.column_config.TextColumn("File", width="large"),
-                               "From": st.column_config.DateColumn("From", format="DD/MM/YYYY"),
-                               "To": st.column_config.DateColumn("To", format="DD/MM/YYYY"),
-                               "Rows": st.column_config.NumberColumn("Rows", format="localized")})
-            picked_rows = event.selection.rows
-            if picked_rows and st.button(f"🗑 Remove {len(picked_rows)} selected file(s)"):
-                for i in picked_rows:
-                    state.files.pop(ordered[i].digest, None)
-                state.result = None
-                state.uploader_round += 1
-                st.rerun()
-            elif not picked_rows:
-                st.caption("Tick a row on the left to remove a file.")
-
-        # ---- ignored files: folded away ----
-        ignored = [m.split(": ", 1) if ": " in m else [m, ""] for m in state.read_errors + rej]
-        if ignored:
-            with st.expander(f"⛔ {len(ignored)} file(s) ignored", expanded=False):
-                st.dataframe(pd.DataFrame(ignored, columns=["File", "Why"]), hide_index=True, width="stretch",
-                             column_config={"Why": st.column_config.TextColumn("Why", width="large")})
-                if st.button(f"🗑 Remove all {len(ignored)} ignored file(s)"):
-                    accepted_ids = {f.digest for f in acc}
-                    for digest in [d for d in state.files if d not in accepted_ids]:
-                        state.files.pop(digest)         # files outside the period
-                    state.read_errors = []              # wrong files and files added twice
-                    st.rerun()
-    has_bank = any(f.kind == "bank" for f in acc)
-    has_pay = any(f.kind == "payments" for f in acc)
-    c1, _, c3 = st.columns([1, 2, 1.3])
-    if c1.button("← Back", width="stretch"):
-        go(1)
-    if c3.button("Next: check →", type="primary", width="stretch", disabled=not (has_bank and has_pay),
-                 help=None if has_bank and has_pay else "Add at least one bank file and the payment file"):
-        state.run_error = None
-        go(3)
-
-# =====================================================================================================================
-# 11. STEP 3 - CHECK: the checklist (engine.check_period), then "Run reconciliation"
-# =====================================================================================================================
-elif state.step == 3:
-    from_folders = bank_has_folders()
-    if from_folders:
+    if state.get("use_upload") or not bank_has_folders():
+        acc = render_upload_section()
+        found = None
+    else:
         found = found_files_for_period()
         acc = folder_files.all_files(found) if found is not None else []
-    else:
-        acc, _ = accepted_files()
-        found = None
     chk = engine.check_period(period, acc, bank)
     with st.container(border=True):
-        st.markdown(f'<div class="card-title">③ Check: {period.name}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="card-title">② Check: {period.name}</div>', unsafe_allow_html=True)
         if found is not None:
             for line in folder_files.describe(found):
                 st.markdown(f"📁 {line}")
@@ -2817,21 +2811,25 @@ elif state.step == 3:
             st.warning(w, icon="⚠️")
         if chk.blocking:
             st.error("Run is blocked until the missing bank files are added."
-                     + (" Check the folder." if from_folders else " Go back to Upload."), icon="⛔")
+                     + (" Check the folder, or use a file instead (Choose)." if found is not None
+                        else " Add the missing file above."), icon="⛔")
         if compare:
             st.caption(f"The report will be compared with {period.previous().name}.")
         if state.run_error:
             st.error(state.run_error, icon="⚠️")
     c1, _, c3 = st.columns([1, 1.5, 1.8])
     if c1.button("← Back", width="stretch"):
-        go(1 if from_folders else 2)
+        go(1)
     if c3.button("▶  Run reconciliation", type="primary", width="stretch", disabled=bool(chk.blocking)):
         try:
             with st.spinner(f"Reconciling {period.name}…"):
                 state.result = run_reconciliation(acc)
             state.run_error = None
-            # straight to Results; only the rare row the rules truly can't decide goes to Exception Resolution
-            go(5 if state.result.stopped_for_review else 6)
+            if state.result.stopped_for_review:    # the rules could not decide a row automatically: this should
+                state.run_error = ("A row could not be classified automatically. This should not happen - "
+                                   "please tell a developer.")
+            else:
+                go(3)
         except engine.ReconError as err:
             state.run_error = str(err)
             st.rerun()
@@ -2840,207 +2838,16 @@ elif state.step == 3:
             st.rerun()
 
 # =====================================================================================================================
-# 12. STEP 4 - RECONCILE: the result of the matching (bank rows, matched, not found, amounts), before any decision
-# =====================================================================================================================
-elif state.step == 4:
-    res = state.result
-    if res is None:
-        go(3)
-    with st.container(border=True):
-        st.markdown(f'<div class="card-title">✅ Reconciliation completed · {bank.NAME.replace("&", "&amp;")} · '
-                    f'{period.name[0].upper() + period.name[1:]}</div>', unsafe_allow_html=True)
-        st.caption(f"Reconciled on {res.ran_at:%A %d/%m/%Y} at {res.ran_at:%H:%M}")
-        amounts = [f"{cur} {short_amount(d['amount'])}" for cur, d in res.by_currency.items()]
-        k = st.columns(4, border=True)
-        k[0].metric("Bank rows", f"{res.bank_rows:,}")
-        k[0].caption(f"payments of {period.name}")
-        k[1].metric("Matched", f"{res.matched:,}")
-        k[1].caption(f"{res.matched / res.bank_rows:.2%}" if res.bank_rows else "–")
-        k[2].metric("Not found", f"{res.not_found:,}")
-        k[2].caption("classified automatically" if res.not_found and not res.not_reviewed
-                     else "exceptions to resolve" if res.not_found else "none")
-        k[3].metric("Amount", amounts[0] if amounts else "–")
-        k[3].caption(" · ".join(amounts[1:]) or "")
-        st.markdown("  \n".join(f"**{cur}** · {d['rows']:,} rows · {d['matched']:,} matched · "
-                                f"{d['not_found']:,} not found" for cur, d in res.by_currency.items()))
-        if res.not_found == 0:
-            st.success("All rows matched. No exceptions to resolve.", icon="✅")
-        elif not res.not_reviewed:
-            st.success(f"{res.not_found:,} row(s) not found in IremboPay were classified automatically "
-                       "(no invoice number, or the IremboPay checkout check).", icon="✅")
-        if state.get("needs_a_look"):
-            n = len(state.needs_a_look)
-            with st.expander(f"👀 Needs a look later ({n}): could not check these invoices on IremboPay's own "
-                             "payment page", expanded=False):
-                st.caption("They are already counted as Pending, and the report was made normally: nothing "
-                          "waited for this. Check them again later, once IremboPay's page or the internet "
-                          "connection is back.")
-                st.write(", ".join(state.needs_a_look))
-    c1, _, c3 = st.columns([1, 1.5, 1.8])
-    if c1.button("← Back", width="stretch"):
-        go(3)
-    if res.not_reviewed:
-        n = res.not_reviewed
-        if c3.button(f"Review & Resolve {n:,} Exception{'s' if n > 1 else ''} →", type="primary", width="stretch"):
-            go(5)
-    elif c3.button("Next: download →", type="primary", width="stretch"):
-        go(6)                                   # nothing left to resolve: Exception Resolution is skipped
-
-# =====================================================================================================================
-# 13. STEP 5 - EXCEPTION RESOLUTION: the rows not found in IremboPay; "Save decisions" saves and runs again
-# =====================================================================================================================
-elif state.step == 5:
-    res = state.result
-    if res is None:
-        go(3)
-    with st.container(border=True):
-        reviewed = res.not_found - res.not_reviewed
-        st.markdown(f'<div class="card-title">⑤ Exception Resolution: the invoices not found in IremboPay '
-                    f'<span class="muted">({reviewed} of {res.not_found} resolved)</span></div>', unsafe_allow_html=True)
-        if res.not_found == 0:
-            st.success("Nothing to resolve: every bank payment was found in IremboPay.", icon="✅")
-        else:
-            st.progress(reviewed / res.not_found)
-            with st.expander("How to choose the Report table", expanded=res.not_reviewed > 0):
-                st.markdown(
-                    "| Report table | Use it when |\n|---|---|\n"
-                    f"| **Notification received** | paid on {bank.NAME} and recorded in IremboPay |\n"
-                    "| **Pending notification** | the invoice is still NEW in IremboPay |\n"
-                    "| **Paid with other channel** | IremboPay says it was paid another way (type the provider if known) |\n"
-                    "| **Failed notification** | the invoice is not in IremboPay at all |\n"
-                    "| **Exclude** | not an Irembo payment |\n\n"
-                    "Review and confirm all exception decisions before saving.  \n"
-                    "*Suggested from* indicates a previously recorded decision requiring confirmation.")
-
-            # ---- the review table: the bank columns are read only, the decision columns can be edited
-            paid_col, amount_col = bank.COLUMNS["payment_date"], bank.COLUMNS["amount"]
-            shown = ["Reviewed (Yes/No)", "Report table", paid_col, "Currency", amount_col, "invoice_number",
-                     "Bank channel", engine.SUGGEST_COL, "SLA violated (Yes/No)", "Correct invoice number",
-                     "payment_status", "payment_provider", "paid_at (YYYY-MM-DD HH:MM:SS)", "Merchant name", "Comment"]
-            DASH = "—"                          # shown for "not chosen yet" in the dropdown columns
-            DROPDOWNS = ["Reviewed (Yes/No)", "Report table", "SLA violated (Yes/No)"]
-            table = res.review.copy()
-            # ---- every bank: what IremboPay's checkout says about each invoice, looked up in the background and only
-            #      shown (read only, never saved, never fills a decision): the reviewer concludes
-            checking = bank.CODE in CHECKOUT_BANKS
-            if checking:
-                checker = state.get("checkout")
-                if checker is None:
-                    checker = state.checkout = irembopay_checkout.Checker()
-                invoices = table["invoice_number"].fillna("").astype(str).tolist()
-                checker.add(invoices)
-                table[CHECK_COL] = [checker.answer(i) for i in invoices]
-                shown = shown[:shown.index("invoice_number") + 1] + [CHECK_COL] + shown[shown.index("invoice_number") + 1:]
-                checkout_progress(checker, invoices)
-                # the empty Report table cells are filled from the answer (a choice already made, by you or from an
-                # earlier decision, is never replaced; you can change any row before saving)
-                filled = {}
-                empty = table["Report table"].fillna("").astype(str).str.strip().eq("")
-                keeps = engine.option(bank, "PENDING_STATUSES", {"NEW"})   # Ecobank keeps EXPIRED; I&M / BOA: NEW
-                for idx, answer in table[CHECK_COL].items():
-                    if empty[idx] and answer in CHECK_FILL:
-                        choice, status = CHECK_FILL[answer]
-                        if status and choice == "Pending notification" and status not in keeps:
-                            status = ""                    # this bank's pending rule writes NEW (unchanged)
-                        table.loc[idx, "Report table"] = choice
-                        if status:
-                            table.loc[idx, "payment_status"] = status
-                        filled[answer] = filled.get(answer, 0) + 1
-                if filled:
-                    st.caption("Filled from the IremboPay check: " + " · ".join(
-                        f"{n:,} {a.lower()} → {CHECK_FILL[a][0]}"
-                        + (f" ({CHECK_FILL[a][1]})" if CHECK_FILL[a][1] and (CHECK_FILL[a][1] in keeps
-                                                                          or CHECK_FILL[a][0] != "Pending notification")
-                           else "")
-                        for a, n in filled.items()) + ". Not an IremboPay invoice: left for you to decide.")
-            # ---- "Mark all as reviewed": Reviewed = Yes on every row at once (a row set by hand stays as it is)
-            all_key = f"review_all_{bank.CODE}_{period.store_key}"
-            m1, m2 = st.columns([1, 3], vertical_alignment="center")
-            still_checking = checking and checker.progress(invoices)[0] < len(invoices)
-            if not state.get(all_key):
-                if m1.button("✓ Mark all as reviewed", key=f"{all_key}_on", width="stretch", disabled=still_checking,
-                             help="Available when the IremboPay check is done" if still_checking else None):
-                    state[all_key] = True
-                    st.rerun()
-            else:
-                if m1.button("↺ Undo mark all", key=f"{all_key}_off", width="stretch"):
-                    state[all_key] = False
-                    st.rerun()
-                m2.caption("Every row is marked Reviewed = Yes. Check the Report table of each row before saving.")
-            if state.get(all_key):
-                table["Reviewed (Yes/No)"] = "Yes"
-            for c in DROPDOWNS:
-                table[c] = table[c].fillna("").astype(str).replace("", DASH)
-            edited = st.data_editor(
-                table[shown], hide_index=True, width="stretch", key=f"review_{bank.CODE}_{period.store_key}",
-                disabled=[paid_col, "Currency", amount_col, "invoice_number", "Bank channel", engine.SUGGEST_COL,
-                          CHECK_COL],
-                column_config={
-                    "Reviewed (Yes/No)": st.column_config.SelectboxColumn("Reviewed", options=[DASH, "Yes", "No"], width=95),
-                    "Bank channel": st.column_config.TextColumn("Channel", width=80),
-                    "Report table": st.column_config.SelectboxColumn("Report table", options=[DASH] + engine.TABLE_CHOICES,
-                                                                     width="medium"),
-                    paid_col: (st.column_config.DatetimeColumn(paid_col.capitalize(), format="DD/MM/YYYY HH:mm")
-                               if paid_col in engine.option(bank, "DATETIME_COLUMNS", [])
-                               else st.column_config.DateColumn(paid_col.capitalize(), format="DD/MM/YYYY")),
-                    amount_col: st.column_config.NumberColumn("Amount", format="localized"),
-                    "invoice_number": "Invoice",
-                    CHECK_COL: st.column_config.TextColumn(
-                        "IremboPay check", width="medium",
-                        help="What IremboPay's checkout says about this invoice (Paid, Expired, Open, not paid yet, "
-                             "Not an IremboPay invoice). Shown to help you conclude: it is not saved and does not "
-                             "choose the Report table. 'Paid' does not say which channel was used."),
-                    engine.SUGGEST_COL: st.column_config.TextColumn("Suggested from"),
-                    "SLA violated (Yes/No)": st.column_config.SelectboxColumn("SLA violated", options=[DASH, "Yes", "No"]),
-                    "Correct invoice number": st.column_config.TextColumn("Correct invoice"),
-                    "payment_status": st.column_config.TextColumn("Status"),
-                    "payment_provider": st.column_config.TextColumn("Provider"),
-                    "paid_at (YYYY-MM-DD HH:MM:SS)": st.column_config.TextColumn("paid_at", help="YYYY-MM-DD HH:MM:SS"),
-                    "Merchant name": st.column_config.TextColumn("Merchant"),
-                })
-            for c in DROPDOWNS:
-                edited[c] = edited[c].fillna(DASH).replace(DASH, "")
-            yes_now = int(edited["Reviewed (Yes/No)"].fillna("").eq("Yes").sum())
-            no_table = int((edited["Reviewed (Yes/No)"].fillna("").eq("Yes") & edited["Report table"].fillna("").eq("")).sum())
-            st.caption(f"{yes_now} of {len(edited)} marked Yes"
-                       + (f" · {no_table} without a Report table (they count as Failed notification)" if no_table else ""))
-            # ---- the result at a glance, as chosen now (before saving)
-            chosen = edited["Report table"].fillna("")
-            now = {t: int(chosen.eq(t).sum()) for t in engine.TABLE_CHOICES}
-            now["without a Report table"] = int(chosen.eq("").sum())
-            st.markdown(f"**Result:** {result_line(now)}")
-    c1, c2, c3 = st.columns([1, 1.5, 1.8])
-    if c1.button("← Back", width="stretch"):
-        go(4)
-    if res.not_found and c3.button("💾  Save decisions", type="primary", width="stretch"):
-        full = res.review.copy()
-        for c in engine.EDIT_COLS:
-            full[c] = edited[c].fillna("").astype(str).values
-        try:
-            engine.save_decisions(BASE_DIR, period, full, bank)
-            acc, _ = accepted_files()
-            with st.spinner("Saving and making the report…"):
-                state.result = run_reconciliation(acc)
-            st.toast("Decisions saved", icon="💾")
-            go(5 if state.result.stopped_for_review else 6)
-        except engine.ReconError as err:
-            st.error(str(err), icon="⚠️")
-    if not res.stopped_for_review and c2.button("Next: download →", width="stretch"):
-        go(6)
-    if res.not_reviewed:
-        st.info("The report is made as soon as every exception is resolved (Reviewed = Yes) and saved.", icon="⏸️")
-
-# =====================================================================================================================
-# 14. STEP 6 - REPORT & EXPORT
+# 11. STEP 3 - RESULTS
 #     ① summary of the run   ② Quick Export: the standard report as it is (Excel / PDF), no configuration
 #     ③ Custom Report (closed until "Customize Report"): type, sections, views, layout, preview, export
 # =====================================================================================================================
-elif state.step == 6:
+elif state.step == 3:
     res = state.result
     mem = state.get("report_mem")
     if (res is None or res.stopped_for_review or res.report_file is None
             or not mem or mem["name"] != res.report_file.name):           # the report is kept in memory only
-        go(3)
+        go(2)
     main = next((b for b in res.blocks if b[0] in ("Summary-Monthly", "Summary-Daily")), res.blocks[0])
 
     # ---- ① the summary of the run
@@ -3072,6 +2879,13 @@ elif state.step == 6:
                 st.write(", ".join(state.needs_a_look))
         with st.expander("Summary tables"):
             render_summary(res.blocks, period.report_type, res.merchants)
+        with st.expander("💬 Team message (copy for Slack)"):
+            st.caption("Same figures as the report above, ready to paste into Slack with nothing to edit.")
+            pending = res.sheets.get("Pending notification") if getattr(res, "sheets", None) else None
+            pending_statuses = pending["payment_status"].value_counts().to_dict() if pending is not None and len(pending) else None
+            team_message = slack_message.build(bank, period, res.blocks, res.merchants, pending_statuses,
+                                               res.previous_counts, drive_link())
+            st.code(team_message, language=None, wrap_lines=True)
 
     # ---- ② Quick Export: the standard report, unchanged
     with st.container(border=True):

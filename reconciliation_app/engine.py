@@ -5,7 +5,7 @@ The rules that are the SAME FOR EVERY BANK. The app (app.py) calls these functio
 (I_M_reconciliation.ipynb) uses the review functions of section 7.
 
 How the code is split
-    app.py           the screens (6 steps + side panel); no reconciliation rules
+    app.py           the screens (3 steps + side panel); no reconciliation rules
     engine.py        this file: the common rules
     banks/<bank>.py  what is specific to one bank: statement format, matching, SLA, calculations
                      (banks/__init__.py lists the banks and explains how to add one)
@@ -38,7 +38,7 @@ CONTENTS
     11. Writing the Excel report
     12. Saved reports and decisions (side panel)
     13. PDF (summary only)
-    14. Custom report (step 6: sections, charts and layout chosen by the user)
+    14. Custom report (Results: sections, charts and layout chosen by the user)
 
 Words used in the code
     statement row   one line of a bank statement (one payment, or for Ecobank one payment attempt)
@@ -124,7 +124,8 @@ DATE_COLUMNS = ["created_at", "paid_at", "settled_at", "expiry_at"]             
 PAYMENT_REQUIRED = ["invoice_number", "amount", "currency", "payment_status", "paid_at",
                     "payment_provider", "transaction_status", "created_at", "name"]                  # must be there
 
-# ---- review (step 4 of the app): the 5 choices and the columns the user fills in
+# ---- review: the 5 choices and the columns the rules fill in automatically (services/auto_review.py; no screen
+#      for this in the app any more - a row the rules truly cannot decide is only listed as "Needs a look")
 TABLE_CHOICES = ["Notification received", "Pending notification", "Paid with other channel",
                  "Failed notification", "Exclude"]
 # Pending notification: two statuses besides the bank's own PENDING_STATUSES (dianah branch, automatic
@@ -516,9 +517,10 @@ def _reverse_check(period: Period, bank, statements: list, pays: list, chk: Chec
 
 
 # =====================================================================================================================
-# 7. REVIEW DECISIONS (step 4 of the app; also used by the developer notebook)
-#    Rows not found in IremboPay are reviewed by the user. The decisions are saved in output/.review_store.csv,
-#    one line per bank row: bank | period | key | the user's choices. Decisions of other periods are suggested again.
+# 7. REVIEW DECISIONS (decided automatically by services/auto_review.py; also used by the developer notebook)
+#    Rows not found in IremboPay are decided by the rules, not by a person. The decisions are saved in
+#    output/.review_store.csv, one line per bank row: bank | period | key | the choice. Decisions of other periods
+#    are suggested again.
 # =====================================================================================================================
 def store_path(base_dir: Path) -> Path:
     return Path(base_dir) / "output" / STORE_NAME
@@ -920,7 +922,7 @@ class RunResult:
     messages: list = field(default_factory=list)      # (level, text): "info", "warning" or "success"
     bank_rows: int = 0                                # statement rows in the period
     not_found: int = 0                                # rows not found in IremboPay
-    review: pd.DataFrame | None = None                # the rows to review (step 4 of the app)
+    review: pd.DataFrame | None = None                # the rows auto_review.py decides automatically
     not_reviewed: int = 0
     stopped_for_review: bool = False                  # True: no report yet, some rows are not reviewed
     blocks: list = field(default_factory=list)        # [(sheet, heading, tables)]
@@ -2006,7 +2008,7 @@ def report_pdf(path: Path) -> bytes:
 
 
 # =====================================================================================================================
-# 14. CUSTOM REPORT (step 6, "Custom report": the user picks the sections, how each is shown, and the layout)
+# 14. CUSTOM REPORT (Results, "Custom report": the user picks the sections, how each is shown, and the layout)
 #    custom_content() builds the content once from the run; the app's preview, custom_pdf() and custom_excel() all
 #    draw that same content, so they always match. The standard report in output/ is never changed.
 #    Charts are drawn in the PDF, the preview and the Excel file (real Excel charts, with their numbers beside).
@@ -2034,8 +2036,8 @@ REPORT_TYPES = {
                                     {"pending": TABLE, "duplicates": TABLE, "other_channel": TABLE}),
 }
 CUSTOM_INCLUDE = {"kpis": "Summary KPIs", "currency": "Currency breakdown", "timestamp": "Reconciliation timestamp"}
-# once the report is made, the reviewed rows are simply in the table their decision chose: the custom report does not
-# list or count them again (the decisions are seen in Exception Resolution only)
+# once the report is made, the rows the rules decided are simply in the table their decision chose: the custom
+# report does not list or count them again
 
 
 def chart_groups(period: Period) -> list:

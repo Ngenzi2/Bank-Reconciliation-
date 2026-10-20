@@ -14,7 +14,9 @@ them again; it uses integrations/google_drive.py for every Drive call and engine
     drive_months()       the month folders of a bank          drive_records()  the reports of a bank and month
     local_records()      older reports still in output/ (listed only; never copied)
     find_previous()      the latest saved report of a period (for "Compare with previous period")
-    read_drive_summary() the figures of a saved report (for the Reports Dashboard; no PDF is made)
+    read_drive_facts()   the Dashboard's figures of a report read from Drive
+    read_local_facts()   the same, for a report kept in output/ (the Dashboard falls back to this when Drive is
+                         not connected, and always merges the two so a report is never missed)
 """
 from __future__ import annotations
 
@@ -280,11 +282,36 @@ def read_drive_summary(client, file_id: str, name: str, session) -> dict:
         session.remove(path)
 
 
-def read_drive_facts(client, record, session) -> list:
-    """The dashboard's facts of one saved Excel report (services/dashboard.py): its summary blocks and the late
-    payments made over the weekend and booked Monday (from its Payment details). The file exists in the session's
-    temporary folder only while it is read."""
+def _report_facts(path: Path, record) -> list:
+    """Shared by read_drive_facts and read_local_facts: the dashboard's facts of the Excel report at `path`,
+    already identified as `record` (its summary blocks and the late payments made over the weekend and booked
+    Monday, from its Payment details)."""
     from services import dashboard
+    p = parse_name(record.name)
+    if not p or p["ext"] != "xlsx":
+        raise DriveError(f"{record.name}: only an Excel report can be read.")
+    no_tx = dashboard.no_transaction_fact(path, record)          # a No-Transaction Report: every count 0
+    if no_tx is not None:
+        return [no_tx]
+    rep = engine.read_report(path)
+    try:
+        sheets = pd.read_excel(path, sheet_name=["Payment details", "Pending notification",
+                                                 "Duplicate payment other channel"], engine=engine.EXCEL_ENGINE)
+        details = sheets["Payment details"]
+        weekend = dashboard.weekend_late(details, p["code"])
+    except Exception:                                  # an older report without these sheets: no days
+        sheets, weekend = None, None
+    facts = dashboard.facts_from_report(rep, record, weekend)
+    if sheets is not None:                             # a month's days, from its rows (checked against it)
+        for month in [f for f in facts if f.kind == "month"]:
+            facts += dashboard.daily_facts(month, sheets["Payment details"], sheets["Pending notification"],
+                                           sheets["Duplicate payment other channel"], p["code"], weekend)
+    return facts
+
+
+def read_drive_facts(client, record, session) -> list:
+    """The dashboard's facts of one saved Excel report, read from Google Drive. The file exists in the
+    session's temporary folder only while it is read."""
     data = client.download(record.file_id)
     p = parse_name(record.name)
     if not p or p["ext"] != "xlsx":
@@ -292,25 +319,15 @@ def read_drive_facts(client, record, session) -> list:
     path = session.file(p["kind"], f"{p['code']}{engine.REPORT_SUFFIX}{p['label']}.xlsx")
     try:
         path.write_bytes(data)
-        no_tx = dashboard.no_transaction_fact(path, record)          # a No-Transaction Report: every count 0
-        if no_tx is not None:
-            return [no_tx]
-        rep = engine.read_report(path)
-        try:
-            sheets = pd.read_excel(path, sheet_name=["Payment details", "Pending notification",
-                                                     "Duplicate payment other channel"], engine=engine.EXCEL_ENGINE)
-            details = sheets["Payment details"]
-            weekend = dashboard.weekend_late(details, p["code"])
-        except Exception:                                  # an older report without these sheets: no days
-            sheets, weekend = None, None
-        facts = dashboard.facts_from_report(rep, record, weekend)
-        if sheets is not None:                             # a month's days, from its rows (checked against it)
-            for month in [f for f in facts if f.kind == "month"]:
-                facts += dashboard.daily_facts(month, sheets["Payment details"], sheets["Pending notification"],
-                                               sheets["Duplicate payment other channel"], p["code"], weekend)
-        return facts
+        return _report_facts(path, record)
     finally:
         session.remove(path)
+
+
+def read_local_facts(record) -> list:
+    """The dashboard's facts of one report already saved in output/ on this computer (local_records()): read in
+    place, nothing downloaded."""
+    return _report_facts(record.path, record)
 
 
 def read_drive_report(client, file_id: str, name: str, session) -> dict:

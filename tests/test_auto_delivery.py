@@ -1,6 +1,6 @@
-"""Step 6, automatic: the report is saved on Google Drive (replacing a report of the same period) and, once Drive has
-confirmed it, the Slack message (with the report's link) is sent - once per report. Drive and Slack are faked: no
-test reaches them."""
+"""Results, automatic: the report is saved on Google Drive (replacing a report of the same period) and, once Drive
+has confirmed it, the Slack message (with the report's link) is sent - once per report. Drive and Slack are faked:
+no test reaches them."""
 import json
 from pathlib import Path
 
@@ -47,7 +47,7 @@ def fakes(tmp_path, monkeypatch):
     return calls
 
 
-def step6(tmp_path):
+def results_step(tmp_path):
     from streamlit.testing.v1 import AppTest
     res, _ = run_september(tmp_path)
     at = AppTest.from_file(str(APP_DIR / "app.py"), default_timeout=120)
@@ -55,7 +55,7 @@ def step6(tmp_path):
     at.session_state["bank_code"] = "BOA"
     at.session_state["report_label"] = "Month"
     at.session_state["picked"] = SEP.start.date()
-    at.session_state["step"] = 6
+    at.session_state["step"] = 3
     at.session_state["result"] = res
     at.session_state["report_mem"] = {"name": res.report_file.name, "xlsx": res.report_file.read_bytes(),
                                       "pdf": e.report_pdf(res.report_file)}
@@ -63,7 +63,7 @@ def step6(tmp_path):
 
 
 def test_report_is_saved_then_sent_once_with_its_link(tmp_path, fakes):
-    at = step6(tmp_path)
+    at = results_step(tmp_path)
     _same_code_time()
     at.run()
     assert not at.exception, [x.value for x in at.exception]
@@ -75,13 +75,13 @@ def test_report_is_saved_then_sent_once_with_its_link(tmp_path, fakes):
     assert "Bank of Africa Rwanda — Monthly Reconciliation | September 2026" in sent
     text = " ".join(str(m.value) for m in at.markdown)
     assert "Saved in" in text and "Sent at" in text
-    at.run()                                             # step 6 drawn again: nothing is saved or sent twice
+    at.run()                                             # Results drawn again: nothing is saved or sent twice
     assert len(fakes["saves"]) == 1 and len(fakes["sent"]) == 1
 
 
 def test_an_existing_report_is_replaced(tmp_path, fakes):
     fakes["existing"] = [DriveFile(id="OLD", name="old.xlsx", mime="", size=1, md5="", modified="")]
-    at = step6(tmp_path)
+    at = results_step(tmp_path)
     _same_code_time()
     at.run()
     assert fakes["saves"][0][0] == "replace" and len(fakes["sent"]) == 1
@@ -89,7 +89,7 @@ def test_an_existing_report_is_replaced(tmp_path, fakes):
 
 def test_nothing_is_sent_when_drive_fails(tmp_path, fakes):
     fakes["drive_down"] = True
-    at = step6(tmp_path)
+    at = results_step(tmp_path)
     _same_code_time()
     at.run()
     assert not at.exception and fakes["sent"] == []

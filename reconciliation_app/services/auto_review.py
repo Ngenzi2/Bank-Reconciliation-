@@ -1,8 +1,8 @@
 """
 AUTOMATIC CLASSIFICATION OF ROWS NOT FOUND IN IREMBOPAY (dianah branch: no manual review for normal cases)
 ==============================================================================================================
-Before the dianah branch, every bank row not found in the IremboPay export needed a person to decide (step 5,
-Exception Resolution). The rules decide these by themselves now:
+Before the dianah branch, every bank row not found in the IremboPay export needed a person to decide, on its own
+screen (Exception Resolution). The rules decide these by themselves now, with no such screen any more:
 
     no invoice number                          -> Pending, status "no invoice number"
     IremboPay checkout says Paid                -> Duplicate (paid with another, unnamed channel: "OTHER")

@@ -244,7 +244,7 @@ def header_band(rep: dict, kind: str, period_name: str, dates: str, reconciled: 
 
 def kpi_values(tables: dict) -> list:
     """[(label, value, sub-line, is_alert)] - every number is read from the saved tables, nothing is recomputed.
-    The rows reviewed in Exception Resolution are already in the table their decision chose: no separate figure."""
+    The rows the rules decided automatically are already in the table their decision chose: no separate figure."""
     proc = tables["Overall processed payments"]
     processed, _ = _total(proc)
     received, rate = _total(tables["Overall notifications received by Irembo"])
@@ -518,7 +518,7 @@ def report_pdf(path: Path) -> bytes:
 
 
 # =====================================================================================================================
-# The custom report (step 6, "Custom report"): the same look as the standard report. It draws the content built by
+# The custom report (Results, "Custom report"): the same look as the standard report. It draws the content built by
 # engine.custom_content() as it is (sections, tables, charts, invoice lists, orientation and density chosen in the app);
 # nothing is recalculated here.
 # =====================================================================================================================

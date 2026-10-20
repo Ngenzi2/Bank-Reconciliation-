@@ -11,8 +11,8 @@ the page https://checkout.irembopay.com/<invoice> does.
     Could not check            no answer (no internet, the site is down, an unexpected reply)
 
 check_many() looks up a batch at once (services/auto_review.py: the automatic classification of a reconciliation
-run, up to WORKERS invoices at a time). The Checker class is the step 5 (Exception Resolution) screen's own way of
-doing the same lookups progressively, in a background thread, while the page stays usable.
+run, up to WORKERS invoices at a time). The Checker class does the same lookups progressively, in a background
+thread, for a screen that wants to show invoices one by one while the page stays usable.
 """
 from __future__ import annotations
 

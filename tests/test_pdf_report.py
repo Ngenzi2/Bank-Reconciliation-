@@ -176,7 +176,7 @@ def test_report_pdf_reads_the_saved_report(monkeypatch, tmp_path):
     assert P.report_pdf(path).startswith(b"%PDF")
 
 
-# ---- the custom report (step 6) -----------------------------------------------------------------------------------
+# ---- the custom report (Results) -----------------------------------------------------------------------------------
 def custom_content(orientation="Portrait", density="Comfortable", invoices=3):
     """The shape engine.custom_content() returns: overview + a table section, a chart section and a list section."""
     summary = pd.DataFrame({"Currency": ["RWF", "USD", "Total"], "Transactions": [5342, 77, 5419],
@@ -228,7 +228,7 @@ def test_custom_table_total_row_keeps_currencies_apart():
 
 
 def test_after_the_report_reviewed_rows_are_not_counted_again(pdf_text):
-    """The rows reviewed in Exception Resolution are in the table their decision chose: the report PDF has no
+    """The rows the rules decided automatically are in the table their decision chose: the report PDF has no
     'not found' figure and never says 'exception'."""
     labels = [label for label, _, _, _ in P.kpi_values(block())]
     assert labels == ["PAYMENTS PROCESSED", "NOTIFIED", "SLA VIOLATIONS", "PENDING NOTIFICATIONS",

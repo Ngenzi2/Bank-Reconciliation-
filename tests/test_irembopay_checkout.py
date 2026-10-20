@@ -1,4 +1,4 @@
-"""The IremboPay checkout check of step 5 (Ecobank). No test reaches IremboPay: the web answer is faked."""
+"""The IremboPay checkout check (every bank). No test reaches IremboPay: the web answer is faked."""
 import io
 import json
 import time

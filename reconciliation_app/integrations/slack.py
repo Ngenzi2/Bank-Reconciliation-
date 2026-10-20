@@ -1,5 +1,5 @@
 """
-SLACK (step 6, "Send to Slack")
+SLACK (Results, "Send to Slack")
 ===============================
 Posts the report message to a Slack channel through an Incoming Webhook. The webhook URL is a secret (whoever has
 it can post to the channel): it is kept in its own file outside the project folder and Git, readable only by this
@@ -10,7 +10,7 @@ computer's user, and it is never shown in full (masked()).
     save_webhook()  keep a new webhook URL          load_webhook()  the URL, or None
     remove_webhook() forget it (Settings → Slack in the side panel)
     masked()        'hooks.slack.com/services/T9S…/…cqT'            send()  post a message (raises SlackError)
-    send_payload()  post a message made of Slack blocks (the step 6 report message)
+    send_payload()  post a message made of Slack blocks (the Results report message)
 """
 from __future__ import annotations
 

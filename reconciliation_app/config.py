@@ -137,6 +137,34 @@ def load_folders(settings_file: Path = FOLDERS_FILE) -> dict:
             for code, v in banks.items() if isinstance(v, dict)}
 
 
+def _toml_text(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def save_folders(code: str, statements: str, exports: str, settings_file: Path = FOLDERS_FILE) -> None:
+    """Sets one bank's statements/exports folder in folders.toml (Choose, when none is set yet), keeping every
+    other bank's folders as they are. statements/exports: a local path, "drive:<folder ID>", or "" to clear it."""
+    settings_file = Path(settings_file)
+
+    def as_text(spec):
+        if spec is None:
+            return ""
+        return f"drive:{spec.value}" if spec.kind == "drive" else spec.value
+
+    banks = {b: {"statements": as_text(v.get("statements")), "exports": as_text(v.get("exports"))}
+            for b, v in load_folders(settings_file).items()}
+    banks[code.upper()] = {"statements": statements.strip(), "exports": exports.strip()}
+    lines = ["# Where each bank's files are found on this computer (set from the app's Choose screen; see "
+            "folders.example.toml for the format)."]
+    for b in sorted(banks):
+        v = banks[b]
+        if not v["statements"] and not v["exports"]:
+            continue
+        lines += ["", f"[banks.{b}]", f'statements = "{_toml_text(v["statements"])}"',
+                  f'exports = "{_toml_text(v["exports"])}"']
+    settings_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def load_admins(settings_file: Path = SETTINGS_FILE, env=None) -> set:
     """The administrators of the app's settings (lower-case e-mail addresses): drive_settings.toml, section [access],
     admins = ["name@irembo.com", ...], and BANK_RECON_ADMINS (comma-separated). Set up by a developer on this

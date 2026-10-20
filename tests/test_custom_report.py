@@ -1,4 +1,4 @@
-"""The custom report (step 6) after the reconciliation: the rows reviewed in Exception Resolution are in the table
+"""The custom report (Results) after the reconciliation: the rows the rules decided automatically are in the table
 their decision chose, so the custom report has no 'Exceptions' section, option, figure or line."""
 import engine
 
