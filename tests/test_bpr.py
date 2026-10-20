@@ -14,7 +14,7 @@ from bpr_fixtures import payments, statement
 from services import auto_review, folder_files
 
 SEP = e.make_period("month", "2026-09-01")
-DATA = Path(os.path.expanduser(r"~\Documents\Irembopay_report\data"))
+SAMPLES = os.environ.get("BANK_RECON_SAMPLES")
 
 
 def read(content, name="statement.xlsx"):
@@ -135,14 +135,18 @@ def test_processed_equals_notified_plus_pending_plus_duplicate(tmp_path):
     assert processed == notified + pending + duplicate
 
 
-def test_august_2026_matches_the_notebook_report(tmp_path):
-    """537 processed, 512 notified, 13 SLA violated, 25 pending, 0 duplicates (BPR_recon_weekly_monthly.ipynb).
+def test_august_2026_matches_the_known_report(tmp_path):
+    """The agreed numbers for August 2026: 537 processed, 512 notified, 13 SLA violated, 25 pending, 0 duplicates.
+    Needs the real samples: set BANK_RECON_SAMPLES to a folder with Bpr-irembo/ and Bpr/ in it (skipped otherwise).
     The 5 invoices the checkout check still had no answer for are fixed here (not looked up live): the checkout
     page answers change over time, so a live call would not keep matching a report made in the past."""
-    folders = {"statements": config.FolderSpec("local", str(DATA / "Bpr-irembo")),
-              "exports": config.FolderSpec("local", str(DATA / "Bpr"))}
-    if not (DATA / "Bpr-irembo").is_dir() or not (DATA / "Bpr").is_dir():
-        pytest.skip("real samples not on this computer")
+    if not SAMPLES:
+        pytest.skip("BANK_RECON_SAMPLES not set")
+    data = Path(SAMPLES)
+    folders = {"statements": config.FolderSpec("local", str(data / "Bpr-irembo")),
+              "exports": config.FolderSpec("local", str(data / "Bpr"))}
+    if not (data / "Bpr-irembo").is_dir() or not (data / "Bpr").is_dir():
+        pytest.skip("real samples not found under BANK_RECON_SAMPLES")
     period = e.make_period("month", "2026-08-01")
     found = folder_files.find_files(period, "BPR", {"BPR": folders})
     if not found.statements or not found.exports:
