@@ -1010,12 +1010,12 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
     merged["found_in_irembopay"] = merged["_merge"].eq("both")
     merged = merged.drop(columns="_merge")
 
-    # ---- re-send: an invoice already credited on an earlier day (within RESEND_LOOKBACK_DAYS, read by the
-    #      reference files) is not Processed again; neither is one IremboPay already shows paid before this period
-    #      (a bank that already keeps one row per invoice, e.g. Ecobank, never has an earlier day here) ----
-    first_seen = statement.dropna(subset=["invoice_number"]).groupby("invoice_number")[paid_on].min()
-    first_day = merged["invoice_number"].map(first_seen).dt.normalize()
-    is_resend = (merged[paid_on].dt.normalize() > first_day) | merged["paid_at"].lt(start).fillna(False)
+    # ---- re-send: each invoice is Processed once. The earliest credit is kept (read back to RESEND_LOOKBACK_DAYS
+    #      by the reference files): a later credit of the same invoice is excluded, on an earlier day or the same
+    #      day alike; so is one IremboPay already shows paid before this period (a bank that already keeps one row
+    #      per invoice, e.g. Ecobank, never has more than one here) ----
+    earliest = merged.sort_values(paid_on, kind="stable").drop_duplicates("invoice_number", keep="first").index
+    is_resend = (merged["invoice_number"].notna() & ~merged.index.isin(earliest)) | merged["paid_at"].lt(start).fillna(False)
 
     if hasattr(bank, "in_period"):                        # the bank's own rule
         in_period = bank.in_period(merged, attempts, start, end)
