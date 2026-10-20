@@ -115,7 +115,7 @@ SIDE_BG = "url(data:image/svg+xml;base64," + base64.b64encode(b"""<svg xmlns="ht
 SIDE_MENU = "url(data:image/svg+xml;base64," + base64.b64encode(b"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 30">
 <g stroke="#99E378" stroke-width="3.4" stroke-linecap="round"><path d="M4 5h32"/><path d="M4 15h22"/><path d="M4 25h32"/></g>
 </svg>""").decode() + ")"
-STEPS = ["Period", "Upload", "Check", "Reconcile", "Exception Resolution", "Report & Export"]
+STEPS = ["Choose", "Upload", "Check", "Reconcile", "Exception Resolution", "Results"]
 PREVIEW_TEAL = "#2B8A99"   # charts of the custom report preview: 4.0:1 on the light theme, 4.7:1 on the dark one
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -1288,6 +1288,15 @@ def found_files_for_period():
     return folder_files.find_files(period, bank, config.load_folders(), drive=client)
 
 
+def files_for_run():
+    """The files to reconcile with: folder-found files when the bank has folders, else the uploaded ones."""
+    if bank_has_folders():
+        found = found_files_for_period()
+        return folder_files.all_files(found) if found is not None else []
+    acc, _ = accepted_files()
+    return acc
+
+
 # ---- key figures + summary tables (step 5 and a saved report)
 def _count(tables, title, cur=None):
     """(transactions, amount, %) of one table: the total row, or the row of one currency."""
@@ -1608,8 +1617,8 @@ if not viewing:
         'settings': 'Settings'}.get(PAGE, _h(bank.FULL_NAME) + ' Reconciliation')}</h1></div></div>""",
                 unsafe_allow_html=True)
 if not viewing and PAGE == "reconciliation":
-    # folders instead of uploads: Upload and Exception Resolution are skipped, so the bar shows only 4 steps
-    shown = [(i, name) for i, name in enumerate(STEPS) if not bank_has_folders() or i not in (1, 4)]
+    # folders instead of uploads: Upload, Reconcile and Exception Resolution are skipped, so the bar shows 3 steps
+    shown = [(i, name) for i, name in enumerate(STEPS) if not bank_has_folders() or i not in (1, 3, 4)]
     st.markdown('<div class="steps">' + "".join(
         f'<span class="step {"done" if i + 1 < state.step else "now" if i + 1 == state.step else ""}">'
         f'{"✓ " if i + 1 < state.step else ""}{n}. {name}</span>' for n, (i, name) in enumerate(shown, 1)) + "</div>",
@@ -2820,7 +2829,8 @@ elif state.step == 3:
             with st.spinner(f"Reconciling {period.name}…"):
                 state.result = run_reconciliation(acc)
             state.run_error = None
-            go(4)
+            # straight to Results; only the rare row the rules truly can't decide goes to Exception Resolution
+            go(5 if state.result.stopped_for_review else 6)
         except engine.ReconError as err:
             state.run_error = str(err)
             st.rerun()
@@ -3037,17 +3047,25 @@ elif state.step == 6:
         st.markdown(f"**{bank.FULL_NAME} · {period.name[0].upper() + period.name[1:]}**")
         st.caption(f"Reconciled {res.ran_at:%d %b %Y · %H:%M}"
                    + (f" · compared with {res.compared_with}" if res.compared_with else ""))
-        # once the report is made, the reviewed rows are simply in the table their decision chose: they are not
-        # counted or listed again here (the decisions are seen in Exception Resolution only)
-        k = st.columns(3, border=True)
+        # rows not found in IremboPay are classified automatically (no manual review for normal cases): what their
+        # decision became is simply in the table it chose (Pending / Duplicate), not counted or listed again here
+        k = st.columns(4, border=True)
         k[0].metric("Processed", f"{res.bank_rows:,}")
         k[1].metric("Matched", f"{res.matched:,}")
         k[2].metric("Rate", f"{res.matched / res.bank_rows:.2%}" if res.bank_rows else "–")
+        k[3].metric("Not found", f"{res.not_found:,}")
+        k[3].caption("classified automatically" if res.not_found else "none")
         st.markdown("  \n".join(f"**{cur}** · {d['rows']:,} rows · {d['matched']:,} matched"
                                 for cur, d in res.by_currency.items()))
         for level, text in res.messages:
             if level == "warning":                  # only problems are shown (no "all good" messages)
                 st.warning(text, icon="⚠️")
+        if state.get("needs_a_look"):
+            n = len(state.needs_a_look)
+            with st.expander(f"👀 Needs a look later ({n}): the IremboPay checkout could not be asked"):
+                st.caption("These are counted as Pending for now; nothing is blocked. Check again when IremboPay "
+                          "or the internet connection is back.")
+                st.write(", ".join(state.needs_a_look))
         with st.expander("Summary tables"):
             render_summary(res.blocks, period.report_type, res.merchants)
 
@@ -3156,9 +3174,24 @@ elif state.step == 6:
                 except Exception as err:
                     e2.error(f"The custom report could not be made: {err}", icon="⚠️")
 
-    c1, _, c3 = st.columns([1, 1.5, 1.8])
+    if state.run_error:
+        st.error(state.run_error, icon="⚠️")
+    c1, c2, c3 = st.columns([1, 1.3, 1.5])
     if c1.button("← Back", width="stretch"):
-        go(5 if res.not_found else 4)           # Exception Resolution was skipped when nothing was missing
+        go(5 if res.not_reviewed else 3)
+    if c2.button("↻  Run again", width="stretch",
+                help="Reconcile this bank and period again (e.g. after adding files to the folder)"):
+        try:
+            with st.spinner(f"Reconciling {period.name}…"):
+                state.result = run_reconciliation(files_for_run())
+            state.run_error = None
+            go(5 if state.result.stopped_for_review else 6)
+        except engine.ReconError as err:
+            state.run_error = str(err)
+            st.rerun()
+        except Exception as err:
+            state.run_error = f"Something unexpected went wrong: {err}"
+            st.rerun()
     if c3.button("🔄  New report", width="stretch"):
         state.files, state.read_errors, state.result = {}, [], None
         state.customize = state.cr_preview = False
