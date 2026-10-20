@@ -1608,9 +1608,11 @@ if not viewing:
         'settings': 'Settings'}.get(PAGE, _h(bank.FULL_NAME) + ' Reconciliation')}</h1></div></div>""",
                 unsafe_allow_html=True)
 if not viewing and PAGE == "reconciliation":
+    # folders instead of uploads: Upload and Exception Resolution are skipped, so the bar shows only 4 steps
+    shown = [(i, name) for i, name in enumerate(STEPS) if not bank_has_folders() or i not in (1, 4)]
     st.markdown('<div class="steps">' + "".join(
         f'<span class="step {"done" if i + 1 < state.step else "now" if i + 1 == state.step else ""}">'
-        f'{"✓ " if i + 1 < state.step else ""}{i + 1}. {name}</span>' for i, name in enumerate(STEPS)) + "</div>",
+        f'{"✓ " if i + 1 < state.step else ""}{n}. {name}</span>' for n, (i, name) in enumerate(shown, 1)) + "</div>",
                 unsafe_allow_html=True)
 
 # the period chosen in step 1 (used by every step)
