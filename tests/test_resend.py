@@ -77,6 +77,21 @@ def test_a_resend_is_still_excluded_even_when_irembopay_already_shows_it_paid_ea
     assert res.sheets["Payment details"]["invoice_number"].astype(str).tolist() == ["880000000061"]
 
 
+def test_a_resend_counts_once_even_with_a_different_bank_reference(tmp_path):
+    # a failed first send and a successful resend usually get different bank references; the invoice still
+    # counts once in Processed, whatever the two references are (same day, within the period itself)
+    current = read_bank([
+        ("02/09/2026", "R00080", "ePay irembo 880000000080", None, 2000),   # the failed attempt, its own reference
+        ("02/09/2026", "R00081", "ePay irembo 880000000080", None, 2000),   # the resend, a different reference
+    ])
+    pay = e.read_payment_file("Payment details.csv", payments_csv([
+        dict(invoice="880000000080", amount=2000, paid_at="2026-09-02 09:05:00", ref="R00081"),
+    ]), "BOA")
+    res = e.run(tmp_path / "base", SEP, [current, pay], require_review=False, bank="BOA", report_dir=tmp_path / "r")
+    assert res.bank_rows == 1
+    assert res.sheets["Payment details"]["invoice_number"].astype(str).tolist() == ["880000000080"]
+
+
 def test_check_period_ignores_reference_files_for_coverage_and_never_blocks_on_them(tmp_path):
     earlier = replace(read_bank([("20/08/2026", "R00050", "ePay irembo 880000000050", None, 2000)]), reference=True)
     assert e.accept_file(SEP, earlier, [], "BOA") is None          # never rejected for being outside the period
