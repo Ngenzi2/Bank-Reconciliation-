@@ -1267,7 +1267,14 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
         "notification_received", "times_on_statement", "is_extra_credit", "Reason", "Source file"]
     detail = rep[[col for col in detail_cols if col in rep.columns]]
     whole = table_rows(start, end)
-    sheets = {"Pending notification": detail[whole["pending"]].sort_values(paid_on),
+    # an expired invoice is still Pending (never a manual case), so its Status reads "NEW" like the others; the
+    # IremboPay check is kept in a Comment next to it (approved 2026-10-21; the Pending count does not change)
+    pending_sheet = detail[whole["pending"]].sort_values(paid_on).copy()
+    expired = pending_sheet["payment_status"].eq("EXPIRED")
+    pending_sheet.insert(pending_sheet.columns.get_loc("payment_status") + 1, "Comment",
+                         expired.map({True: "Expired", False: ""}))
+    pending_sheet.loc[expired, "payment_status"] = "NEW"
+    sheets = {"Pending notification": pending_sheet,
               "Duplicate payment other channel": detail[whole["duplicate"]].sort_values(["payment_provider", paid_on]),
               bank.STATEMENT_SHEET: rep[statement_cols + ["invoice_number", "Source file"]]}
     if hasattr(bank, "extra_sheets"):
@@ -2155,7 +2162,7 @@ def custom_content(res: RunResult, opts: dict, bank=None) -> dict:
         # the invoice list goes with the "Table" view only: a section shown as a chart shows the chart alone
         if key == "pending" and view["as"] == TABLE:
             sec["list"] = _list_frame(res.sheets.get("Pending notification", pd.DataFrame()),
-                                      {**base, "payment_status": "Status", "name": "Merchant"})
+                                      {**base, "payment_status": "Status", "Comment": "Comment", "name": "Merchant"})
             sec["list_title"] = "Pending invoices"
         elif key == "other_channel" and view["as"] == TABLE:
             sec["list"] = _list_frame(res.sheets.get("Duplicate payment other channel", pd.DataFrame()),

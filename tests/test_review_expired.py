@@ -69,6 +69,27 @@ def test_ecobank_expired_goes_to_pending_and_keeps_expired(tmp_path):
     assert pending_total(res) >= 2                                   # both are counted as pending
 
 
+def test_the_pending_list_shows_expired_as_new_with_a_comment(tmp_path):
+    """The Pending notification sheet (the list the team reads) shows "NEW" for an expired invoice, with "Expired"
+    in a Comment column - Payment details (the full technical record) still shows EXPIRED. The Pending count is
+    the same either way (approved 2026-10-21)."""
+    def decide(review):
+        review["Reviewed (Yes/No)"] = "Yes"
+        review["Report table"] = "Paid with other channel"
+        review.loc[review.index[0], ["Report table", "payment_status"]] = ["Pending notification", "EXPIRED"]
+        review.loc[review.index[1], ["Report table", "payment_status"]] = ["Pending notification", "NEW"]
+        return review
+    review, res, details = run_with_decisions(tmp_path, "ECO", decide)
+    inv = review["invoice_number"].astype(str)
+    pending = res.sheets["Pending notification"].set_index(
+        res.sheets["Pending notification"]["invoice_number"].astype(str))
+    assert pending.loc[inv.iloc[0], ["payment_status", "Comment"]].tolist() == ["NEW", "Expired"]
+    assert pending.loc[inv.iloc[1], ["payment_status", "Comment"]].tolist() == ["NEW", ""]
+    details_status = details.set_index(details["invoice_number"].astype(str))["payment_status"]
+    assert details_status[inv.iloc[0]] == "EXPIRED"                       # Payment details is unchanged
+    assert pending_total(res) == len(pending)                             # the count did not move
+
+
 def test_im_expired_goes_to_pending_and_keeps_expired(tmp_path):
     """Since 2026-10-12 I&M (and Bank of Africa) follow the same rule as Ecobank: an EXPIRED invoice is pending and
     keeps EXPIRED in the report; a pending decision without a status is still NEW."""

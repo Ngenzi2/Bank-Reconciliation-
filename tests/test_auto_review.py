@@ -98,6 +98,16 @@ def test_processed_equals_notified_plus_pending_plus_duplicate_after_auto_classi
     assert duplicate == 1
     assert processed == notified + pending + duplicate
 
+    # the Pending list shows "NEW" for an expired invoice, with "Expired" in a Comment column - the count above
+    # (5) already includes it, so this is wording only, never a reclassification
+    pending_sheet = res.sheets["Pending notification"].set_index(
+        res.sheets["Pending notification"]["invoice_number"].astype(str))
+    assert pending_sheet.loc["880000000003", ["payment_status", "Comment"]].tolist() == ["NEW", "Expired"]  # Expired
+    assert pending_sheet.loc["880000000005", ["payment_status", "Comment"]].tolist() == ["NEW", "Expired"]  # NOT FOUND
+    assert pending_sheet.loc["880000000004", ["payment_status", "Comment"]].tolist() == ["NEW", ""]         # plain NEW
+    details = res.sheets["Payment details"].set_index(res.sheets["Payment details"]["invoice_number"].astype(str))
+    assert details.loc["880000000003", "payment_status"] == "EXPIRED"       # Payment details is unchanged
+
 
 def test_apply_review_accepts_the_two_automatic_statuses(tmp_path):
     from boa_fixtures import payments, statement
