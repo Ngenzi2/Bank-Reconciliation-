@@ -890,12 +890,24 @@ def merchant_counts(table) -> dict:
                                                        table["Number of Transactions"])}
 
 
-def add_vs_merchants(table: pd.DataFrame, prev, unit: str) -> pd.DataFrame:
+def export_covers(payments: pd.DataFrame, period: Period) -> bool:
+    """Whether the loaded IremboPay payment file(s) go back far enough to cover `period` (the earliest paid_at
+    found is on or before the period's start) - the same check the reconciliation notebooks make before showing
+    a week-over-week or month-over-month change, so a thin export never looks like "nothing happened"."""
+    earliest = payments["paid_at"].dropna().min()
+    return pd.notna(earliest) and period.start >= earliest.normalize()
+
+
+def add_vs_merchants(table: pd.DataFrame, prev, unit: str, incomplete: bool = False) -> pd.DataFrame:
     """Add 'VS prev <unit> (%)' to a Payment per merchant table: the change of each merchant (same currency).
     prev None = nothing to compare (empty column); a merchant missing before (or a previous report without
-    the table, prev {}) = "N/A"."""
+    the table, prev {}) = "N/A". incomplete: comparison was asked for, but the IremboPay export does not go
+    back far enough to cover the previous period - every row is "N/A" (never a number, never blank)."""
     t = table.copy()
     col = f"VS prev {unit} (%)"
+    if incomplete:
+        t[col] = "N/A"
+        return t
     if prev is None:
         t[col] = None
         return t
@@ -907,13 +919,17 @@ def add_vs_merchants(table: pd.DataFrame, prev, unit: str) -> pd.DataFrame:
     return t
 
 
-def add_vs_column(tables: dict, prev_counts, unit: str) -> dict:
-    """Add 'VS prev <unit> (%)' (change in the number of transactions); empty when there is nothing to compare."""
+def add_vs_column(tables: dict, prev_counts, unit: str, incomplete: bool = False) -> dict:
+    """Add 'VS prev <unit> (%)' (change in the number of transactions); empty when there is nothing to compare.
+    incomplete: comparison was asked for, but the IremboPay export does not go back far enough to cover the
+    previous period - every row is "N/A" (never a number, never blank: never show a wrong %)."""
     col = f"VS prev {unit} (%)"
     out = {}
     for title, t in tables.items():
         t = t.copy()
-        if prev_counts is None:
+        if incomplete:
+            t[col] = "N/A"
+        elif prev_counts is None:
             t[col] = None
         else:
             prev = prev_counts[title]
@@ -1241,18 +1257,26 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
 
     # ---- H. comparison with the previous period of the same bank (only when ticked) ----
     if compare:
-        prev_path, prev = find_previous_report(base_dir, period, bank)
-        if previous_report is not None:
-            prev_path = Path(previous_report)
-        if prev_path is None:
-            raise ReconError(f"No {bank.NAME} report found for {prev.name}. Upload it or make it first.")
-        prev_counts, _, prev_unreviewed = read_report_counts(prev_path, SUMMARY_SHEET[period.report_type], bank)
-        res.compared_with = f"{prev.name} (report of {pd.Timestamp(prev_path.stat().st_mtime, unit='s'):%d/%m/%Y})"
+        prev = period.previous()
+        incomplete = not export_covers(payments, prev)       # the export does not go back to the period before
+        if incomplete:
+            prev_counts, prev_merchants = None, {}
+            res.compared_with = f"{prev.name}: not compared (the IremboPay export does not go back that far)"
+            res.add("warning", f"The IremboPay export does not go back to {prev.name}, so 'VS previous' shows "
+                               "N/A - never a number that could be wrong.")
+        else:
+            prev_path, _ = find_previous_report(base_dir, period, bank)
+            if previous_report is not None:
+                prev_path = Path(previous_report)
+            if prev_path is None:
+                raise ReconError(f"No {bank.NAME} report found for {prev.name}. Upload it or make it first.")
+            prev_counts, _, prev_unreviewed = read_report_counts(prev_path, SUMMARY_SHEET[period.report_type], bank)
+            res.compared_with = f"{prev.name} (report of {pd.Timestamp(prev_path.stat().st_mtime, unit='s'):%d/%m/%Y})"
+            if prev_unreviewed:
+                res.add("warning", f"{prev.name} was not reviewed: its {prev_unreviewed} missing invoice(s) are counted as "
+                                   "not found. The comparison may not be exact.")
+            prev_merchants = read_merchant_counts(prev_path, SUMMARY_SHEET[period.report_type])   # {} when it has none
         res.previous_counts = prev_counts
-        if prev_unreviewed:
-            res.add("warning", f"{prev.name} was not reviewed: its {prev_unreviewed} missing invoice(s) are counted as "
-                               "not found. The comparison may not be exact.")
-        prev_merchants = read_merchant_counts(prev_path, SUMMARY_SHEET[period.report_type])   # {} when it has none
         week_blocks = [b for b in res.blocks if b[0] == "Summary-Weekly"]
         new_blocks = []
         for block in res.blocks:
@@ -1264,8 +1288,8 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
                 prev_m = merchant_counts(res.merchants.get(week_blocks[i - 1][1])) if i > 0 else None
                 res.merchants[heading] = add_vs_merchants(res.merchants[heading], prev_m, "Week")
             else:
-                new_blocks.append((sheet_name, heading, add_vs_column(tables, prev_counts, period.unit)))
-                res.merchants[heading] = add_vs_merchants(res.merchants[heading], prev_merchants, period.unit)
+                new_blocks.append((sheet_name, heading, add_vs_column(tables, prev_counts, period.unit, incomplete)))
+                res.merchants[heading] = add_vs_merchants(res.merchants[heading], prev_merchants, period.unit, incomplete)
         res.blocks = new_blocks
     res.timings["summary"] = time.perf_counter() - t
 

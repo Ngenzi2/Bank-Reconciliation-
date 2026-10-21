@@ -752,9 +752,8 @@ def run_reconciliation(acc):
         if compare:
             prev = period.previous()
             prev_info, problem = find_previous(prev)
-            if prev_info is None:
-                raise engine.ReconError(f"No {bank.NAME} report found for {prev.name}. " + (problem or ""))
-            prev_file = previous_file(prev, prev_info, session)
+            if prev_info is not None:                   # not found: engine.run() decides - N/A, or the same error
+                prev_file = previous_file(prev, prev_info, session)
         res = engine.run(BASE_DIR, period, acc, sla_days=sla_days, compare=compare, bank=bank,
                          report_dir=session.path, previous_report=prev_file)
         state.needs_a_look = []
@@ -766,7 +765,7 @@ def run_reconciliation(acc):
             engine.save_decisions(BASE_DIR, period, filled, bank)
             res = engine.run(BASE_DIR, period, acc, sla_days=sla_days, compare=compare, bank=bank,
                              report_dir=session.path, previous_report=prev_file)
-        if prev_info is not None:
+        if prev_info is not None and res.previous_counts is not None:   # not when the export was too thin to trust
             res.compared_with = f"{period.previous().name} (report {prev_info['where']})"
         if res.report_file is not None:
             state.report_mem = {"name": res.report_file.name, "xlsx": res.report_file.read_bytes(),
@@ -2748,7 +2747,8 @@ elif state.step == 1:
                             f'<span>{_esc(found["where"])} · used for the comparison</span></div>',
                             unsafe_allow_html=True)
             else:
-                ready = False
+                # not a block: if the IremboPay export doesn't go back that far either, the comparison shows
+                # N/A on its own (engine.run()); uploading one here is only needed when it would otherwise work
                 st.warning(f"No {bank.NAME} report found for {prev.name}" + (f" ({problem})" if problem else ""),
                            icon="⚠️")
                 u1, u2 = st.columns([2, 1], vertical_alignment="bottom")
