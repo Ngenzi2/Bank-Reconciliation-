@@ -49,8 +49,8 @@ def bank_folder(bank) -> str:
 
 
 def month_folder(period: engine.Period) -> str:
-    """'2026-09': the month the period starts in."""
-    return f"{period.start:%Y-%m}"
+    """'2026-09': the month this report belongs to (a week, by its Thursday)."""
+    return period.month
 
 
 def _kind_folder(period: engine.Period) -> str:
@@ -193,8 +193,9 @@ class Record:
 
     @property
     def month(self) -> str:
-        """'2026-09': the month the period starts in (from the name, wherever the file is)."""
-        return f"{self.start:%Y-%m}"
+        """'2026-09': the month this report belongs to (a week, by its Thursday), from the name, wherever the
+        file is."""
+        return engine.month_of(self.kind, self.start)
 
 
 @dataclass

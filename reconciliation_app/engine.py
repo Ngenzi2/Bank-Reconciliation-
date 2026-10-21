@@ -193,6 +193,12 @@ class Period:
         return self.end - pd.Timedelta(days=1)
 
     @property
+    def month(self):
+        """'2026-10': the month this period belongs to - a week by its Thursday (a week is named after the month
+        that contains its Thursday), a day or a month by its own start."""
+        return month_of(self.report_type, self.start)
+
+    @property
     def name(self):
         """How the period is shown to the user: 'September 2026', 'week 07/09 - 13/09/2026', ..."""
         return {"day": f"{self.start:%A %d %B %Y}",
@@ -215,6 +221,13 @@ class Period:
         return make_period(self.report_type, {"day": self.start - pd.Timedelta(days=1),
                                               "week": self.start - pd.Timedelta(days=7),
                                               "month": self.start - pd.offsets.MonthBegin(1)}[self.report_type])
+
+
+def month_of(kind: str, start: pd.Timestamp) -> str:
+    """'2026-10': the month a period starting on `start` belongs to - a week by its Thursday, a day or a month by
+    its own start (kind: "day" / "week" / "month", as on Period.report_type or a saved report's name)."""
+    anchor = start + pd.Timedelta(days=3) if kind == "week" else start
+    return f"{anchor:%Y-%m}"
 
 
 def make_period(report_type: str, date) -> Period:
