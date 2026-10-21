@@ -98,13 +98,14 @@ def read_statement(content: bytes, name: str, excel_engine=None):
         raise ValueError(f"{name}: the bank file is missing the column(s) {', '.join(missing)}.")
 
     def header_date(label):
-        """The date written next to a label above the header (e.g. 'Date From(dd/MM/yyyy):')."""
+        """The date written next to a label above the header (e.g. 'Date From(dd/MM/yyyy):' - day first, as the
+        label says: '05/08/2026' is 5 August, not May 8)."""
         hit = raw.loc[:header_idx].isin([label])
         if not hit.any().any():
             return None
         r, c = next((r, c) for c in hit.columns for r in hit.index[hit[c]])
         after = [v for v in raw.loc[r, c + 1:] if v]
-        return pd.to_datetime(after[0], errors="coerce") if after else None
+        return pd.to_datetime(after[0], dayfirst=True, errors="coerce") if after else None
 
     # ---- the rows: IremboPay credits only (the other credits are only counted)
     data = raw.loc[header_idx + 1:, [positions[c] for c in wanted]]
