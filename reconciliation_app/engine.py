@@ -1115,18 +1115,20 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
         """Rows of each of the 5 tables for [a, b): the bank's own rule, or by payment date (default). The two
         automatic statuses are always Pending, even for a bank whose own rule would not say so. A bank duplicate
         (a second SUCCESS credit for the same invoice, a different bank reference) is always Duplicate, even for
-        a bank whose own rule would not otherwise say so."""
+        a bank whose own rule would not otherwise say so - never Notified, never Pending, never counted in SLA
+        (SLA is counted among Notified payments, from the first credit, only)."""
         window = (rep[paid_on] >= a) & (rep[paid_on] < b)
         if hasattr(bank, "tables"):
             m = bank.tables(rep, attempts, a, b)
         else:
-            m = {"processed": window,
-                "received": window & rep["notification_received"] & ~rep["is_extra_credit"],
-                "sla": window & rep["sla_status"].eq("SLA violated"),
-                "pending": window & rep["is_pending"] & ~rep["is_extra_credit"],
+            m = {"processed": window, "received": window & rep["notification_received"],
+                "sla": window & rep["sla_status"].eq("SLA violated"), "pending": window & rep["is_pending"],
                 "duplicate": window & rep["paid_other_channel"]}
-        m["pending"] = (m["pending"] | (window & rep["payment_status"].isin({NO_INVOICE_STATUS, COULD_NOT_CHECK_STATUS}))
-                       ) & ~rep["is_extra_credit"]
+        m["pending"] = m["pending"] | (window & rep["payment_status"].isin({NO_INVOICE_STATUS, COULD_NOT_CHECK_STATUS}))
+        not_extra = ~rep["is_extra_credit"]
+        m["received"] = m["received"] & not_extra
+        m["sla"] = m["sla"] & not_extra
+        m["pending"] = m["pending"] & not_extra
         m["duplicate"] = m["duplicate"] | (window & rep["is_extra_credit"])
         return m
 

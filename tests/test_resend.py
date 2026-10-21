@@ -101,6 +101,26 @@ def test_a_second_credit_with_a_different_reference_is_a_bank_duplicate(tmp_path
     assert t["Duplicate Payment"]["Total"] == 1
 
 
+def test_a_bank_duplicate_is_never_counted_in_sla(tmp_path):
+    # the extra credit itself would be "SLA violated" (paid 3 days after its own Value Date) if it were counted at
+    # all; it must not be, since it is never Notified (SLA is counted among Notified payments, from the first
+    # credit, only)
+    current = read_bank([
+        ("02/09/2026", "R00085", "ePay irembo 880000000085", None, 1000),   # the first credit: on time
+        ("05/09/2026", "R00086", "ePay irembo 880000000085", None, 1000),   # the extra credit: 3 days later
+    ])
+    pay = e.read_payment_file("Payment details.csv", payments_csv([
+        dict(invoice="880000000085", amount=1000, paid_at="2026-09-02 09:05:00", ref="R00085"),
+    ]), "BOA")
+    res = e.run(tmp_path / "base", SEP, [current, pay], require_review=False, bank="BOA", report_dir=tmp_path / "r")
+    d = res.sheets["Payment details"].set_index("Ref no", drop=False)
+    assert bool(d.loc["R00086", "is_extra_credit"]) and d.loc["R00086", "sla_status"] == "SLA violated"
+    t = e.counts_of(res.blocks[-1][2])
+    assert t["Overall processed payments"]["Total"] == 2
+    assert t["SLA Violated"]["Total"] == 0           # the extra credit's violation is not counted
+    assert t["Duplicate Payment"]["Total"] == 1
+
+
 def test_a_second_credit_with_the_same_reference_is_still_a_resend(tmp_path):
     # the same bank reference seen twice (e.g. the export listing the same credit on two consecutive days) is
     # still a plain re-send, ignored - not a bank duplicate, even though it is not the very first occurrence

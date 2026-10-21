@@ -176,8 +176,10 @@ def test_matching_september(tmp_path):
     assert t["Overall notifications received by Irembo"]["Total"] == 7         # 001 002 004 007 009 018 030
     assert t["Pending notifications"]["Total"] == 1                            # 003 (NEW)
     assert t["Duplicate Payment"]["Total"] == 2                                # 005 (another channel), 008 (bank)
-    # SLA as for I&M: paid_at day vs Value Date, 0 days allowed -> 002 and both rows of the double credit
-    assert t["SLA Violated"]["Total"] == 3
+    # SLA as for I&M: paid_at day vs Value Date, 0 days allowed -> 002 and S00009; S00008 is a bank duplicate and
+    # is never counted in SLA, even though its own sla_status is also "SLA violated"
+    assert t["SLA Violated"]["Total"] == 2
+    assert d.loc["S00008", "sla_status"] == "SLA violated"
     assert d.loc["S00001", "sla_status"] == "On time" and d.loc["S00009", "sla_status"] == "SLA violated"
     assert d.loc["S00001", "Branch"] == "HEAD OFFICE"
 
