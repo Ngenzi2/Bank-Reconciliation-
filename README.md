@@ -69,7 +69,7 @@ You can start the app in either of these ways:
 2. Or run the app manually:
 
 ```bash
-cd "/Users/divinngenzi/Documents/Bank Reconciliation"
+cd "/path/to/Bank Reconciliation"
 python3 -m streamlit run reconciliation_app/app.py
 ```
 
@@ -78,9 +78,10 @@ python3 -m streamlit run reconciliation_app/app.py
 Three steps: **Choose**, **Check**, **Results**.
 
 1. **Choose**: pick the bank and the period (the default is the last full week; any older day, week or month can
-   be picked). If the bank's statements/exports folders are set (`folders.toml`), the app finds its files itself;
-   if not, set them right there, once. "Use a file instead" uploads the files by hand for this run, without
-   setting anything up.
+   be picked). If the bank's statements/exports folders are set, the app finds its files itself; if not, set them
+   right there, once: **📂 Browse…** opens the computer's own folder window next to each box (the path can also be
+   typed or pasted directly). Set once, each bank's folders are remembered in `folders.toml` (ignored by Git) for
+   next time. "Use a file instead" uploads the files by hand for this run, without setting anything up.
 2. **Check**: the app lists what it found (or what was uploaded) and any warning (a missing day, an old export,
    a file of another bank). **▶ Run reconciliation** turns on once everything is OK; the rules decide pending /
    duplicate / no invoice number by themselves - nothing to review by hand for normal cases.

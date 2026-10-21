@@ -92,7 +92,8 @@ import config                                  # Google Drive settings (no secre
 from integrations import google_drive
 from integrations.google_drive import DriveClient, DriveError
 from integrations import irembopay_checkout, slack
-from services import app_settings, auto_review, dashboard, dashboard_view, folder_files, pay_files, report_history, slack_message
+from services import (app_settings, auto_review, dashboard, dashboard_view, folder_files, folder_picker, pay_files,
+                     report_history, slack_message)
 from services.session_files import SessionFolder
 
 
@@ -1295,22 +1296,40 @@ def found_files_for_period():
     return folder_files.find_files(period, bank, config.load_folders(), drive=client)
 
 
+def _folder_field(label: str, key: str, default: str):
+    """A text box with a Browse button next to it: Browse opens the computer's own folder window and fills the
+    box; the box can still be typed or pasted into directly, so Browse is never required."""
+    st.text_input(label, value=default, key=key)
+    b1, b2 = st.columns([1, 3])
+    if b1.button("📂 Browse…", key=f"{key}_browse"):
+        with st.spinner("Waiting for the folder window…"):
+            path, error = folder_picker.browse_folder(f"Choose the {label}", state.get(key, default))
+        if path:
+            state[key] = path
+            st.rerun()
+        elif error:
+            b2.error(error + " Type or paste the path above instead.", icon="⚠️")
+
+
 def folder_settings_editor():
-    """A small form to set this bank's statements/exports folder (Choose, shown only when none is set yet): a
-    local path, or "drive:<folder ID>" for a Google Drive folder. Saved straight to folders.toml."""
+    """A small form to set this bank's statements/exports folder (Choose, shown only when none is set yet): Browse
+    to it, or type a local path, or "drive:<folder ID>" for a Google Drive folder. Saved straight to folders.toml."""
     spec = config.load_folders().get(bank.CODE) or {}
     cur_stm = spec.get("statements").value if spec.get("statements") else ""
     cur_exp = spec.get("exports").value if spec.get("exports") else ""
+    stm_key, exp_key = f"folder_stm_input_{bank.CODE}", f"folder_exp_input_{bank.CODE}"
     with st.container(border=True):
         st.markdown(f'<div class="card-title">📁 Set the {bank.FULL_NAME} folders</div>', unsafe_allow_html=True)
-        st.caption("No folder is set yet for this bank, so the app cannot find its files by itself. Set them "
-                   "once here (a local folder path, or \"drive:<folder ID>\" for a Google Drive folder) - or use "
-                   "a file instead, below, without setting anything.")
+        st.caption("No folder is set yet for this bank, so the app cannot find its files by itself. Browse to "
+                   "each folder below (or type/paste the path, or \"drive:<folder ID>\" for a Google Drive "
+                   "folder) - or use a file instead, below, without setting anything.")
         f1, f2 = st.columns(2)
-        stm = f1.text_input(f"{bank.FULL_NAME} statements folder", value=cur_stm, key="folder_stm_input")
-        exp = f2.text_input("IremboPay exports folder", value=cur_exp, key="folder_exp_input")
+        with f1:
+            _folder_field(f"{bank.FULL_NAME} statements folder", stm_key, cur_stm)
+        with f2:
+            _folder_field("IremboPay exports folder", exp_key, cur_exp)
         if st.button("💾 Save folder settings", key="folder_save"):
-            config.save_folders(bank.CODE, stm, exp)
+            config.save_folders(bank.CODE, state.get(stm_key, cur_stm), state.get(exp_key, cur_exp))
             st.toast(f"Folders saved for {bank.FULL_NAME}", icon="📁")
             st.rerun()
 

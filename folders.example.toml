@@ -1,5 +1,6 @@
 # Where each bank's files are found on this computer (dianah branch: folders instead of uploads).
-# Copy this file to folders.toml (same folder) and fill in the paths. folders.toml is ignored by Git: the paths
+# Usually set from the app itself (Choose -> Browse...), which writes here for you; copy this file to
+# folders.toml and fill in the paths by hand only if you prefer that. folders.toml is ignored by Git: the paths
 # are local to this computer and are not team settings (those stay in the app, Settings -> Bank Management).
 #
 # Each value is either a local folder (any sub-folders allowed) or "drive:<FOLDER ID>" for a Google Drive folder
