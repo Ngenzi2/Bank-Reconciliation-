@@ -1012,18 +1012,28 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
     merged["found_in_irembopay"] = merged["_merge"].eq("both")
     merged = merged.drop(columns="_merge")
 
-    # ---- re-send: each invoice is Processed once. The earliest credit is kept (read back to RESEND_LOOKBACK_DAYS
-    #      by the reference files): a later credit of the same invoice is excluded, on an earlier day or the same
-    #      day alike; so is one IremboPay already shows paid before this period (a bank that already keeps one row
-    #      per invoice, e.g. Ecobank, never has more than one here) ----
-    earliest = merged.sort_values(paid_on, kind="stable").drop_duplicates("invoice_number", keep="first").index
-    is_resend = (merged["invoice_number"].notna() & ~merged.index.isin(earliest)) | merged["paid_at"].lt(start).fillna(False)
+    # ---- re-send vs bank duplicate: each invoice is Processed once per bank reference. The earliest credit is kept
+    #      (read back to RESEND_LOOKBACK_DAYS by the reference files). A later credit with the SAME bank reference
+    #      is a re-send of that one payment: excluded, on an earlier day or the same day alike; so is one IremboPay
+    #      already shows paid before this period (a bank that already keeps one row per invoice, e.g. Ecobank,
+    #      never has more than one here). A later credit with a DIFFERENT bank reference is a genuine extra credit
+    #      (the payer paid again): it is kept, in the week of that second credit, and goes to Duplicate Payment
+    #      ("Bank duplicate") further down - it is not excluded here, and still counts in Processed. ----
+    earliest_idx = merged.sort_values(paid_on, kind="stable").drop_duplicates("invoice_number", keep="first").index
+    earliest = merged.index.isin(earliest_idx)
+    first_ref = merged.loc[earliest].set_index("invoice_number")[ref]
+    later_ref = merged["invoice_number"].map(first_ref)
+    is_bank_duplicate = (merged["invoice_number"].notna() & ~earliest & merged[ref].notna() & later_ref.notna()
+                        & merged[ref].ne(later_ref))
+    is_resend = ((merged["invoice_number"].notna() & ~earliest & ~is_bank_duplicate)
+                | merged["paid_at"].lt(start).fillna(False))
 
     if hasattr(bank, "in_period"):                        # the bank's own rule
         in_period = bank.in_period(merged, attempts, start, end)
     else:                                                 # default: payment date inside the period
         in_period = merged[paid_on].between(start, end, inclusive="left")
     in_period = in_period & ~is_resend
+    merged["bank_duplicate"] = is_bank_duplicate
     merged["period"] = None
     merged.loc[in_period, "period"] = "current"
     current = merged["period"].eq("current")
@@ -1074,9 +1084,8 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
     # ---- F. summary: flags per row (the bank's calculations) + a reason when a row is not a clean match ----
     rep = (merged[merged["period"] == "current"].sort_values(present(paid_on, posted, ref))
            .reset_index(drop=True))
-    has_invoice = rep["invoice_number"].notna()
     rep["times_on_statement"] = rep.groupby("invoice_number")["invoice_number"].transform("size")
-    rep["is_extra_credit"] = has_invoice & rep.duplicated("invoice_number", keep="first")
+    rep["is_extra_credit"] = rep["bank_duplicate"]        # a second SUCCESS credit, a different bank reference
     rep["paid_other_channel"] = bank.duplicate(rep)
     rep["notification_received"] = bank.received(rep)
     # Pending regardless of the bank's own rule: the two automatic statuses above are never Notified or Duplicate
@@ -1100,18 +1109,25 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
         combined = combined + "; " + extra
     combined = combined.str.replace("(?:; )+", "; ", regex=True).str.strip("; ")
     rep["Reason"] = combined.where(found_, "Not found in IremboPay")
+    rep.loc[rep["is_extra_credit"], "Reason"] = "Bank duplicate"
 
     def table_rows(a, b):
         """Rows of each of the 5 tables for [a, b): the bank's own rule, or by payment date (default). The two
-        automatic statuses are always Pending, even for a bank whose own rule would not say so."""
+        automatic statuses are always Pending, even for a bank whose own rule would not say so. A bank duplicate
+        (a second SUCCESS credit for the same invoice, a different bank reference) is always Duplicate, even for
+        a bank whose own rule would not otherwise say so."""
         window = (rep[paid_on] >= a) & (rep[paid_on] < b)
         if hasattr(bank, "tables"):
             m = bank.tables(rep, attempts, a, b)
         else:
-            m = {"processed": window, "received": window & rep["notification_received"],
-                "sla": window & rep["sla_status"].eq("SLA violated"), "pending": window & rep["is_pending"],
+            m = {"processed": window,
+                "received": window & rep["notification_received"] & ~rep["is_extra_credit"],
+                "sla": window & rep["sla_status"].eq("SLA violated"),
+                "pending": window & rep["is_pending"] & ~rep["is_extra_credit"],
                 "duplicate": window & rep["paid_other_channel"]}
-        m["pending"] = m["pending"] | (window & rep["payment_status"].isin({NO_INVOICE_STATUS, COULD_NOT_CHECK_STATUS}))
+        m["pending"] = (m["pending"] | (window & rep["payment_status"].isin({NO_INVOICE_STATUS, COULD_NOT_CHECK_STATUS}))
+                       ) & ~rep["is_extra_credit"]
+        m["duplicate"] = m["duplicate"] | (window & rep["is_extra_credit"])
         return m
 
     def build_summary5(a, b):

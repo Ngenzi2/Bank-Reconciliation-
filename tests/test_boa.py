@@ -152,29 +152,32 @@ def test_only_irembo_credits_are_kept_and_debits_never_are():
 # ---- matching and the report -------------------------------------------------------------------------------------
 def test_matching_september(tmp_path):
     res, d = run_september(tmp_path)
-    assert res.bank_rows == 13                     # Irembo payments of September (reversed, October, August out)
+    assert res.bank_rows == 14                     # Irembo payments of September (reversed, October, August out)
     assert res.not_found == 3 and set(d[~d.found_in_irembopay]["Ref no"]) == {"S00006", "S00016", "S00019"}
     assert d.loc["S00004", "invoice_number"] == "880000000004"                 # permit matched by Ref no
     assert d.loc["S00004", "Ref check"].startswith("matched by Ref no")
     assert "ambiguous" in d.loc["S00016", "Ref check"]                         # never chosen arbitrarily
     assert pd.isna(d.loc["S00019", "invoice_number"])                         # never matched on amount alone
     assert d.loc["S00018", "found_in_irembopay"]                               # leading-zero invoice matched
-    # the double credit: both rows on the statement, same invoice; the earlier one (S00008) is a re-send and is
-    # excluded, so only S00009 is left (still flagged: IremboPay recorded the credit against S00008's reference)
-    assert "S00008" not in d.index
+    # the double credit: both rows on the statement, same invoice, different Ref no - a genuine second credit, not
+    # a re-send. S00009 is kept as the invoice's own notification; S00008 is the extra credit: Bank duplicate,
+    # still counted in Processed, not in Notified.
+    assert "S00008" in d.index
+    assert bool(d.loc["S00008", "is_extra_credit"]) and d.loc["S00008", "Reason"] == "Bank duplicate"
+    assert not bool(d.loc["S00009", "is_extra_credit"])
+    assert int(d.loc["S00008", "times_on_statement"]) == 2 and int(d.loc["S00009", "times_on_statement"]) == 2
     assert d.loc["S00009", "Ref check"] == "IremboPay recorded another credit: Ref S00008"
-    assert not bool(d.loc["S00009", "is_extra_credit"]) and int(d.loc["S00009", "times_on_statement"]) == 1
     assert "Amount difference" in d.loc["S00007", "Reason"]
     assert "Currency difference" in d.loc["S00030", "Reason"]
     assert "Not settled (FAILED)" in d.loc["S00017", "Reason"]                 # an unknown status is not success
     assert "Other channel (MTN_MOMO)" in d.loc["S00005", "Reason"]
     t = e.counts_of(res.blocks[-1][2])
-    assert t["Overall processed payments"]["Total"] == 13
+    assert t["Overall processed payments"]["Total"] == 14
     assert t["Overall notifications received by Irembo"]["Total"] == 7         # 001 002 004 007 009 018 030
     assert t["Pending notifications"]["Total"] == 1                            # 003 (NEW)
-    assert t["Duplicate Payment"]["Total"] == 1                                # 005 (another channel)
-    # SLA as for I&M: paid_at day vs Value Date, 0 days allowed -> 002 and the surviving row of the double credit
-    assert t["SLA Violated"]["Total"] == 2
+    assert t["Duplicate Payment"]["Total"] == 2                                # 005 (another channel), 008 (bank)
+    # SLA as for I&M: paid_at day vs Value Date, 0 days allowed -> 002 and both rows of the double credit
+    assert t["SLA Violated"]["Total"] == 3
     assert d.loc["S00001", "sla_status"] == "On time" and d.loc["S00009", "sla_status"] == "SLA violated"
     assert d.loc["S00001", "Branch"] == "HEAD OFFICE"
 
