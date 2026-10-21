@@ -920,8 +920,10 @@ def auto_delivery(res, mem):
     key = (mem["name"], hashlib.md5(mem["xlsx"]).hexdigest())        # this very report (a new run = a new report)
     done = state.setdefault("auto_done", {}).setdefault(key, {})
     client, problem = drive_client()
-    root = config.load().reports_root_folder_id
-    location = report_history.drive_location(bank, period)
+    settings = config.load()
+    root = settings.reports_root_folder_id
+    layout = settings.report_layout
+    location = report_history.drive_location(bank, period, layout)
     files = {ext: mem[ext] for ext in ("xlsx", "pdf") if mem.get(ext)}
 
     # ---- 1. Google Drive
@@ -933,9 +935,9 @@ def auto_delivery(res, mem):
 
     def save(only=None):
         try:
-            existing = report_history.existing_reports(client, root, bank, period)
+            existing = report_history.existing_reports(client, root, bank, period, layout)
             results = report_history.save_report(client, root, bank, period, files,
-                                                 "replace" if existing else "new", existing, only)
+                                                 "replace" if existing else "new", existing, only, layout)
         except DriveError as err:
             results = [report_history.SaveResult(f"{report_history.report_stem(bank, period)}.{ext}", False,
                                                  error=str(err)) for ext in files]
@@ -1042,18 +1044,20 @@ def save_to_drive_card(mem, skey="drive_save"):
     {"mode", "existing", "results": [...]}  what Drive confirmed for each file (failed ones can be retried)
     A file is called saved only when Drive confirmed it (report_history.SaveResult.ok)."""
     client, problem = drive_client()
-    root = config.load().reports_root_folder_id
+    settings = config.load()
+    root = settings.reports_root_folder_id
+    layout = settings.report_layout
     if client is None or not root:
         st.caption("Google Drive is not set up: " + (problem or "no reports folder (reports_root_folder_id)."))
         return
-    location = report_history.drive_location(bank, period)
+    location = report_history.drive_location(bank, period, layout)
     status = state.get(skey) or {}
     files = {ext: mem[ext] for ext in ("xlsx", "pdf") if mem.get(ext)}
     kinds = " and ".join("Excel" if ext == "xlsx" else "PDF" for ext in files)
 
     def upload(mode, existing, only=None):
         with st.spinner("Saving to Google Drive…"):
-            new = report_history.save_report(client, root, bank, period, files, mode, existing, only)
+            new = report_history.save_report(client, root, bank, period, files, mode, existing, only, layout)
         results = {r.name: r for r in status.get("results", [])}
         results.update({r.name: r for r in new})
         state.history_index = None                      # Report History lists Drive again
@@ -1121,7 +1125,7 @@ def save_to_drive_card(mem, skey="drive_save"):
     if st.button("☁ Save to Google Drive", type="primary", key="drive_save_btn"):
         try:
             with st.spinner("Checking Google Drive…"):
-                existing = report_history.existing_reports(client, root, bank, period)
+                existing = report_history.existing_reports(client, root, bank, period, layout)
         except DriveError as err:
             st.error(f"Google Drive could not be checked: {err}", icon="⚠️")
             return
@@ -2340,6 +2344,8 @@ def drive_panel():
             st.caption(problem)
         else:
             st.caption(f"❌ {problem}")
+        st.caption("Reports saved to: " + ("Recon/<bank>/Weekly or Monthly" if drive_cfg.report_layout == "notebook"
+                                           else "<bank> Bank/<month>") + f" (report_layout = \"{drive_cfg.report_layout}\")")
         if drive_cfg.is_oauth:
             if client is None and st.button("Sign in with Google", type="primary", width="stretch",
                                             key="drive_sign_in"):

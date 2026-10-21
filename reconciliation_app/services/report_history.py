@@ -4,8 +4,12 @@ SAVED REPORTS: GOOGLE DRIVE FIRST
 Google Drive is the permanent storage of the standard reports (Excel + PDF). This file saves them there and finds
 them again; it uses integrations/google_drive.py for every Drive call and engine.py for names and titles.
 
-    On Drive:   <Reconciliation Reports>/<bank full name>/<YYYY-MM>/<CODE>_recon_summary_<first>_to_<last>[_vN].xlsx|pdf
-                YYYY-MM = the month the period starts in; _vN = a new version saved next to an earlier one
+    On Drive:   <Reconciliation Reports>/<top>/<second>/<CODE>_recon_summary_<first>_to_<last>[_vN].xlsx|pdf
+                <top>/<second> depends on the report_layout setting (config.py): "notebook" (default) is
+                <bank name>/<Weekly|Monthly>, the same folders the reconciliation notebooks use; "app" is
+                <bank full name>/<YYYY-MM>. _vN = a new version saved next to an earlier one. A report is found
+                again by its file name alone, so reading (Dashboard, Compare with previous period) works for
+                either layout without knowing the setting.
 
     existing_reports()   the files already saved for a report (duplicate check before saving)
     save_report()        upload Excel + PDF (at the same time): as new files, replacing the existing ones, or as a
@@ -49,8 +53,26 @@ def month_folder(period: engine.Period) -> str:
     return f"{period.start:%Y-%m}"
 
 
-def drive_location(bank, period) -> str:
-    return f"{REPORTS_FOLDER}/{bank_folder(bank)}/{month_folder(period)}"
+def _kind_folder(period: engine.Period) -> str:
+    """'Weekly' or 'Monthly' - the notebooks' own second folder (a day uses Weekly, the closest fit: the
+    notebooks only make weekly and monthly reports)."""
+    return "Monthly" if period.report_type == "month" else "Weekly"
+
+
+def location_parts(bank, period, layout: str) -> tuple:
+    """(top folder, second folder) of a report, for either layout:
+        "notebook"  <bank name>/<Weekly|Monthly>/            - what the reconciliation notebooks already use
+        "app"       <bank full name>/<YYYY-MM>/              - the app's own first layout
+    Reading (drive_index, find_previous, the Dashboard) does not need this: a report is recognised by its file
+    name alone, wherever it is saved."""
+    if layout == "notebook":
+        return engine.get_bank(bank).NAME, _kind_folder(period)
+    return bank_folder(bank), month_folder(period)
+
+
+def drive_location(bank, period, layout: str = "notebook") -> str:
+    top, second = location_parts(bank, period, layout)
+    return f"{REPORTS_FOLDER}/{top}/{second}"
 
 
 def report_stem(bank, period) -> str:
@@ -80,16 +102,18 @@ class SaveResult:
     replaced: bool = False
 
 
-def _month_folder_id(client, root_id, bank, period, create: bool):
-    bank_id = (client.find_or_create_folder if create else client.find_folder)(root_id, bank_folder(bank))
-    if not bank_id:
+def _report_folder_id(client, root_id, bank, period, layout, create: bool):
+    top, second = location_parts(bank, period, layout)
+    top_id = (client.find_or_create_folder if create else client.find_folder)(root_id, top)
+    if not top_id:
         return None
-    return (client.find_or_create_folder if create else client.find_folder)(bank_id, month_folder(period))
+    return (client.find_or_create_folder if create else client.find_folder)(top_id, second)
 
 
-def existing_reports(client, root_id: str, bank, period) -> list:
-    """Every file already saved for this report on Drive (all versions, Excel and PDF), newest first."""
-    folder = _month_folder_id(client, root_id, bank, period, create=False)
+def existing_reports(client, root_id: str, bank, period, layout: str = "notebook") -> list:
+    """Every file already saved for this report on Drive in this layout's folder (all versions, Excel and PDF),
+    newest first."""
+    folder = _report_folder_id(client, root_id, bank, period, layout, create=False)
     if not folder:
         return []
     stem = report_stem(bank, period)
@@ -104,8 +128,9 @@ def next_version(existing: list) -> int:
 
 
 def save_report(client, root_id: str, bank, period, files: dict, mode: str = "new", existing: list | None = None,
-                only: set | None = None) -> list:
-    """Upload the report files {ext: bytes} (ext = 'xlsx' / 'pdf') to <bank>/<YYYY-MM>/.
+                only: set | None = None, layout: str = "notebook") -> list:
+    """Upload the report files {ext: bytes} (ext = 'xlsx' / 'pdf') to the folder this layout gives (see
+    location_parts()).
     mode: 'new'      first save (no file of this report on Drive yet)
           'replace'  replace the content of the existing files of the same name (Drive keeps their history)
           'version'  save next to them as _v<N>
@@ -118,7 +143,7 @@ def save_report(client, root_id: str, bank, period, files: dict, mode: str = "ne
     names = {ext: f"{stem}.{ext}" for ext in files}
     targets = [(ext, name) for ext, name in names.items() if only is None or name in only]
     try:
-        folder = _month_folder_id(client, root_id, bank, period, create=True)
+        folder = _report_folder_id(client, root_id, bank, period, layout, create=True)
     except DriveError as err:
         return [SaveResult(name, False, error=str(err)) for _, name in targets]
     by_name = {f.name: f for f in existing}
@@ -202,17 +227,18 @@ def _record(f: DriveFile, p: dict) -> Record:
                   folder=f.folder, stem=p["stem"])
 
 
-def remember_saved(index: DriveIndex, results: list, bank, period) -> DriveIndex:
+def remember_saved(index: DriveIndex, results: list, bank, period, layout: str = "notebook") -> DriveIndex:
     """The listing with the files just saved (SaveResult confirmed by Drive) added - a replaced file keeps its ID
     and takes its new size and date - so Report History, Compare and the Dashboard need no new listing."""
-    folder = f"{bank_folder(bank)} / {month_folder(period)}"
+    top, second = location_parts(bank, period, layout)
+    folder = f"{top} / {second}"
     saved = {r.file.id: r.file for r in results if r.ok and r.file is not None}
     records = [r for r in index.records if r.file_id not in saved]
     for f in saved.values():
         p = parse_name(f.name)
         if p:
             records.append(_record(DriveFile(**{**f.__dict__, "folder": folder}), p))
-    folders = sorted(set(index.folders) | {bank_folder(bank), folder})
+    folders = sorted(set(index.folders) | {top, folder})
     return DriveIndex(_sorted(records), index.others, folders)
 
 

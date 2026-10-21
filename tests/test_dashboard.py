@@ -50,6 +50,17 @@ def test_records_keep_the_first_version_of_monthly_and_weekly_reports_only():
     assert [(r.kind, r.version) for r in kept] == [("week", 1), ("month", 1)]
 
 
+def test_the_same_report_is_not_doubled_when_it_exists_under_both_drive_layouts():
+    # a report saved under the notebook layout (Recon/I&M/Monthly) and the same report saved under the app layout
+    # (I&M Bank/2026-08) are the same name, in two different folders: report_records() must still keep one
+    older = record("IM", "month", "2026-08-01")
+    older.folder, older.modified = "I&M Bank / 2026-08", pd.Timestamp("2026-09-02", tz="UTC")
+    newer = record("IM", "month", "2026-08-01")
+    newer.folder, newer.modified = "I&M / Monthly", pd.Timestamp("2026-09-03", tz="UTC")
+    kept = d.report_records([older, newer])
+    assert len(kept) == 1 and kept[0].folder == "I&M Bank / 2026-08"      # same version: the first saved wins
+
+
 def test_a_monthly_report_gives_its_month_and_its_weeks():
     rep, rec = month_report()
     facts = d.facts_from_report(rep, rec, weekend={"2026-08-03": {"RWF": 2}})

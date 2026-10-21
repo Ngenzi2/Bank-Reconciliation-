@@ -32,7 +32,7 @@ def fakes(tmp_path, monkeypatch):
     monkeypatch.setattr(google_drive.DriveClient, "connect", classmethod(lambda cls, s: cls(object(), "oauth")))
     calls = {"saves": [], "sent": [], "existing": []}
 
-    def save_report(client, root, bank, period, files, mode="new", existing=None, only=None):
+    def save_report(client, root, bank, period, files, mode="new", existing=None, only=None, layout="notebook"):
         calls["saves"].append((mode, sorted(files)))
         if calls.get("drive_down"):
             return [report_history.SaveResult(f"x.{ext}", False, error="Drive is down") for ext in files]

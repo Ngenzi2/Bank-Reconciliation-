@@ -22,6 +22,13 @@ Each setting is taken from (first found):
     credentials_file          BANK_RECON_CREDENTIALS           ~/.config/bank-reconciliation/service-account.json
     reports_root_folder_id    BANK_RECON_REPORTS_FOLDER_ID     (none) the "Reconciliation Reports" folder
     irembopay_folder_id       BANK_RECON_IREMBOPAY_FOLDER_ID   (none) the folder of the IremboPay payment files
+    report_layout             BANK_RECON_REPORT_LAYOUT         notebook
+
+report_layout decides where a new report is saved inside Reconciliation Reports (services/report_history.py,
+location_parts()): "notebook" (default) = <bank name>/<Weekly|Monthly>/, the same folders the reconciliation
+notebooks already use; "app" = <bank full name>/<YYYY-MM>/, the app's own first layout. Reading a report back
+(Dashboard, Compare with previous period) works for either layout without this setting: a report is recognised
+by its file name alone, wherever it is saved.
 
 Each bank's statements and IremboPay exports folder (dianah branch: folders instead of uploads) is set the same
 way, in folders.toml (ignored by Git; folders.example.toml shows the format) - see load_folders().
@@ -41,12 +48,14 @@ DEFAULT_CREDENTIALS = SECRETS_DIR / "service-account.json"
 DEFAULT_OAUTH_CLIENT = SECRETS_DIR / "oauth-client.json"
 DEFAULT_TOKEN = SECRETS_DIR / "token.json"
 AUTH_MODES = ("oauth", "service_account")
+REPORT_LAYOUTS = ("notebook", "app")
 ENV = {"auth": "BANK_RECON_AUTH",
        "oauth_client_file": "BANK_RECON_OAUTH_CLIENT",
        "token_file": "BANK_RECON_TOKEN",
        "credentials_file": "BANK_RECON_CREDENTIALS",
        "reports_root_folder_id": "BANK_RECON_REPORTS_FOLDER_ID",
-       "irembopay_folder_id": "BANK_RECON_IREMBOPAY_FOLDER_ID"}
+       "irembopay_folder_id": "BANK_RECON_IREMBOPAY_FOLDER_ID",
+       "report_layout": "BANK_RECON_REPORT_LAYOUT"}
 
 
 @dataclass(frozen=True)
@@ -58,6 +67,7 @@ class DriveSettings:
     auth: str = "oauth"
     oauth_client_file: Path = DEFAULT_OAUTH_CLIENT   # the OAuth "Desktop app" client (auth = oauth)
     token_file: Path = DEFAULT_TOKEN                 # your sign-in, written by "Sign in with Google"
+    report_layout: str = "notebook"                  # where a new report is saved (see the module docstring)
 
     @property
     def is_oauth(self) -> bool:
@@ -75,6 +85,8 @@ class DriveSettings:
             out.append(f"No credentials file at {self.credentials_file}.")
         if not self.reports_root_folder_id and not self.irembopay_folder_id:
             out.append("No Drive folder set (reports_root_folder_id / irembopay_folder_id).")
+        if self.report_layout not in REPORT_LAYOUTS:
+            out.append(f"Unknown report_layout '{self.report_layout}' (use 'notebook' or 'app').")
         return out
 
 
@@ -99,7 +111,8 @@ def load(settings_file: Path = SETTINGS_FILE, env=None) -> DriveSettings:
                          irembopay_folder_id=get("irembopay_folder_id"), error=error,
                          auth=get("auth", "oauth").lower(),
                          oauth_client_file=path("oauth_client_file", DEFAULT_OAUTH_CLIENT),
-                         token_file=path("token_file", DEFAULT_TOKEN))
+                         token_file=path("token_file", DEFAULT_TOKEN),
+                         report_layout=get("report_layout", "notebook").lower())
 
 
 @dataclass(frozen=True)
