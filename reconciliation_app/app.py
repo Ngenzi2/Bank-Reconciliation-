@@ -1296,38 +1296,51 @@ def found_files_for_period():
     return folder_files.find_files(period, bank, config.load_folders(), drive=client)
 
 
-def _folder_field(label: str, key: str, default: str):
-    """A text box with a Browse button next to it: Browse opens the computer's own folder window and fills the
-    box; the box can still be typed or pasted into directly, so Browse is never required."""
+def _folder_field(label: str, key: str, default: str, kind: str):
+    """A text box with a Browse button next to it. Browse opens the computer's own folder window and saves the
+    folder it picked for this bank at once (config.save_one_folder: the other folder, if already set, is never
+    touched) - a short "Saved" note confirms it. The box can still be typed or pasted into directly; that still
+    needs "Save folder settings" below, same as before."""
     st.text_input(label, value=default, key=key)
+    if state.pop(f"{key}_just_saved", False):
+        st.markdown('<div class="prev-found save-note"><b>Saved</b></div>', unsafe_allow_html=True)
     b1, b2 = st.columns([1, 3])
     if b1.button("📂 Browse…", key=f"{key}_browse"):
         with st.spinner("Waiting for the folder window…"):
             path, error = folder_picker.browse_folder(f"Choose the {label}", state.get(key, default))
         if path:
             state[key] = path
+            config.save_one_folder(bank.CODE, kind, path)
+            state[f"{key}_just_saved"] = True
             st.rerun()
         elif error:
             b2.error(error + " Type or paste the path above instead.", icon="⚠️")
 
 
+def bank_fully_configured():
+    """True when this bank has BOTH its statements and exports folder set (Choose: hides the setup card)."""
+    spec = config.load_folders().get(bank.CODE) or {}
+    return bool(spec.get("statements")) and bool(spec.get("exports"))
+
+
 def folder_settings_editor():
-    """A small form to set this bank's statements/exports folder (Choose, shown only when none is set yet): Browse
-    to it, or type a local path, or "drive:<folder ID>" for a Google Drive folder. Saved straight to folders.toml."""
+    """A small form to set this bank's statements/exports folder (Choose, shown until both are set): Browse to
+    one - saved at once, no extra step - or type a local path, or "drive:<folder ID>" for a Google Drive folder,
+    then "Save folder settings" below."""
     spec = config.load_folders().get(bank.CODE) or {}
     cur_stm = spec.get("statements").value if spec.get("statements") else ""
     cur_exp = spec.get("exports").value if spec.get("exports") else ""
     stm_key, exp_key = f"folder_stm_input_{bank.CODE}", f"folder_exp_input_{bank.CODE}"
     with st.container(border=True):
         st.markdown(f'<div class="card-title">📁 Set the {bank.FULL_NAME} folders</div>', unsafe_allow_html=True)
-        st.caption("No folder is set yet for this bank, so the app cannot find its files by itself. Browse to "
-                   "each folder below (or type/paste the path, or \"drive:<folder ID>\" for a Google Drive "
-                   "folder) - or use a file instead, below, without setting anything.")
+        st.caption("Not every folder is set yet for this bank, so the app cannot find all its files by itself. "
+                   "Browse to each folder below (or type/paste the path, or \"drive:<folder ID>\" for a Google "
+                   "Drive folder) - or use a file instead, below, without setting anything.")
         f1, f2 = st.columns(2)
         with f1:
-            _folder_field(f"{bank.FULL_NAME} statements folder", stm_key, cur_stm)
+            _folder_field(f"{bank.FULL_NAME} statements folder", stm_key, cur_stm, "statements")
         with f2:
-            _folder_field("IremboPay exports folder", exp_key, cur_exp)
+            _folder_field("IremboPay exports folder", exp_key, cur_exp, "exports")
         if st.button("💾 Save folder settings", key="folder_save"):
             config.save_folders(bank.CODE, state.get(stm_key, cur_stm), state.get(exp_key, cur_exp))
             st.toast(f"Folders saved for {bank.FULL_NAME}", icon="📁")
@@ -2751,7 +2764,7 @@ elif state.step == 1:
             state.use_upload = checked
         else:
             state.use_upload = True
-    if not has_folders:
+    if not bank_fully_configured():
         folder_settings_editor()
     with st.container(border=True):
         prev = period.previous()

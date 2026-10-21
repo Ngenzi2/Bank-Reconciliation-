@@ -178,6 +178,21 @@ def save_folders(code: str, statements: str, exports: str, settings_file: Path =
     settings_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def save_one_folder(code: str, kind: str, path: str, settings_file: Path = FOLDERS_FILE) -> None:
+    """Sets one of a bank's two folders (kind: "statements" or "exports") and keeps the other one exactly as it
+    already is - what Browse saves at once, so picking one folder never clears or changes the other."""
+    current = load_folders(settings_file).get(code.upper()) or {}
+
+    def text(spec):
+        if spec is None:
+            return ""
+        return f"drive:{spec.value}" if spec.kind == "drive" else spec.value
+
+    statements = path if kind == "statements" else text(current.get("statements"))
+    exports = path if kind == "exports" else text(current.get("exports"))
+    save_folders(code, statements, exports, settings_file)
+
+
 def load_admins(settings_file: Path = SETTINGS_FILE, env=None) -> set:
     """The administrators of the app's settings (lower-case e-mail addresses): drive_settings.toml, section [access],
     admins = ["name@irembo.com", ...], and BANK_RECON_ADMINS (comma-separated). Set up by a developer on this
