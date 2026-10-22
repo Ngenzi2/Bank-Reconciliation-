@@ -206,8 +206,10 @@ st.markdown(f"""
   [data-testid="stSelectboxVirtualDropdown"] > div {{max-height: 80px !important; overflow-y: auto !important;}}
   section[data-testid="stSidebar"] [data-testid="stSelectbox"] input {{cursor: pointer; caret-color: transparent;}}
   /* a wider side panel with a larger page menu (Dashboard, Reconciliation, Reports, Bank Management, Settings) */
-  section[data-testid="stSidebar"] {{width: 380px !important; min-width: 380px !important;}}
-  section[data-testid="stSidebar"][aria-expanded="false"] {{min-width: 0 !important;}}
+  section[data-testid="stSidebar"][aria-expanded="true"] {{width: 380px !important; min-width: 380px !important;}}
+  /* collapsed: width must go to 0 too (not just min-width), or a 380px-wide panel leaves part of itself showing -
+     on a narrow screen that sliver sits on top of the page and covers real text */
+  section[data-testid="stSidebar"][aria-expanded="false"] {{width: 0 !important; min-width: 0 !important;}}
   /* the side menu: dark teal with the Irembo curves in the background (green tint), "Payment Operations" on top,
      then Workspace / Configuration; the page open has a green bar and a green dot */
   section[data-testid="stSidebar"] > div {{background-color: #133A3B; background-image: {SIDE_BG};
@@ -491,6 +493,12 @@ st.markdown(f"""
   .st-key-dash_tools button[data-testid="stPopoverButton"] div[aria-hidden="true"] {{display: none;}}
   .st-key-dash_tools button[data-testid="stPopoverButton"] p {{white-space: nowrap; font-weight: 700;}}
   .st-key-dash_tools [data-testid="stTooltipHoverTarget"] {{justify-content: stretch !important;}}
+  /* the toolbar wraps onto a second line rather than squeezing a label down to "…" on a narrower screen */
+  .st-key-dash_tools [data-testid="stHorizontalBlock"] {{flex-wrap: wrap; row-gap: .5rem;}}
+  .st-key-dash_tools [data-testid="stColumn"] {{min-width: 44px;}}
+  .st-key-dash_tools [data-testid="stColumn"]:nth-child(1) {{min-width: 6.5rem;}}
+  .st-key-dash_tools [data-testid="stColumn"]:nth-child(2) {{min-width: 11rem;}}
+  .st-key-dash_tools [data-testid="stColumn"]:nth-child(3) {{min-width: 9rem;}}
   .dt-cover {{font-size: .84rem; color: var(--rc-muted); border: 1px solid rgba(128,128,128,.22);
               border-radius: 10px; padding: .45rem .75rem; margin: 0 0 .9rem 0;}}
   .dt-path {{font-size: .85rem; font-weight: 800; color: var(--rc-muted);}}
@@ -2074,7 +2082,7 @@ def dashboard_page():
 
     hero_col, tools_col = st.columns([1, 1.3], vertical_alignment="top")
     with tools_col.container(key="dash_tools"):
-        b1, b2, b3, b4, b5, b6 = st.columns([1, 3.7, 1.55, .6, .6, .6], gap="small")
+        b1, b2, b3, b4, b5, b6 = st.columns([1.3, 3.3, 1.7, .6, .6, .6], gap="small")
         with b1.popover(kinds[kind], width="stretch", help="Year, quarter, month, week or day"):
             _seg("Period type", list(kinds), "dash_kind", default="month", fmt=kinds.get, wrap=True)
         period_text = (f"📅 {dashboard.describe(kind, first)}"
