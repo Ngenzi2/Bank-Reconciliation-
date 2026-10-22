@@ -749,6 +749,17 @@ def previous_counts():
         session.remove(path)
 
 
+def build_no_tx_mem():
+    """The memory bundle of a No-Transaction Report for the current bank and period (the Excel bytes, and the
+    previous period's counts for its comparison column) - what the preview, Drive save and Slack message use."""
+    made_at = pd.Timestamp.now()                # made once: the file downloaded is the one saved on Drive
+    with st.spinner(f"Looking for the {bank.NAME} {period.previous().name} report…"):
+        previous, compared_with, problem = previous_counts()
+    return {"name": f"{bank.CODE}{engine.REPORT_SUFFIX}{period.label}.xlsx", "made_at": made_at,
+            "xlsx": engine.no_transaction_excel(period, bank, made_at, previous),
+            "previous": previous, "compared_with": compared_with, "problem": problem}
+
+
 def run_reconciliation(acc):
     """engine.run for the current period, with the report written in the session's temporary folder. Rows not
     found in IremboPay are classified automatically before the report is made (no invoice number, or the
@@ -1312,8 +1323,9 @@ def _folder_field(label: str, key: str, default: str, kind: str):
     st.text_input(label, value=default, key=key)
     if state.pop(f"{key}_just_saved", False):
         st.markdown('<div class="prev-found save-note"><b>Saved</b></div>', unsafe_allow_html=True)
-    b1, b2 = st.columns([1, 3])
-    if b1.button("📂 Browse…", key=f"{key}_browse"):
+    # its own row, not a narrow sub-column: a column just wide enough for "Browse..." can crop the button's own
+    # label with an ellipsis (the same truncation the Dashboard toolbar had)
+    if st.button("📂 Browse…", key=f"{key}_browse"):
         with st.spinner("Waiting for the folder window…"):
             path, error = folder_picker.browse_folder(f"Choose the {label}", state.get(key, default))
         if path:
@@ -1322,28 +1334,21 @@ def _folder_field(label: str, key: str, default: str, kind: str):
             state[f"{key}_just_saved"] = True
             st.rerun()
         elif error:
-            b2.error(error + " Type or paste the path above instead.", icon="⚠️")
-
-
-def bank_fully_configured():
-    """True when this bank has BOTH its statements and exports folder set (Choose: hides the setup card)."""
-    spec = config.load_folders().get(bank.CODE) or {}
-    return bool(spec.get("statements")) and bool(spec.get("exports"))
+            st.error(error + " Type or paste the path above instead.", icon="⚠️")
 
 
 def folder_settings_editor():
-    """A small form to set this bank's statements/exports folder (Choose, shown until both are set): Browse to
-    one - saved at once, no extra step - or type a local path, or "drive:<folder ID>" for a Google Drive folder,
-    then "Save folder settings" below."""
+    """This bank's statements/exports folder (Choose): Browse to one - saved at once, no extra step - or type a
+    local path, or "drive:<folder ID>" for a Google Drive folder, then "Save folder settings". Shown open while
+    a folder is still missing; once both are set, a collapsed expander - so they can always be seen or changed,
+    not only the first time."""
     spec = config.load_folders().get(bank.CODE) or {}
     cur_stm = spec.get("statements").value if spec.get("statements") else ""
     cur_exp = spec.get("exports").value if spec.get("exports") else ""
     stm_key, exp_key = f"folder_stm_input_{bank.CODE}", f"folder_exp_input_{bank.CODE}"
-    with st.container(border=True):
-        st.markdown(f'<div class="card-title">📁 Set the {bank.FULL_NAME} folders</div>', unsafe_allow_html=True)
-        st.caption("Not every folder is set yet for this bank, so the app cannot find all its files by itself. "
-                   "Browse to each folder below (or type/paste the path, or \"drive:<folder ID>\" for a Google "
-                   "Drive folder) - or use a file instead, below, without setting anything.")
+    configured = bool(cur_stm) and bool(cur_exp)
+
+    def fields():
         f1, f2 = st.columns(2)
         with f1:
             _folder_field(f"{bank.FULL_NAME} statements folder", stm_key, cur_stm, "statements")
@@ -1353,6 +1358,18 @@ def folder_settings_editor():
             config.save_folders(bank.CODE, state.get(stm_key, cur_stm), state.get(exp_key, cur_exp))
             st.toast(f"Folders saved for {bank.FULL_NAME}", icon="📁")
             st.rerun()
+
+    if configured:
+        with st.expander(f"📁 {bank.FULL_NAME} folders"):
+            st.caption(f"Statements: {cur_stm}  \nIremboPay exports: {cur_exp}")
+            fields()
+    else:
+        with st.container(border=True):
+            st.markdown(f'<div class="card-title">📁 Set the {bank.FULL_NAME} folders</div>', unsafe_allow_html=True)
+            st.caption("Not every folder is set yet for this bank, so the app cannot find all its files by itself. "
+                       "Browse to each folder below (or type/paste the path, or \"drive:<folder ID>\" for a Google "
+                       "Drive folder) - or use a file instead, below, without setting anything.")
+            fields()
 
 
 def render_upload_section():
@@ -2628,7 +2645,8 @@ if PAGE == "settings":
 
 # =====================================================================================================================
 # 9. STEP 1 - CHOOSE: the bank, day / week / month, the date, and the optional comparison
-#    (+ the No-Transaction Report: "Generate" first opens its preview page, the Excel is downloaded from there)
+#    (+ the No-Transaction Report: run_reconciliation() finds no rows in the period and opens this preview
+#    automatically, instead of an error - nothing to choose up front)
 # =====================================================================================================================
 def render_no_tx_preview(period, bank, made_at, previous=None):
     """The No-Transaction Report as it will be in Excel: the same rows (engine.no_transaction_rows), texts and
@@ -2702,9 +2720,9 @@ if state.step == 1 and state.get("no_tx_preview"):
     mem = state.no_tx_mem
     made_at = mem["made_at"]
     with st.container(border=True):
-        st.markdown('<div class="card-title">No-Transaction Report · preview</div>', unsafe_allow_html=True)
-        st.caption(f"This is the Excel report that will be generated for {bank.FULL_NAME}, {period.name}. "
-                   "Check it, then download it, or go back to change the bank or the period.")
+        st.markdown('<div class="card-title">No-Transaction Report</div>', unsafe_allow_html=True)
+        st.caption(f"No {bank.FULL_NAME} transactions were found for {period.name}, so this is the report "
+                   "made instead. Check it, then download it, or go back to change the bank or the period.")
         if mem.get("previous") is not None:
             st.caption(f"{engine.previous_column(period)}: the transactions of {mem['compared_with']}.")
         else:
@@ -2772,8 +2790,7 @@ elif state.step == 1:
             state.use_upload = checked
         else:
             state.use_upload = True
-    if not bank_fully_configured():
-        folder_settings_editor()
+    folder_settings_editor()
     with st.container(border=True):
         prev = period.previous()
         st.checkbox(f"Compare with previous period ({prev.name})", key="compare",
@@ -2813,32 +2830,10 @@ elif state.step == 1:
                 if state.run_error:
                     st.error(state.run_error, icon="⚠️")
 
-        # ---- how the report is made: the normal reconciliation, or a report saying the bank had no transactions
-        #      (design only for now: the No-Transaction Report cannot be generated yet)
-        st.divider()
-        st.markdown('<div class="card-title">② Choose report generation method</div>', unsafe_allow_html=True)
-        st.radio("Report generation method", ["Standard reconciliation", "No-Transaction Report"], key="gen_method",
-                 label_visibility="collapsed",
-                 captions=["Continue to upload files and generate the normal report.",
-                           "Generate the existing Excel report format with a “No Transactions Recorded” status, "
-                           "without uploading transaction files."])
-    no_tx = state.get("gen_method") == "No-Transaction Report"
     c1, _, c3 = st.columns([1, 2, 1.3])
-    if no_tx:                                   # the report is seen first, on its own page (below)
-        if c3.button("Generate No-Transaction Report →", type="primary", width="stretch", disabled=bool(not_ended),
-                     help="This period has not ended yet" if not_ended else None):
-            state.no_tx_preview = True
-            made_at = pd.Timestamp.now()            # made once: the file downloaded is the one saved on Drive
-            with st.spinner(f"Looking for the {bank.NAME} {period.previous().name} report…"):
-                previous, compared_with, problem = previous_counts()
-            state.no_tx_mem = {"name": f"{bank.CODE}{engine.REPORT_SUFFIX}{period.label}.xlsx", "made_at": made_at,
-                               "xlsx": engine.no_transaction_excel(period, bank, made_at, previous),
-                               "previous": previous, "compared_with": compared_with, "problem": problem}
-            state.no_tx_drive = None
-            st.rerun()
-    elif c3.button("Next: check →", type="primary", width="stretch", disabled=not ready,
-                   help=None if ready else "This period has not ended yet" if not_ended
-                   else "Add the previous report first, or untick the comparison"):
+    if c3.button("Next: check →", type="primary", width="stretch", disabled=not ready,
+                help=None if ready else "This period has not ended yet" if not_ended
+                else "Add the previous report first, or untick the comparison"):
         state.run_error = None
         go(2)
 
@@ -2887,6 +2882,15 @@ elif state.step == 2:
                                    "please tell a developer.")
             else:
                 go(3)
+        except engine.NoTransactionsError:
+            # the files cover the period, but none of their rows fall in it: every category would be 0 anyway,
+            # so show the No-Transaction Report directly instead of an error
+            state.no_tx_mem = build_no_tx_mem()
+            state.no_tx_drive = None
+            state.run_error = None
+            state.step = 1
+            state.no_tx_preview = True
+            st.rerun()
         except engine.ReconError as err:
             state.run_error = str(err)
             st.rerun()

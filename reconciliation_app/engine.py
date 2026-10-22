@@ -73,6 +73,11 @@ class ReconError(Exception):
     """A problem explained in plain words for the user."""
 
 
+class NoTransactionsError(ReconError):
+    """The files cover the period, but none of their rows fall in it: the bank had no transactions. Not really a
+    problem - the app answers it with a No-Transaction Report (no_transaction_excel) instead of showing an error."""
+
+
 BANKS = banks.load()                       # {code: bank module}; raises ValueError if a bank file is incomplete
 DEFAULT_BANK = banks.ACTIVE[0].CODE        # I&M: used when no bank is given (e.g. by the notebook)
 
@@ -1067,7 +1072,7 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
     merged.loc[in_period, "period"] = "current"
     current = merged["period"].eq("current")
     if not current.any():
-        raise ReconError(f"The bank files have no Irembo payments with a {paid_on} in {period.name}.")
+        raise NoTransactionsError(f"The bank files have no Irembo payments with a {paid_on} in {period.name}.")
     no_invoice = merged.loc[current, "invoice_number"].isna().sum()
     if no_invoice:
         res.add("warning", f"{no_invoice} bank row(s) have no invoice number in the description.")

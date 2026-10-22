@@ -78,11 +78,13 @@ python3 -m streamlit run reconciliation_app/app.py
 Three steps: **Choose**, **Check**, **Results**.
 
 1. **Choose**: pick the bank and the period (the default is the last full week; any older day, week or month can
-   be picked). If the bank's statements/exports folders are set, the app finds its files itself; if not, set them
-   right there: **📂 Browse…** opens the computer's own folder window next to each box and saves the folder it
-   picked at once (no extra step); a typed or pasted path still needs **💾 Save folder settings**. Each bank's
-   folders are remembered in `folders.toml` (ignored by Git) for next time. "Use a file instead" uploads the
-   files by hand for this run, without setting anything up.
+   be picked). Its statements/exports folders are right there too - open while any is still missing, a collapsed
+   "📁 &lt;Bank&gt; folders" otherwise (so they can always be reviewed or changed, not only the first time):
+   **📂 Browse…** opens the computer's own folder window next to each box and saves the folder it picked at once
+   (no extra step); a typed or pasted path still needs **💾 Save folder settings**. Each bank's folders are
+   remembered in `folders.toml` (ignored by Git) for next time. "Use a file instead" uploads the files by hand
+   for this run, without setting anything up. If a period genuinely had no transactions, running it makes a
+   No-Transaction Report automatically - nothing to choose up front.
 2. **Check**: the app lists what it found (or what was uploaded) and any warning (a missing day, an old export,
    a file of another bank). **▶ Run reconciliation** turns on once everything is OK; the rules decide pending /
    duplicate / no invoice number by themselves - nothing to review by hand for normal cases.
