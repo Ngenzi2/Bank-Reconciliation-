@@ -43,6 +43,8 @@ from pathlib import Path
 OAUTH_SCOPES = ["https://www.googleapis.com/auth/drive.readonly", "https://www.googleapis.com/auth/drive.file"]
 SERVICE_ACCOUNT_SCOPES = ["https://www.googleapis.com/auth/drive"]   # limited in practice to the folders shared
 FOLDER_MIME = "application/vnd.google-apps.folder"
+SHEET_MIME = "application/vnd.google-apps.spreadsheet"             # a native Google Sheet: export, never get_media
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 FILE_FIELDS = "id, name, mimeType, size, modifiedTime, md5Checksum, parents"
 SHARED = {"supportsAllDrives": True}
 SIGN_IN_AGAIN = "Sign in again (side panel → Google Drive → Sign in with Google)."
@@ -415,9 +417,14 @@ class DriveClient:
         return sorted(found, key=lambda f: f.modified, reverse=True)
 
     # ---- reading --------------------------------------------------------------------------------------------------
-    def download(self, file_id: str) -> bytes:
-        """The content of a file, in memory (nothing is written on the computer)."""
-        data = self._run(self.service.files().get_media(fileId=file_id, **SHARED), "download the file")
+    def download(self, file_id: str, mime: str = "") -> bytes:
+        """The content of a file, in memory (nothing is written on the computer). mime: the file's own mimeType
+        (DriveFile.mime), when known - a native Google Sheet (the reconciliation notebooks sometimes save their
+        report as one, not an .xlsx) has no file of its own to download, so it is exported as .xlsx instead."""
+        if mime == SHEET_MIME:
+            data = self._run(self.service.files().export(fileId=file_id, mimeType=XLSX_MIME), "export the file")
+        else:
+            data = self._run(self.service.files().get_media(fileId=file_id, **SHARED), "download the file")
         return data if isinstance(data, bytes) else bytes(data)
 
     # ---- folders --------------------------------------------------------------------------------------------------

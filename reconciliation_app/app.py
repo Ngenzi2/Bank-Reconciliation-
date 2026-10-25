@@ -826,7 +826,7 @@ def _history_file_button(col, rec, client):
                     help="Fetch it from Google Drive, then click 'Save' to keep it"):
         try:
             with st.spinner(f"Downloading {rec.name}…"):
-                state.history_file = (rec.file_id, rec.name, client.download(rec.file_id))
+                state.history_file = (rec.file_id, rec.name, client.download(rec.file_id, rec.mime))
             st.rerun()
         except DriveError as err:
             st.error(str(err), icon="⚠️")
