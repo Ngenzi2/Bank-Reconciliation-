@@ -1046,20 +1046,25 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
     merged["found_in_irembopay"] = merged["_merge"].eq("both")
     merged = merged.drop(columns="_merge")
 
-    # ---- re-send vs bank duplicate: each invoice is Processed once per bank reference. The earliest credit is kept
-    #      (read back to RESEND_LOOKBACK_DAYS by the reference files). A later credit with the SAME bank reference
-    #      is a re-send of that one payment: excluded, on an earlier day or the same day alike; so is one IremboPay
-    #      already shows paid before this period (a bank that already keeps one row per invoice, e.g. Ecobank,
-    #      never has more than one here). A later credit with a DIFFERENT bank reference is a genuine extra credit
-    #      (the payer paid again): it is kept, in the week of that second credit, and goes to Duplicate Payment
-    #      ("Bank duplicate") further down - it is not excluded here, and still counts in Processed. ----
-    earliest_idx = merged.sort_values(paid_on, kind="stable").drop_duplicates("invoice_number", keep="first").index
-    earliest = merged.index.isin(earliest_idx)
-    first_ref = merged.loc[earliest].set_index("invoice_number")[ref]
-    later_ref = merged["invoice_number"].map(first_ref)
-    is_bank_duplicate = (merged["invoice_number"].notna() & ~earliest & merged[ref].notna() & later_ref.notna()
+    # ---- re-send vs bank duplicate: each invoice is Processed once per bank reference (read back to
+    #      RESEND_LOOKBACK_DAYS by the reference files). The payment is the credit whose bank reference IremboPay
+    #      recorded (provider_reference, from its own export); when IremboPay holds none of the invoice's
+    #      references, the payment is the first (earliest) credit instead (approved 2026-10-25). A later credit
+    #      with the SAME bank reference as the payment is a re-send of it: excluded, on an earlier day or the same
+    #      day alike; so is one IremboPay already shows paid before this period (a bank that already keeps one row
+    #      per invoice, e.g. Ecobank, never has more than one here). A credit with a DIFFERENT bank reference than
+    #      the payment is a genuine extra credit (the payer paid again): it is kept, in the week of that second
+    #      credit, and goes to Duplicate Payment ("Bank duplicate") further down - it is not excluded here, and
+    #      still counts in Processed. ----
+    is_recorded = (merged[ref].notna() & merged["provider_reference"].notna()
+                   & merged[ref].eq(merged["provider_reference"]))
+    order = merged.assign(_not_recorded=~is_recorded).sort_values(["_not_recorded", paid_on], kind="stable").index
+    is_payment = merged.index.isin(merged.loc[order].drop_duplicates("invoice_number", keep="first").index)
+    payment_ref = merged.loc[is_payment].set_index("invoice_number")[ref]
+    later_ref = merged["invoice_number"].map(payment_ref)
+    is_bank_duplicate = (merged["invoice_number"].notna() & ~is_payment & merged[ref].notna() & later_ref.notna()
                         & merged[ref].ne(later_ref))
-    is_resend = ((merged["invoice_number"].notna() & ~earliest & ~is_bank_duplicate)
+    is_resend = ((merged["invoice_number"].notna() & ~is_payment & ~is_bank_duplicate)
                 | merged["paid_at"].lt(start).fillna(False))
 
     if hasattr(bank, "in_period"):                        # the bank's own rule

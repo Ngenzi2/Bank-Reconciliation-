@@ -160,11 +160,11 @@ def test_matching_september(tmp_path):
     assert pd.isna(d.loc["S00019", "invoice_number"])                         # never matched on amount alone
     assert d.loc["S00018", "found_in_irembopay"]                               # leading-zero invoice matched
     # the double credit: both rows on the statement, same invoice, different Ref no - a genuine second credit, not
-    # a re-send. S00009 is kept as the invoice's own notification; S00008 is the extra credit: Bank duplicate,
-    # still counted in Processed, not in Notified.
+    # a re-send. IremboPay recorded Ref S00008 (the payments fixture's own ref=): S00008 is the payment; S00009
+    # is the extra credit: Bank duplicate, still counted in Processed, not in Notified.
     assert "S00008" in d.index
-    assert bool(d.loc["S00008", "is_extra_credit"]) and d.loc["S00008", "Reason"] == "Bank duplicate"
-    assert not bool(d.loc["S00009", "is_extra_credit"])
+    assert not bool(d.loc["S00008", "is_extra_credit"])
+    assert bool(d.loc["S00009", "is_extra_credit"]) and d.loc["S00009", "Reason"] == "Bank duplicate"
     assert int(d.loc["S00008", "times_on_statement"]) == 2 and int(d.loc["S00009", "times_on_statement"]) == 2
     assert d.loc["S00009", "Ref check"] == "IremboPay recorded another credit: Ref S00008"
     assert "Amount difference" in d.loc["S00007", "Reason"]
@@ -173,14 +173,14 @@ def test_matching_september(tmp_path):
     assert "Other channel (MTN_MOMO)" in d.loc["S00005", "Reason"]
     t = e.counts_of(res.blocks[-1][2])
     assert t["Overall processed payments"]["Total"] == 14
-    assert t["Overall notifications received by Irembo"]["Total"] == 7         # 001 002 004 007 009 018 030
+    assert t["Overall notifications received by Irembo"]["Total"] == 7         # 001 002 004 007 008 018 030
     assert t["Pending notifications"]["Total"] == 1                            # 003 (NEW)
-    assert t["Duplicate Payment"]["Total"] == 2                                # 005 (another channel), 008 (bank)
-    # SLA as for I&M: paid_at day vs Value Date, 0 days allowed -> 002 and S00009; S00008 is a bank duplicate and
+    assert t["Duplicate Payment"]["Total"] == 2                                # 005 (another channel), 009 (bank)
+    # SLA as for I&M: paid_at day vs Value Date, 0 days allowed -> 002 and S00008; S00009 is a bank duplicate and
     # is never counted in SLA, even though its own sla_status is also "SLA violated"
     assert t["SLA Violated"]["Total"] == 2
-    assert d.loc["S00008", "sla_status"] == "SLA violated"
-    assert d.loc["S00001", "sla_status"] == "On time" and d.loc["S00009", "sla_status"] == "SLA violated"
+    assert d.loc["S00009", "sla_status"] == "SLA violated"
+    assert d.loc["S00001", "sla_status"] == "On time" and d.loc["S00008", "sla_status"] == "SLA violated"
     assert d.loc["S00001", "Branch"] == "HEAD OFFICE"
 
 

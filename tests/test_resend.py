@@ -90,11 +90,10 @@ def test_a_second_credit_with_a_different_reference_is_a_bank_duplicate(tmp_path
     res = e.run(tmp_path / "base", SEP, [current, pay], require_review=False, bank="BOA", report_dir=tmp_path / "r")
     assert res.bank_rows == 2
     d = res.sheets["Payment details"].set_index("Ref no", drop=False)
-    # same Value Date for both: the engine keeps one of the two as the invoice's own notification and flags the
-    # other as the extra credit - exactly one of each, whichever BOA's own statement order puts first
-    extra = d.index[d["is_extra_credit"]]
-    assert len(extra) == 1 and set(extra) <= {"R00080", "R00081"}
-    assert d.loc[extra[0], "Reason"] == "Bank duplicate"
+    # IremboPay recorded R00080 (the payment's own ref=): that credit is the invoice's own notification, whatever
+    # order the statement lists them in; R00081 is the extra credit
+    assert not bool(d.loc["R00080", "is_extra_credit"])
+    assert bool(d.loc["R00081", "is_extra_credit"]) and d.loc["R00081", "Reason"] == "Bank duplicate"
     t = e.counts_of(res.blocks[-1][2])
     assert t["Overall processed payments"]["Total"] == 2
     assert t["Overall notifications received by Irembo"]["Total"] == 1          # the other credit is Notified
@@ -134,6 +133,65 @@ def test_a_second_credit_with_the_same_reference_is_still_a_resend(tmp_path):
     res = e.run(tmp_path / "base", SEP, [current, pay], require_review=False, bank="BOA", report_dir=tmp_path / "r")
     assert res.bank_rows == 1
     assert res.sheets["Payment details"]["invoice_number"].astype(str).tolist() == ["880000000090"]
+
+
+def test_irembopay_recorded_the_later_credit(tmp_path):
+    # two genuine SUCCESS credits, different references; IremboPay's own provider_reference is the SECOND one
+    # (R00111) - that credit is the payment even though it came later, not the earliest one
+    current = read_bank([
+        ("02/09/2026", "R00110", "ePay irembo 880000000110", None, 1000),    # first on the statement
+        ("04/09/2026", "R00111", "ePay irembo 880000000110", None, 1000),    # later, but IremboPay's own ref
+    ])
+    pay = e.read_payment_file("Payment details.csv", payments_csv([
+        dict(invoice="880000000110", amount=1000, paid_at="2026-09-04 09:05:00", ref="R00111"),
+    ]), "BOA")
+    res = e.run(tmp_path / "base", SEP, [current, pay], require_review=False, bank="BOA", report_dir=tmp_path / "r")
+    d = res.sheets["Payment details"].set_index("Ref no", drop=False)
+    assert not bool(d.loc["R00111", "is_extra_credit"])
+    assert bool(d.loc["R00110", "is_extra_credit"]) and d.loc["R00110", "Reason"] == "Bank duplicate"
+    t = e.counts_of(res.blocks[-1][2])
+    assert t["Overall processed payments"]["Total"] == 2
+    assert t["Overall notifications received by Irembo"]["Total"] == 1
+    assert t["Duplicate Payment"]["Total"] == 1
+
+
+def test_irembopay_holds_neither_reference_falls_back_to_the_first_credit(tmp_path):
+    # two genuine SUCCESS credits on the statement, but IremboPay's provider_reference matches neither of them
+    # (e.g. it was paid through yet another channel and later matched by invoice number only): the first credit
+    # by date is the payment, same as before this rule existed
+    current = read_bank([
+        ("02/09/2026", "R00120", "ePay irembo 880000000120", None, 1000),
+        ("04/09/2026", "R00121", "ePay irembo 880000000120", None, 1000),
+    ])
+    pay = e.read_payment_file("Payment details.csv", payments_csv([
+        dict(invoice="880000000120", amount=1000, paid_at="2026-09-02 09:05:00", ref="SOME_OTHER_REF"),
+    ]), "BOA")
+    res = e.run(tmp_path / "base", SEP, [current, pay], require_review=False, bank="BOA", report_dir=tmp_path / "r")
+    d = res.sheets["Payment details"].set_index("Ref no", drop=False)
+    assert not bool(d.loc["R00120", "is_extra_credit"])        # the earliest credit, since neither ref matches
+    assert bool(d.loc["R00121", "is_extra_credit"]) and d.loc["R00121", "Reason"] == "Bank duplicate"
+    t = e.counts_of(res.blocks[-1][2])
+    assert t["Overall processed payments"]["Total"] == 2
+    assert t["Duplicate Payment"]["Total"] == 1
+
+
+def test_a_resend_of_the_recorded_payment_is_still_ignored(tmp_path):
+    # three credits: an earlier one IremboPay does not recognise, the recorded payment, and a re-send of that
+    # recorded payment (same reference) - only the recorded one and the unrelated extra credit count
+    current = read_bank([
+        ("01/09/2026", "R00130", "ePay irembo 880000000130", None, 1000),    # not IremboPay's recorded ref
+        ("03/09/2026", "R00131", "ePay irembo 880000000130", None, 1000),    # the recorded payment
+        ("05/09/2026", "R00131", "ePay irembo 880000000130", None, 1000),    # a re-send of the recorded payment
+    ])
+    pay = e.read_payment_file("Payment details.csv", payments_csv([
+        dict(invoice="880000000130", amount=1000, paid_at="2026-09-03 09:05:00", ref="R00131"),
+    ]), "BOA")
+    res = e.run(tmp_path / "base", SEP, [current, pay], require_review=False, bank="BOA", report_dir=tmp_path / "r")
+    assert res.bank_rows == 2                                   # the re-send (second R00131) is not counted at all
+    d = res.sheets["Payment details"].set_index("Ref no", drop=False)
+    assert set(d.index) == {"R00130", "R00131"}
+    assert not bool(d.loc["R00131", "is_extra_credit"])
+    assert bool(d.loc["R00130", "is_extra_credit"]) and d.loc["R00130", "Reason"] == "Bank duplicate"
 
 
 def test_a_bank_duplicate_belongs_to_the_week_of_the_second_credit(tmp_path):
