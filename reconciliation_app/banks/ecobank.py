@@ -1,8 +1,7 @@
 """
 ECOBANK
 =======
-Everything that is specific to Ecobank (the common rules are in engine.py). The rules come from the old Ecobank
-tool (~/Irembo reconciliation/Ecobank-Reconciliation) and give the same figures.
+Everything that is specific to Ecobank (the common rules are in engine.py).
 
 The Ecobank statement ("IREMBO PAY" export) is a log of payment REQUESTS, not of credits
     - Request Date = when the customer paid at Ecobank, in UTC; Kigali time = UTC + 2 h
@@ -10,9 +9,11 @@ The Ecobank statement ("IREMBO PAY" export) is a log of payment REQUESTS, not of
     - one file holds every currency (Ccy column); a file's day is read from its Request Dates, not its name
     - TACCT (transit-account) files are a different flow: they are refused
 
-The report follows the old tool
-    - processed = IremboPay payments made through ECOBANK, counted by paid_at
-    - pending and "not found in IremboPay" = invoices Ecobank requested in the period
+The report (approved 2026-10-25; before that, processed/notified/SLA/duplicate were counted by IremboPay's
+paid_at instead - CLAUDE.md gap #1 - which could make Processed smaller than Notified + Pending + Duplicate)
+    - processed = every bank row Ecobank itself answered SUCCESS for (Cba Rsp Msg), requested in the period - the
+      bank statement is the source of truth, whether or not IremboPay ever matched the invoice
+    - notified / SLA violated / pending / duplicate = how IremboPay answered each processed row
     - "Duplicate Payment" table = paid with another channel (each invoice once)
 
 CONTENTS (same numbers as im.py; section 7 exists only for Ecobank)
@@ -213,10 +214,17 @@ def sla(rows: pd.DataFrame, sla_days: int):
     return diff, status
 
 
+def bank_success(rows: pd.DataFrame) -> pd.Series:
+    """Every invoice the bank itself answered SUCCESS for (Cba Rsp Msg - Ecobank's own response, not Biller Rsp
+    Code which is IremboPay's answer to Ecobank): what "processed" starts from (CLAUDE.md: the bank statement is
+    the source of truth, never the IremboPay export)."""
+    return rows["Cba Rsp Msg"].astype(str).str.strip().str.upper().eq("SUCCESS")
+
+
 def received(rows: pd.DataFrame) -> pd.Series:
     """Notification received by Irembo: paid through Ecobank and no longer NEW."""
     return (rows["found_in_irembopay"] & rows["payment_provider"].eq(PROVIDER)
-            & ~rows["payment_status"].isin(PENDING_STATUSES) & _paid_when(rows).notna())
+            & ~rows["payment_status"].isin(PENDING_STATUSES))
 
 
 def pending(rows: pd.DataFrame) -> pd.Series:
@@ -225,14 +233,17 @@ def pending(rows: pd.DataFrame) -> pd.Series:
 
 
 def duplicate(rows: pd.DataFrame) -> pd.Series:
-    """Paid with another channel: Ecobank received it, but IremboPay says another provider was used (a row the
-    review placed here without a paid_at is dated by its Request Date, see _paid_when)."""
+    """Paid with another channel: Ecobank received it, but IremboPay says another provider was used."""
     return (rows["found_in_irembopay"] & rows["payment_provider"].notna() & rows["payment_provider"].ne(PROVIDER)
-            & ~rows["payment_status"].isin(PENDING_STATUSES) & _paid_when(rows).notna())
+            & ~rows["payment_status"].isin(PENDING_STATUSES))
 
 
 # =====================================================================================================================
 # 7. WHICH ROWS GO IN THE PERIOD AND IN EACH TABLE (I&M uses the engine's default: by payment date)
+#    Every table is windowed the same way, by when Ecobank requested the invoice (its own bank time, converted
+#    to Kigali) - never by when IremboPay says it was paid: the bank statement is the source of truth
+#    (CLAUDE.md gap #1, approved 2026-10-25). Processed = every bank SUCCESS row requested in the period, whether
+#    or not IremboPay ever matched it.
 # =====================================================================================================================
 def _requested(rows, attempts, a, b):
     """Invoices Ecobank sent any attempt for in [a, b): a retried, unresolved invoice stays visible."""
@@ -240,42 +251,18 @@ def _requested(rows, attempts, a, b):
     return rows["invoice_number"].isin(set(sent))
 
 
-FIRST_IN_PERIOD = "_first_request_in_period"     # set by in_period(): the first attempt inside the reconciled period
-
-
-def _paid_when(rows):
-    """paid_at; for an invoice the review placed in 'Notification received' or 'Paid with other channel' without a
-    paid_at (it is not in the IremboPay payment file), the Ecobank Request Date (Kigali time): its first attempt
-    INSIDE the reconciled period when it has one there, otherwise its first attempt. One date per invoice for the
-    whole report, so it is counted once (in one month, and in one week of it)."""
-    review_table = rows["review_table"] if "review_table" in rows else pd.Series("", index=rows.index)
-    use_request = rows["paid_at"].isna() & review_table.isin(["Notification received", "Paid with other channel"])
-    request = rows["Request Date"]
-    if FIRST_IN_PERIOD in rows:
-        request = rows[FIRST_IN_PERIOD].where(rows[FIRST_IN_PERIOD].notna(), request)
-    return rows["paid_at"].where(~use_request, request)
-
-
 def in_period(rows, attempts, start, end) -> pd.Series:
-    """A row belongs to the period when Ecobank requested it then, or IremboPay says it was paid then.
-    Also records on the rows the first attempt of each invoice inside the period (used by _paid_when)."""
-    inside = attempts[(attempts["Request Date"] >= start) & (attempts["Request Date"] < end)]
-    first_in = inside.groupby("invoice_number")["Request Date"].min()
-    # .map() on an empty mapper crashes (pandas tries to cast it to float64): no attempt is inside the period then,
-    # so every invoice's first-in-period date is simply unknown (NaT)
-    rows[FIRST_IN_PERIOD] = (rows["invoice_number"].map(first_in) if len(first_in)
-                             else pd.Series(pd.NaT, index=rows.index, dtype=first_in.dtype))
-    paid = _paid_when(rows)
-    return _requested(rows, attempts, start, end) | ((paid >= start) & (paid < end))
+    """A row belongs to the period when Ecobank requested it then - the bank's own Request Date, never IremboPay's
+    paid_at."""
+    return _requested(rows, attempts, start, end)
 
 
 def tables(rows, attempts, a, b) -> dict:
-    """Rows of the 5 tables for [a, b), as in the old tool: payments by paid_at, pending by request date."""
-    paid = _paid_when(rows)
-    paid_in = (paid >= a) & (paid < b)
-    processed = paid_in & rows["payment_provider"].eq(PROVIDER)
+    """Rows of the 5 tables for [a, b): all windowed together, by Request Date. Processed = every bank SUCCESS
+    row Ecobank requested in the period; the other four tables are how IremboPay answered each processed row."""
+    processed = _requested(rows, attempts, a, b) & bank_success(rows)
     return {"processed": processed,
-            "received": processed & ~rows["payment_status"].isin(PENDING_STATUSES),
+            "received": processed & received(rows),
             "sla": processed & rows["sla_status"].eq("SLA violated"),
-            "pending": _requested(rows, attempts, a, b) & pending(rows),
-            "duplicate": paid_in & duplicate(rows)}
+            "pending": processed & pending(rows),
+            "duplicate": processed & duplicate(rows)}
