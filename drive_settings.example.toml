@@ -24,6 +24,11 @@ reports_root_folder_id = ""
 # My Drive: Bank Reconciliation/IremboPay File (files in it and in its subfolders, up to 3 levels, are listed)
 irembopay_folder_id = ""
 
+# the shared "Statements" folder (month folders, every bank's files together - the reconciliation notebooks' own
+# folder): a fallback only. When a bank's statements folder (set in the app, Choose) is local and does not have
+# every file a period needs, the app also looks here before asking for files to be uploaded by hand.
+statements_root_folder_id = ""
+
 # where a new report is saved inside Reconciliation Reports:
 #   "notebook"  (default) <bank name>/<Weekly|Monthly>/   - the same folders the reconciliation notebooks use
 #   "app"                 <bank full name>/<YYYY-MM>/     - the app's own first layout

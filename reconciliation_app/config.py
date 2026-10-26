@@ -22,7 +22,12 @@ Each setting is taken from (first found):
     credentials_file          BANK_RECON_CREDENTIALS           ~/.config/bank-reconciliation/service-account.json
     reports_root_folder_id    BANK_RECON_REPORTS_FOLDER_ID     (none) the "Reconciliation Reports" folder
     irembopay_folder_id       BANK_RECON_IREMBOPAY_FOLDER_ID   (none) the folder of the IremboPay payment files
+    statements_root_folder_id BANK_RECON_STATEMENTS_FOLDER_ID  (none) the shared "Statements" folder (month
+                              folders, every bank's files together - the reconciliation notebooks' own folder)
     report_layout             BANK_RECON_REPORT_LAYOUT         notebook
+
+statements_root_folder_id is a fallback, not a per-bank setting: when a bank's own statements folder (folders.toml)
+is local and does not have every file a period needs, services/folder_files.py also looks here before giving up.
 
 report_layout decides where a new report is saved inside Reconciliation Reports (services/report_history.py,
 location_parts()): "notebook" (default) = <bank name>/<Weekly|Monthly>/, the same folders the reconciliation
@@ -55,6 +60,7 @@ ENV = {"auth": "BANK_RECON_AUTH",
        "credentials_file": "BANK_RECON_CREDENTIALS",
        "reports_root_folder_id": "BANK_RECON_REPORTS_FOLDER_ID",
        "irembopay_folder_id": "BANK_RECON_IREMBOPAY_FOLDER_ID",
+       "statements_root_folder_id": "BANK_RECON_STATEMENTS_FOLDER_ID",
        "report_layout": "BANK_RECON_REPORT_LAYOUT"}
 
 
@@ -63,6 +69,7 @@ class DriveSettings:
     credentials_file: Path                           # the service-account key (auth = service_account)
     reports_root_folder_id: str = ""
     irembopay_folder_id: str = ""
+    statements_root_folder_id: str = ""
     error: str = ""                                  # drive_settings.toml could not be read
     auth: str = "oauth"
     oauth_client_file: Path = DEFAULT_OAUTH_CLIENT   # the OAuth "Desktop app" client (auth = oauth)
@@ -108,7 +115,8 @@ def load(settings_file: Path = SETTINGS_FILE, env=None) -> DriveSettings:
 
     return DriveSettings(credentials_file=path("credentials_file", DEFAULT_CREDENTIALS),
                          reports_root_folder_id=get("reports_root_folder_id"),
-                         irembopay_folder_id=get("irembopay_folder_id"), error=error,
+                         irembopay_folder_id=get("irembopay_folder_id"),
+                         statements_root_folder_id=get("statements_root_folder_id"), error=error,
                          auth=get("auth", "oauth").lower(),
                          oauth_client_file=path("oauth_client_file", DEFAULT_OAUTH_CLIENT),
                          token_file=path("token_file", DEFAULT_TOKEN),

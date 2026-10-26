@@ -17,6 +17,31 @@ def spec(path):
     return config.FolderSpec("local", str(path))
 
 
+class FakeDrive:
+    """A drive=... good enough for folder_files: find_folder()/list_files()/download(), no real Drive API call -
+    the shared Statements folder's own layout (a '<Month Year>' sub-folder per month)."""
+    def __init__(self, months):
+        self.months = months                           # {"August 2026": [(DriveFile-like, content bytes), ...]}
+        self.ids = {name: f"folder-{name}" for name in months}
+
+    def find_folder(self, parent_id, name):
+        return self.ids.get(name)
+
+    def list_files(self, folder_id, extensions=()):
+        ends = tuple(f".{x.lower()}" for x in extensions)
+        name = next((n for n, i in self.ids.items() if i == folder_id), None)
+        files = self.months.get(name, [])
+        return [f for f, _ in files if not ends or f.name.lower().endswith(ends)]
+
+    def download(self, file_id, mime=""):
+        return next(c for files in self.months.values() for f, c in files if f.id == file_id)
+
+
+def drive_file(id, name, modified="2026-09-10T00:00:00.000Z"):
+    from integrations.google_drive import DriveFile
+    return DriveFile(id, name, modified=modified)
+
+
 def im_statement(rows):
     """rows: [(Transaction Date 'dd/mm/yyyy', Value Date 'dd/mm/yyyy', Description, Tran Id, Credit)]."""
     wb = Workbook()
@@ -99,3 +124,31 @@ def test_reading_is_cached_until_the_file_changes(tmp_path):
     os.utime(f, (time.time() + 5, time.time() + 5))                 # force a different mtime
     changed = ff.find_files(SEP, "BOA", folders).statements[0]
     assert changed is not first and changed.first == pd.Timestamp("2026-09-06")
+
+
+def test_a_local_gap_is_filled_from_the_shared_drive_statements_folder(tmp_path, monkeypatch):
+    # local has September only; the shared Drive "Statements" folder also has an older file the 45-day lookback
+    # needs (reference only, never required) - approved 2026-10-26
+    monkeypatch.setenv("BANK_RECON_STATEMENTS_FOLDER_ID", "ROOT123")
+    stm_dir = tmp_path / "stm"
+    write(stm_dir, "september.xlsx", statement([("05/09/2026", "R2", "ePay irembo 880000000002", None, 2000)]))
+    content = statement([("20/08/2026", "R1", "ePay irembo 880000000001", None, 1000)])
+    drive = FakeDrive({"August 2026": [(drive_file("D1", "august.xlsx"), content)]})
+    folders = {"BOA": {"statements": spec(stm_dir), "exports": None}}
+    found = ff.find_files(SEP, "BOA", folders, drive=drive)
+    assert [f.name for f in found.statements] == ["september.xlsx"]
+    assert [f.name for f in found.reference] == ["august.xlsx"]
+    assert found.reference[0].reference is True
+
+
+def test_drive_is_not_asked_when_the_shared_folder_is_not_set(tmp_path):
+    # the default (no statements_root_folder_id): behaves exactly as before this fallback existed
+    stm_dir = tmp_path / "stm"
+    write(stm_dir, "september.xlsx", statement([("05/09/2026", "R1", "ePay irembo 880000000001", None, 1000)]))
+
+    class Boom(FakeDrive):
+        def find_folder(self, *a, **k):
+            raise AssertionError("Drive should not have been asked")
+    folders = {"BOA": {"statements": spec(stm_dir), "exports": None}}
+    found = ff.find_files(SEP, "BOA", folders, drive=Boom({}))
+    assert [f.name for f in found.statements] == ["september.xlsx"]

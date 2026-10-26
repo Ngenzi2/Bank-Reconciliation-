@@ -12,6 +12,12 @@ needs. A folder can be local (any sub-folders allowed) or a Google Drive folder.
         .exports      every IremboPay export file in the exports folder
         .problems     what looks wrong, in plain words (file of another bank, folder not found, ...); missing
                       days, a short payment file and a currency/stale-export warning are engine.check_period's job
+
+    A local statements folder that does not have every day a period needs (the period itself, or the re-send
+    lookback before it) is topped up from config.DriveSettings.statements_root_folder_id, when Drive is connected
+    and that setting is filled in - the shared "Statements" folder the reconciliation notebooks already use, so
+    nothing needs to be downloaded by hand first. Local files always win; Drive is only asked about the days still
+    missing after them, approved 2026-10-26.
     describe(found) -> ["Statements found: ...", "IremboPay export: ..."]   (the Check screen's file list)
     all_files(found) -> found.statements + found.reference + found.exports (what engine.check_period / run need)
 
@@ -25,6 +31,7 @@ from pathlib import Path
 
 import pandas as pd
 
+import config
 import engine
 
 _CACHE: dict = {}
@@ -215,6 +222,28 @@ def _window(period, bank):
     return window_start, window_end
 
 
+def _needed_days(period, bank) -> set:
+    """Every day a period could use from a statement file: the usual window, plus the re-send lookback before it."""
+    window_start, window_end = _window(period, bank)
+    lookback_start = period.start - pd.Timedelta(days=engine.RESEND_LOOKBACK_DAYS)
+    return set(pd.date_range(lookback_start, window_end))
+
+
+def _covered_days(candidates: list) -> set:
+    covered = set()
+    for f in candidates:
+        covered |= set(pd.date_range(f.first, f.last))
+    return covered
+
+
+def _month_folders(drive, root: str, days: set) -> list:
+    """The shared Statements folder's own '<Month Year>' sub-folder ids touching `days` - so a fallback only
+    lists and downloads the few months actually needed, never the whole shared folder (every bank's files, years
+    of them)."""
+    names = sorted({d.strftime("%B %Y") for d in days})
+    return [sub for sub in (drive.find_folder(root, name) for name in names) if sub]
+
+
 def _sort_statements(candidates: list, period, bank) -> tuple[list, list]:
     """Candidates -> (statements inside the usual window, older ones kept only to spot re-sends)."""
     window_start, window_end = _window(period, bank)
@@ -245,6 +274,14 @@ def find_files(period, bank, folders: dict, drive=None) -> FoundFiles:
     else:
         candidates = (_local_statements(stm_spec.value, bank, found.problems) if stm_spec.kind == "local"
                      else _drive_statements(stm_spec.value, bank, drive, found.problems))
+        if stm_spec.kind == "local" and drive is not None:
+            root = config.load().statements_root_folder_id
+            needed = _needed_days(period, bank)
+            if root and not (needed <= _covered_days(candidates)):
+                have = {f.digest for f in candidates}
+                for sub in _month_folders(drive, root, needed):
+                    candidates += [f for f in _drive_statements(sub, bank, drive, found.problems)
+                                  if f.digest not in have]
         found.statements, found.reference = _sort_statements(candidates, period, bank)
 
     if exp_spec is None:
