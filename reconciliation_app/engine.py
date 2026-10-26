@@ -317,6 +317,7 @@ class UploadedFile:
     reference: bool = False    # bank file read only to spot re-sends (section 9); never required, never counted
     order: float = field(default_factory=lambda: next(_FILE_ORDER))   # read order, or a file's own mtime (newer wins)
     taken_at: pd.Timestamp | None = None   # payments file: when it was downloaded (folder-found files only)
+    from_drive: bool = False   # found in the shared Drive statements folder, not the bank's own local folder
 
 
 def file_digest(content: bytes) -> str:

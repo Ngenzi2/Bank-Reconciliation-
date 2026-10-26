@@ -139,6 +139,9 @@ def test_a_local_gap_is_filled_from_the_shared_drive_statements_folder(tmp_path,
     assert [f.name for f in found.statements] == ["september.xlsx"]
     assert [f.name for f in found.reference] == ["august.xlsx"]
     assert found.reference[0].reference is True
+    assert found.reference[0].from_drive is True
+    assert not found.statements[0].from_drive                      # the local file is not marked as Drive's
+    assert "(1 from Drive)" in ff.describe(found)[0]
 
 
 def test_drive_is_checked_every_time_not_only_when_local_is_short(tmp_path, monkeypatch):

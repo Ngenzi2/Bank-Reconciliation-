@@ -50,12 +50,14 @@ def all_files(found: FoundFiles) -> list:
 
 
 def describe(found: FoundFiles) -> list:
-    """Plain-language lines for the Check screen, e.g. 'Statements found: 1 Oct - 7 Oct, 7 files'."""
+    """Plain-language lines for the Check screen, e.g. 'Statements found: 1 Oct - 7 Oct, 7 files (2 from Drive)'."""
     lines = []
     if found.statements:
         first, last = min(f.first for f in found.statements), max(f.last for f in found.statements)
         n = len(found.statements)
-        lines.append(f"Statements found: {first:%d %b} – {last:%d %b}, {n} file{'s' if n != 1 else ''}")
+        from_drive = sum(1 for f in found.statements + found.reference if f.from_drive)
+        extra = f" ({from_drive} from Drive)" if from_drive else ""
+        lines.append(f"Statements found: {first:%d %b} – {last:%d %b}, {n} file{'s' if n != 1 else ''}{extra}")
     else:
         lines.append("Statements found: none")
     if found.exports:
@@ -272,7 +274,7 @@ def find_files(period, bank, folders: dict, drive=None) -> FoundFiles:
             if root:                                      # checked every time, the way the notebooks do it
                 have = {f.digest for f in candidates}
                 for sub in _month_folders(drive, root, _needed_days(period, bank)):
-                    candidates += [f for f in _drive_statements(sub, bank, drive, found.problems)
+                    candidates += [replace(f, from_drive=True) for f in _drive_statements(sub, bank, drive, found.problems)
                                   if f.digest not in have]
         found.statements, found.reference = _sort_statements(candidates, period, bank)
 
