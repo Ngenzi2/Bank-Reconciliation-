@@ -1,5 +1,6 @@
-"""Review rule (approved 2026-10-12): an invoice the IremboPay check found EXPIRED is put in "Pending notification"
-and keeps EXPIRED as its status in the report - Ecobank first, then I&M and Bank of Africa too.
+"""Review rule (2026-10-20, replaces 2026-10-12): "expired" is not a payment status. An invoice the IremboPay check
+found expired was never paid: it is put in "Pending notification" with payment_status NEW, and the expiry is a note
+(review status "Pending notification (invoice expired)"). Every bank.
 Uses the real August 2026 samples when they are on this computer (skipped otherwise)."""
 import glob
 import os
@@ -20,9 +21,14 @@ SAMPLES = {
 }
 
 
-def test_ecobank_counts_expired_as_pending_not_received():
-    rows = pd.DataFrame({"payment_status": ["EXPIRED", "NEW", "PAID"]})
-    assert ecobank.pending(rows).tolist() == [True, True, False]
+def test_pending_is_in_irembopay_without_paid_at():
+    # 26/10/2026: paid = paid_at filled, whatever the status; pending = in IremboPay without paid_at
+    rows = pd.DataFrame({"found_in_irembopay": [True, True, True, False],
+                         "payment_status": ["EXPIRED", "NEW", "PAID", None],
+                         "paid_at": pd.to_datetime([None, None, "2026-08-01", None]),
+                         "payment_provider": ["ECOBANK"] * 3 + [None]})
+    assert ecobank.pending(rows).tolist() == [True, True, False, False]
+    assert ecobank.received(rows).tolist() == [False, False, True, False]
 
 
 def run_with_decisions(tmp_path, bank, decide):
@@ -53,42 +59,56 @@ def pending_total(res):
     return int(main[main["Currency"].isna()]["Number of Transactions"].iloc[0])
 
 
-def test_ecobank_expired_goes_to_pending_and_keeps_expired(tmp_path):
+def test_ecobank_expired_goes_to_pending_as_new_with_a_note(tmp_path):
     def decide(review):
         review["Reviewed (Yes/No)"] = "Yes"
         review["Report table"] = "Paid with other channel"
-        review.loc[review.index[0], ["Report table", "payment_status"]] = ["Pending notification", "EXPIRED"]
-        review.loc[review.index[1], ["Report table", "payment_status"]] = ["Pending notification", "NEW"]
+        once = review["invoice_number"].astype(str).map(review["invoice_number"].astype(str).value_counts()).eq(1)
+        picks = review.index[once][:2]
+        review.loc[picks[0], ["Report table", "payment_status"]] = ["Pending notification", "EXPIRED"]
+        review.loc[picks[1], ["Report table", "payment_status"]] = ["Pending notification", "NEW"]
+        review.attrs["picks"] = list(picks)
         return review
     review, res, details = run_with_decisions(tmp_path, "ECO", decide)
     assert not res.stopped_for_review
-    inv = review["invoice_number"].astype(str)
-    status = details.set_index(details["invoice_number"].astype(str))["payment_status"]
-    assert status[inv.iloc[0]] == "EXPIRED" and status[inv.iloc[1]] == "NEW"
+    inv = review.loc[review.attrs["picks"], "invoice_number"].astype(str)
+    by_inv = details.set_index(details["invoice_number"].astype(str))
+    assert by_inv["payment_status"][inv.iloc[0]] == "NEW" and by_inv["payment_status"][inv.iloc[1]] == "NEW"
+    assert by_inv["review_status"][inv.iloc[0]] == "Pending notification (invoice expired)"
+    assert by_inv["review_status"][inv.iloc[1]] == "Pending notification"
     assert pending_total(res) >= 2                                   # both are counted as pending
 
 
-def test_im_expired_goes_to_pending_and_keeps_expired(tmp_path):
-    """Since 2026-10-12 I&M (and Bank of Africa) follow the same rule as Ecobank: an EXPIRED invoice is pending and
-    keeps EXPIRED in the report; a pending decision without a status is still NEW."""
+def test_im_expired_goes_to_pending_as_new_with_a_note(tmp_path):
+    """I&M (and Bank of Africa, BPR) as Ecobank: an expired invoice is pending, NEW, with the note."""
     def decide(review):
         review["Reviewed (Yes/No)"] = "Yes"
         review["Report table"] = "Paid with other channel"
-        review.loc[review.index[0], ["Report table", "payment_status"]] = ["Pending notification", "EXPIRED"]
-        review.loc[review.index[1], ["Report table", "payment_status"]] = ["Pending notification", ""]
+        # two invoices that are on the statement once (not an extra credit of an invoice credited twice)
+        once = review["invoice_number"].astype(str).map(review["invoice_number"].astype(str).value_counts()).eq(1)
+        picks = review.index[once & ~review["Reason"].fillna("").str.startswith("Invoice credited again")][:2]
+        review.loc[picks[0], ["Report table", "payment_status"]] = ["Pending notification", "EXPIRED"]
+        review.loc[picks[1], ["Report table", "payment_status"]] = ["Pending notification", ""]
+        review.attrs["picks"] = list(picks)
         return review
     review, res, details = run_with_decisions(tmp_path, "IM", decide)
-    status = details.set_index(details["invoice_number"].astype(str))["payment_status"]
-    inv = review["invoice_number"].astype(str)
-    assert status[inv.iloc[0]] == "EXPIRED" and status[inv.iloc[1]] == "NEW"
+    by_inv = details.set_index(details["invoice_number"].astype(str))
+    inv = review.loc[review.attrs["picks"], "invoice_number"].astype(str)
+    assert by_inv["payment_status"][inv.iloc[0]] == "NEW" and by_inv["payment_status"][inv.iloc[1]] == "NEW"
+    assert by_inv["review_status"][inv.iloc[0]] == "Pending notification (invoice expired)"
     assert pending_total(res) == 2
 
 
-def test_every_bank_counts_expired_as_pending():
-    from banks import boa, im
-    rows = pd.DataFrame({"payment_status": ["EXPIRED", "NEW", "PAID"]})
-    for bank in (im, boa, ecobank):
-        assert bank.pending(rows).tolist() == [True, True, False]
+def test_every_bank_paid_means_paid_at():
+    from banks import boa, bpr, im
+    for bank in (im, boa, ecobank, bpr):
+        rows = pd.DataFrame({"found_in_irembopay": [True, True, True], "payment_status": ["FAILED", "NEW", "PAID"],
+                             "paid_at": pd.to_datetime(["2026-08-01", None, "2026-08-02"]),
+                             "payment_provider": [bank.PROVIDER, bank.PROVIDER, "OTHER"]})
+        assert bank.PENDING_STATUSES == {"NEW"}
+        assert bank.received(rows).tolist() == [True, False, False]           # FAILED with a paid_at: paid
+        assert bank.pending(rows).tolist() == [False, True, False]
+        assert bank.duplicate(rows).tolist() == [False, False, True]
 
 
 def test_ecobank_other_channel_decision_counts_once_in_the_reconciled_month(tmp_path):
@@ -104,11 +124,19 @@ def test_ecobank_other_channel_decision_counts_once_in_the_reconciled_month(tmp_
     assert not res.stopped_for_review and res.not_reviewed == 0
     month = next(b for b in res.blocks if b[0] == "Summary-Monthly")[2]["Duplicate Payment"]
     total = int(month[month["Currency"].isna()]["Number of Transactions"].iloc[0])
-    assert total == len(review) == review["invoice_number"].nunique()
+    # 26/10/2026: only the requests Ecobank answered SUCCESS are processed, each invoice once, by Request Date
+    det = res.sheets["Payment details"]
+    decided = det["review_status"].eq("Paid with other channel")
+    counted = det[decided & det["Cba Rsp Code"].astype(str).eq("000") & ~det["is_extra_credit"].astype(bool)]
+    assert len(counted) == counted["invoice_number"].nunique()
+    # 26/10/2026: an extra debit put in "Paid with other channel" counts too (a double payment)
+    extra = det[decided & det["is_extra_credit"].astype(bool)]
+    assert total == len(counted) + len(extra)
     weeks = [b[2]["Duplicate Payment"] for b in res.blocks if b[0] == "Summary-Weekly"]
     assert sum(int(w[w["Currency"].isna()]["Number of Transactions"].iloc[0]) for w in weeks) == total
     sheet = res.sheets["Duplicate payment other channel"]
-    assert len(sheet) == sheet["invoice_number"].nunique() == total
+    assert len(sheet) == total
+    assert set(sheet["invoice_number"]) == set(counted["invoice_number"]) | set(extra["invoice_number"])
     assert "Debited more than once" not in res.sheets                    # removed: each invoice is recorded once
 
 
@@ -145,3 +173,25 @@ def test_ecobank_decisions_saved_with_a_cba_reference_still_match(tmp_path):
             acc.append(f)
     again = e.run(tmp_path / "base", period, acc, require_review=True, bank="ECO", report_dir=tmp_path / "r3")
     assert again.not_reviewed == 0 and not again.stopped_for_review
+
+
+def test_an_excluded_row_stays_in_the_statement_with_a_comment(tmp_path):
+    """26/10/2026: "Exclude" no longer removes the row: it stays in the statement and Payment details with its
+    status and comment, and is counted in no table (the figures are those of before)."""
+    def decide(review):
+        review["Reviewed (Yes/No)"] = "Yes"
+        review["Report table"] = "Exclude"
+        review["Comment"] = "checked with the bank"
+        return review
+    review, res, details = run_with_decisions(tmp_path, "IM", decide)
+    excluded = details[details["review_status"].eq(e.EXCLUDED)]
+    assert len(excluded) == len(review) > 0
+    assert excluded["review_comment"].eq("checked with the bank").all()
+    stmt = res.sheets[e.get_bank("IM").STATEMENT_SHEET]
+    assert len(stmt) == len(details)                                   # nothing removed from the statement
+    month = next(b for b in res.blocks if b[0] == "Summary-Monthly")[2]
+    total = lambda t: int(month[t][month[t]["Currency"].isna()]["Number of Transactions"].iloc[0])
+    kept = details[~details["review_status"].eq(e.EXCLUDED) & ~details["is_extra_credit"].astype(bool)]
+    assert total("Overall processed payments") == len(kept)           # the excluded rows are in no table
+    for sheet in ("Pending notification", "Duplicate payment other channel"):
+        assert not res.sheets[sheet]["review_status"].eq(e.EXCLUDED).any()

@@ -11,8 +11,10 @@ column): it never fills a decision, and it is not saved with the decisions or in
     Not an IremboPay invoice   IremboPay does not know this number
     Could not check            no answer (no internet, the site is down, an unexpected reply)
 
-The lookups run in a background thread, up to 10 invoices at the same time and about 10 per second (still light on
-IremboPay's site), so the page stays usable. Each invoice is looked up once per browser session.
+The lookups run in a background thread, up to 50 invoices at the same time and about 50 per second (26/10/2026: for
+Ecobank and BPR every invoice is checked before the run), so the page stays usable. When IremboPay asks to slow down
+(HTTP 429) or is busy (5xx), the lookup waits and tries again (1, 2, then 4 seconds). Each invoice is looked up once
+per browser session.
 """
 from __future__ import annotations
 
@@ -25,8 +27,9 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import urllib.request
 
 URL = "https://checkout.irembopay.com/api-proxy/invoices/checkout/invoice/{}"
-WORKERS = 10                      # invoices looked up at the same time
-PAUSE = 1.0                       # at most WORKERS lookups start in this many seconds (about 10 per second)
+WORKERS = 50                      # invoices looked up at the same time
+PAUSE = 1.0                       # at most WORKERS lookups start in this many seconds (about 50 per second)
+RETRY_WAIT = (1, 2, 4)            # seconds to wait before trying again when IremboPay says "too many" or is busy
 TIMEOUT = 15                      # seconds to wait for one answer
 CHECKING = "Checking…"
 NO_INVOICE = "No invoice number"          # a bank row without an invoice number: nothing to look up
@@ -42,12 +45,19 @@ def check(invoice: str) -> str:
         return "Not an IremboPay invoice"
     req = urllib.request.Request(URL.format(invoice), headers={"Accept": "application/json",
                                                                "User-Agent": "Mozilla/5.0 (Bank Reconciliation)"})
-    try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
-            status, body = r.status, r.read().decode("utf-8", "replace")
-    except urllib.error.HTTPError as err:
-        status, body = err.code, err.read().decode("utf-8", "replace")
-    except Exception:                                      # no internet, timeout, DNS, ...
+    for wait_s in (*RETRY_WAIT, None):
+        try:
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+                status, body = r.status, r.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as err:
+            status, body = err.code, err.read().decode("utf-8", "replace")
+        except Exception:                                  # no internet, timeout, DNS, ...
+            status, body = None, ""
+        if (status == 429 or status is None or status >= 500) and wait_s is not None:
+            time.sleep(wait_s)                             # IremboPay asks to slow down, or is busy: try again
+            continue
+        break
+    if status is None:
         return COULD_NOT
     if status == 200:
         return "Open, not paid yet"
@@ -86,7 +96,7 @@ class Checker:
 
     def _run(self) -> None:
         """Up to WORKERS lookups in flight at all times (a slow answer does not hold the others back); a new one
-        starts at most every PAUSE / WORKERS seconds (about 10 per second)."""
+        starts at most every PAUSE / WORKERS seconds (about 50 per second)."""
         gap = self._pause / self._workers
         running, last_start = {}, 0.0
         with ThreadPoolExecutor(max_workers=self._workers, thread_name_prefix="irembopay-check") as pool:

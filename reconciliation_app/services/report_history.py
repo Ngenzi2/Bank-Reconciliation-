@@ -32,7 +32,7 @@ from integrations.google_drive import DriveError, DriveFile
 MIME = {"xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "pdf": "application/pdf"}
 REPORTS_FOLDER = "Reconciliation Reports"           # the name shown to the user for the root folder
 NAME_RE = re.compile(r"^(?P<code>[A-Z0-9]+)" + re.escape(engine.REPORT_SUFFIX) +
-                     r"(?P<a>\d\d-\d\d-\d{4})_to_(?P<b>\d\d-\d\d-\d{4})(?:_v(?P<v>\d+))?"
+                     r"(?P<a>\d\d-\d\d-\d{4})_to_(?P<b>\d\d-\d\d-\d{4})(?: \(week (?P<w>\d+)\))?(?:_v(?P<v>\d+))?"
                      r"(?: \((?P<copy>\d+)\))?\.(?P<ext>xlsx|pdf)$", re.IGNORECASE)   # ' (1)': a copy saved by hand
 
 
@@ -43,7 +43,10 @@ def bank_folder(bank) -> str:
 
 
 def month_folder(period: engine.Period) -> str:
-    """'2026-09': the month the period starts in."""
+    """'2026-09': the month of the period - for a week, the month it belongs to (most of its days: 28/09-04/10/2026
+    is October Week 1, in 2026-10; 27/10/2026), else the month it starts in."""
+    if period.report_type == "week":
+        return f"{engine.week_number(period.start)[0]:%Y-%m}"
     return f"{period.start:%Y-%m}"
 
 
@@ -92,7 +95,7 @@ def existing_reports(client, root_id: str, bank, period) -> list:
         return []
     stem = report_stem(bank, period)
     return [f for f in client.list_children(folder)
-            if (p := parse_name(f.name)) and p["label"] == stem.split(engine.REPORT_SUFFIX)[1] and p["code"]
+            if (p := parse_name(f.name)) and p["label"] == period.label and p["code"]
             == engine.get_bank(bank).CODE]
 
 
@@ -256,7 +259,7 @@ def find_previous(client, root_id: str, bank, period, index: DriveIndex | None =
     """The Excel of the report of `period` on Drive, wherever it is inside Reconciliation Reports (the newest
     version; at equal version the last saved), or None. `index`: a listing already made (Drive is not listed again)."""
     code = engine.get_bank(bank).CODE
-    label = report_stem(bank, period).split(engine.REPORT_SUFFIX)[1]
+    label = period.label                                  # the dates, also for a file named '… (week 1)'
     hits = [r for r in (index or drive_index(client, root_id)).records
             if r.bank == code and r.ext == "xlsx" and parse_name(r.name)["label"] == label]
     if not hits:
@@ -280,12 +283,12 @@ def read_drive_summary(client, file_id: str, name: str, session) -> dict:
         session.remove(path)
 
 
-def read_drive_facts(client, record, session) -> list:
+def read_drive_facts(client, record, session, data: bytes | None = None) -> list:
     """The dashboard's facts of one saved Excel report (services/dashboard.py): its summary blocks and the late
     payments made over the weekend and booked Monday (from its Payment details). The file exists in the session's
-    temporary folder only while it is read."""
+    temporary folder only while it is read. data: the file already downloaded (download_many), else it is."""
     from services import dashboard
-    data = client.download(record.file_id)
+    data = client.download(record.file_id) if data is None else data
     p = parse_name(record.name)
     if not p or p["ext"] != "xlsx":
         raise DriveError(f"{record.name}: only an Excel report can be read.")
@@ -295,7 +298,7 @@ def read_drive_facts(client, record, session) -> list:
         no_tx = dashboard.no_transaction_fact(path, record)          # a No-Transaction Report: every count 0
         if no_tx is not None:
             return [no_tx]
-        rep = engine.read_report(path)
+        rep = engine.read_report(path, count_reviewed=False)       # the dashboard does not use that count
         try:
             sheets = pd.read_excel(path, sheet_name=["Payment details", "Pending notification",
                                                      "Duplicate payment other channel"], engine=engine.EXCEL_ENGINE)
@@ -304,13 +307,48 @@ def read_drive_facts(client, record, session) -> list:
         except Exception:                                  # an older report without these sheets: no days
             sheets, weekend = None, None
         facts = dashboard.facts_from_report(rep, record, weekend)
-        if sheets is not None:                             # a month's days, from its rows (checked against it)
-            for month in [f for f in facts if f.kind == "month"]:
+        if sheets is not None:                             # the days, from its rows (checked against it): of a
+            whole = "month" if p["kind"] == "month" else "week"   # monthly report, or of a weekly report (27/10/2026)
+            for month in [f for f in facts if f.kind == whole]:
                 facts += dashboard.daily_facts(month, sheets["Payment details"], sheets["Pending notification"],
                                                sheets["Duplicate payment other channel"], p["code"], weekend)
         return facts
     finally:
         session.remove(path)
+
+
+def download_many(client, records: list, workers: int = 4, done=None) -> dict:
+    """{file_id: bytes or DriveError} of several reports, downloaded at the same time (each on a connection of its
+    own; one after the other when the client has none to give). done(n): called after each file."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def one(rec):
+        try:
+            return rec.file_id, client.download(rec.file_id, http=client.thread_http())
+        except DriveError as err:
+            return rec.file_id, err
+
+    import inspect
+    out = {}
+    # a client made before download() took http (a running app keeps its Drive client until it restarts): one by one
+    takes_http = "http" in inspect.signature(client.download).parameters
+    parallel = len(records) > 1 and takes_http and client.thread_http() is not None
+    if not parallel:
+        for i, rec in enumerate(records, 1):
+            try:
+                out[rec.file_id] = client.download(rec.file_id)
+            except DriveError as err:
+                out[rec.file_id] = err
+            if done:
+                done(i)
+        return out
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for i, fut in enumerate(as_completed([pool.submit(one, rec) for rec in records]), 1):
+            fid, data = fut.result()
+            out[fid] = data
+            if done:
+                done(i)
+    return out
 
 
 def read_drive_report(client, file_id: str, name: str, session) -> dict:

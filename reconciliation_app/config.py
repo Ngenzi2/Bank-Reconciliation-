@@ -22,6 +22,7 @@ Each setting is taken from (first found):
     credentials_file          BANK_RECON_CREDENTIALS           ~/.config/bank-reconciliation/service-account.json
     reports_root_folder_id    BANK_RECON_REPORTS_FOLDER_ID     (none) the "Reconciliation Reports" folder
     irembopay_folder_id       BANK_RECON_IREMBOPAY_FOLDER_ID   (none) the folder of the IremboPay payment files
+    ecobank_statements_folder_id  BANK_RECON_ECOBANK_FOLDER_ID (none) the Ecobank "Statements" folder (IREMBO PAY files)
 """
 from __future__ import annotations
 
@@ -42,7 +43,8 @@ ENV = {"auth": "BANK_RECON_AUTH",
        "token_file": "BANK_RECON_TOKEN",
        "credentials_file": "BANK_RECON_CREDENTIALS",
        "reports_root_folder_id": "BANK_RECON_REPORTS_FOLDER_ID",
-       "irembopay_folder_id": "BANK_RECON_IREMBOPAY_FOLDER_ID"}
+       "irembopay_folder_id": "BANK_RECON_IREMBOPAY_FOLDER_ID",
+       "ecobank_statements_folder_id": "BANK_RECON_ECOBANK_FOLDER_ID"}
 
 
 @dataclass(frozen=True)
@@ -50,6 +52,7 @@ class DriveSettings:
     credentials_file: Path                           # the service-account key (auth = service_account)
     reports_root_folder_id: str = ""
     irembopay_folder_id: str = ""
+    ecobank_statements_folder_id: str = ""           # step 2: the Ecobank statements are read from there
     error: str = ""                                  # drive_settings.toml could not be read
     auth: str = "oauth"
     oauth_client_file: Path = DEFAULT_OAUTH_CLIENT   # the OAuth "Desktop app" client (auth = oauth)
@@ -92,7 +95,8 @@ def load(settings_file: Path = SETTINGS_FILE, env=None) -> DriveSettings:
 
     return DriveSettings(credentials_file=path("credentials_file", DEFAULT_CREDENTIALS),
                          reports_root_folder_id=get("reports_root_folder_id"),
-                         irembopay_folder_id=get("irembopay_folder_id"), error=error,
+                         irembopay_folder_id=get("irembopay_folder_id"),
+                         ecobank_statements_folder_id=get("ecobank_statements_folder_id"), error=error,
                          auth=get("auth", "oauth").lower(),
                          oauth_client_file=path("oauth_client_file", DEFAULT_OAUTH_CLIENT),
                          token_file=path("token_file", DEFAULT_TOKEN))

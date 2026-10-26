@@ -17,6 +17,8 @@ import re
 
 import pandas as pd
 
+import engine
+
 GREEN, RED = ":large_green_circle:", ":red_circle:"
 UP, DOWN = ":chart_with_upwards_trend:", ":chart_with_downwards_trend:"
 SUCCESS_OK, SLA_OK = 0.99, 0.90          # the defaults; the app sets the targets saved in Settings
@@ -168,9 +170,20 @@ def _amount(tables: dict, title: str, cur: str) -> float:
     return float(row["Total Amount"].iloc[0]) if len(row) and pd.notna(row["Total Amount"].iloc[0]) else 0.0
 
 
+def money(value) -> str:
+    """An amount for the message: in full below a million (25,000), short from a million (39.6M)."""
+    v = float(value) if pd.notna(value) else 0.0
+    return f"{v / 1e6:,.1f}M" if abs(v) >= 1e6 else f"{v:,.0f}"
+
+
 def period_line(period) -> str:
     """'1–31 August 2026', '5–11 October 2026', '28 September – 4 October 2026', '15 October 2026'."""
     a, b = period.start, period.last_day
+    if getattr(period, "report_type", "") == "week":    # 'Week 1 · 28 September – 4 October 2026'
+        month, n = engine.week_number(a)
+        days = (f"{a.day}–{b.day} {b:%B %Y}" if (a.month, a.year) == (b.month, b.year)
+                else f"{a.day} {a:%B}{'' if a.year == b.year else f' {a.year}'} – {b.day} {b:%B %Y}")
+        return f"Week {n} · {days}"
     if a == b:
         return f"{a.day} {a:%B %Y}"
     if (a.month, a.year) == (b.month, b.year):
@@ -186,7 +199,7 @@ def status(rate: float, sla_rate: float, follow: int) -> tuple:
 
 
 def build_blocks(bank, period, blocks: list, merchants: dict, links: dict | None, made_at,
-                 native_table: bool = True) -> dict:
+                 native_table: bool = True, notes: list | None = None) -> dict:
     """The Slack payload {"text", "blocks"} of a report. links: {"xlsx": url, "pdf": url} of the files saved on
     Google Drive. native_table=False: the summary as a text table in a code box (for a Slack that does not accept
     the table block)."""
@@ -219,8 +232,12 @@ def build_blocks(bank, period, blocks: list, merchants: dict, links: dict | None
     risk = " · ".join(f"{c} {v:,.0f}" for c in currencies
                       if (v := _amount(t, PE, c) + _amount(t, DU, c))) or "none"
     out = [head(f"📊 {bank.FULL_NAME} — {kind} Reconciliation | {name}"),
-           {"type": "context", "elements": [md(f"Period: {period_line(period)} · Report date: {made.day} {made:%B %Y}")]},
-           {"type": "divider"},
+           {"type": "context", "elements": [md(f"Period: {period_line(period)} · Report date: {made.day} {made:%B %Y}")]}]
+    for note in notes or []:                      # days with no statement (did not block): someone should check them
+        label, days = (note.split(": ", 1) + [""])[:2]
+        out.append({"type": "section", "text": md(f":warning: *No statement for {days}* ({label}): no transaction "
+                                                  "those days, or the statement is missing - please check.")})
+    out += [{"type": "divider"},
            head("Overall performance"),
            {"type": "section", "text": md(f"{icon} *{words}*\nReceived: `{rate:.2%}` · Target ≥ {SUCCESS_OK * 100:g}%\n"
                                           f"On time: `{sla_rate:.2%}` · Target ≥ {SLA_OK * 100:g}%")},   # rates highlighted
@@ -236,7 +253,7 @@ def build_blocks(bank, period, blocks: list, merchants: dict, links: dict | None
         out += [head("🏢 Top merchants by RWF notifications"),
                 {"type": "section", "text": md("\n".join(
                     f"*{i}.* {r['Merchant name']} — {int(r['Number of Transactions']):,} · {float(r['%']):.1%} · "
-                    f"RWF {float(r['Total Amount']) / 1e6:.1f}M" for i, (_, r) in enumerate(m.iterrows(), 1)))},
+                    f"RWF {money(r['Total Amount'])}" for i, (_, r) in enumerate(m.iterrows(), 1)))},
                 {"type": "divider"}]
     names = {"xlsx": "📊 Excel report", "pdf": "📄 PDF report"}
     shown = [f"<{links[ext]}|{names[ext]}>" for ext in ("xlsx", "pdf") if (links or {}).get(ext)]
@@ -260,7 +277,8 @@ def preview_text(payload: dict) -> str:
             for r in b["rows"]:
                 lines.append(" | ".join(c["text"] for c in r))
     text = "\n".join(lines).strip()
-    for code, emoji in ((":white_check_mark:", "✅"), (":red_circle:", "🔴"), (":large_green_circle:", "🟢")):
+    for code, emoji in ((":white_check_mark:", "✅"), (":red_circle:", "🔴"), (":large_green_circle:", "🟢"),
+                        (":warning:", "⚠️")):
         text = text.replace(code, emoji)
     text = re.sub(r"<([^|>]+)\|([^>]+)>", r"\2: \1", text)          # <link|words> -> words: link
     return text.replace("*", "").replace("`", "")
