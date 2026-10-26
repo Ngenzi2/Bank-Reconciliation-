@@ -37,3 +37,23 @@ def test_still_needs_a_previous_report_when_the_export_does_reach_back(tmp_path)
     # missing previous report is still a real problem, not silently N/A
     with pytest.raises(e.ReconError, match="No BPR report found"):
         run(tmp_path, "2026-07-20")
+
+
+def test_weekly_comparison_is_computed_live_when_the_statement_covers_the_week_before(tmp_path):
+    # the statement file already spans both weeks (the same lookback that spots re-sends): no saved report needed
+    # at all, the way the reconciliation notebooks compare a week with the one before - approved 2026-10-26
+    bank = [("27/07/2026", "R0", "886000000000", None, "2026-07-27 09:00:00", None, 1000),
+           ("03/08/2026", "R1", "886000000001", None, "2026-08-03 09:00:00", None, 1000)]
+    statements = [e.read_bank_file("statement.xlsx", statement(bank), "BPR")]
+    pay_rows = [dict(invoice="886000000000", amount=1000, paid_at="2026-07-27 09:05:00", ref="R0"),
+               dict(invoice="886000000001", amount=1000, paid_at="2026-08-03 09:05:00", ref="R1")]
+    pay = [e.read_payment_file("payments.csv", payments(pay_rows), "BPR")]
+    res = e.run(tmp_path / "base", WEEK, statements + pay, compare=True, require_review=False, bank="BPR",
+               report_dir=tmp_path / "r")
+    assert res.previous_counts is not None
+    assert "loaded statements" in res.compared_with
+    assert res.previous_counts["Overall processed payments"]["Total"] == 1
+    main = next(t for sheet, _, t in res.blocks if sheet == "Summary-Weekly")
+    t = main["Overall processed payments"]
+    total = t.loc[t["Currency"].isna(), "VS prev Week (%)"].iloc[0]
+    assert total != "N/A"          # one processed payment in each week: a real percentage, not N/A

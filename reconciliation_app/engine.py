@@ -1064,8 +1064,13 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
     later_ref = merged["invoice_number"].map(payment_ref)
     is_bank_duplicate = (merged["invoice_number"].notna() & ~is_payment & merged[ref].notna() & later_ref.notna()
                         & merged[ref].ne(later_ref))
-    is_resend = ((merged["invoice_number"].notna() & ~is_payment & ~is_bank_duplicate)
-                | merged["paid_at"].lt(start).fillna(False))
+    def resend_before(a):
+        """A row is a re-send of the period starting at `a` when it shares its invoice's payment reference, or
+        IremboPay already shows it paid before `a` (so is one IremboPay already shows paid before this period):
+        a function of `a`, not just the current period's start, so section H can reuse it for the week before."""
+        return ((merged["invoice_number"].notna() & ~is_payment & ~is_bank_duplicate)
+                | merged["paid_at"].lt(a).fillna(False))
+    is_resend = resend_before(start)
 
     if hasattr(bank, "in_period"):                        # the bank's own rule
         in_period = bank.in_period(merged, attempts, start, end)
@@ -1150,12 +1155,13 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
     rep["Reason"] = combined.where(found_, "Not found in IremboPay")
     rep.loc[rep["is_extra_credit"], "Reason"] = "Bank duplicate"
 
-    def table_rows(a, b):
+    def table_rows(a, b, rep=rep):
         """Rows of each of the 5 tables for [a, b): the bank's own rule, or by payment date (default). The two
         automatic statuses are always Pending, even for a bank whose own rule would not say so. A bank duplicate
         (a second SUCCESS credit for the same invoice, a different bank reference) is always Duplicate, even for
         a bank whose own rule would not otherwise say so - never Notified, never Pending, never counted in SLA
-        (SLA is counted among Notified payments, from the first credit, only)."""
+        (SLA is counted among Notified payments, from the first credit, only). rep: the current period's rows by
+        default; section H passes a previous-period rep of its own, to compute that period's tables live."""
         window = (rep[paid_on] >= a) & (rep[paid_on] < b)
         if hasattr(bank, "tables"):
             m = bank.tables(rep, attempts, a, b)
@@ -1171,10 +1177,10 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
         m["duplicate"] = m["duplicate"] | (window & rep["is_extra_credit"])
         return m
 
-    def build_summary5(a, b):
+    def build_summary5(a, b, rep=rep):
         """The 5 summary tables for [a, b): one row per currency + a total row (count only, no amount).
         % = share of the processed payments of the same currency."""
-        m = table_rows(a, b)
+        m = table_rows(a, b, rep)
         df = rep[m["processed"]]
         processed = df.groupby("Currency").size()
 
@@ -1198,11 +1204,11 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
             "Duplicate Payment": table(rep[m["duplicate"]]),
         }
 
-    def build_merchants(a, b):
+    def build_merchants(a, b, rep=rep):
         """Payment per merchant for [a, b): the notifications received (the same rows as that table), one row per
         merchant and currency - amounts are never added across currencies -, most transactions first, then an
         "All" row per currency. % = share of the currency's notifications received."""
-        part = rep[table_rows(a, b)["received"]]
+        part = rep[table_rows(a, b, rep)["received"]]
         name = part["name"].astype(object) if "name" in part else pd.Series(None, index=part.index, dtype=object)
         name = name.where(name.notna() & name.astype(str).str.strip().ne(""), "(no merchant)").astype(str).str.strip()
         rows = []
@@ -1266,26 +1272,53 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
             res.add("success", "Totals check: the weekly blocks add up to the month.")
 
     # ---- H. comparison with the previous period of the same bank (only when ticked) ----
+    # A week is compared live, straight from the statement files already loaded for this run (the same lookback
+    # that spots re-sends already reaches back a week) - no saved report needed, the way the reconciliation
+    # notebooks do it. A month is still compared against a saved report of the month before: the lookback does
+    # not reach that far back (the notebooks fall back to a saved report for months too).
     if compare:
         prev = period.previous()
-        incomplete = not export_covers(payments, prev)       # the export does not go back to the period before
-        if incomplete:
-            prev_counts, prev_merchants = None, {}
-            res.compared_with = f"{prev.name}: not compared (the IremboPay export does not go back that far)"
-            res.add("warning", f"The IremboPay export does not go back to {prev.name}, so 'VS previous' shows "
-                               "N/A - never a number that could be wrong.")
-        else:
-            prev_path, _ = find_previous_report(base_dir, period, bank)
-            if previous_report is not None:
-                prev_path = Path(previous_report)
-            if prev_path is None:
-                raise ReconError(f"No {bank.NAME} report found for {prev.name}. Upload it or make it first.")
-            prev_counts, _, prev_unreviewed = read_report_counts(prev_path, SUMMARY_SHEET[period.report_type], bank)
-            res.compared_with = f"{prev.name} (report of {pd.Timestamp(prev_path.stat().st_mtime, unit='s'):%d/%m/%Y})"
-            if prev_unreviewed:
-                res.add("warning", f"{prev.name} was not reviewed: its {prev_unreviewed} missing invoice(s) are counted as "
-                                   "not found. The comparison may not be exact.")
-            prev_merchants = read_merchant_counts(prev_path, SUMMARY_SHEET[period.report_type])   # {} when it has none
+        prev_counts = prev_merchants = None
+        incomplete = False
+        if period.report_type == "week":
+            covered = set()
+            for f in files:
+                if f.kind == "bank" and f.first is not None and f.last is not None:
+                    covered |= set(pd.date_range(f.first, f.last))
+            if set(pd.date_range(prev.start, prev.last_day)) <= covered:
+                if hasattr(bank, "in_period"):
+                    prev_mask = bank.in_period(merged, attempts, prev.start, prev.end)
+                else:
+                    prev_mask = merged[paid_on].between(prev.start, prev.end, inclusive="left")
+                prev_mask = prev_mask & ~resend_before(prev.start)
+                rep_prev = merged[prev_mask].sort_values(present(paid_on, posted, ref)).reset_index(drop=True)
+                rep_prev["is_extra_credit"] = rep_prev["bank_duplicate"]
+                rep_prev["paid_other_channel"] = bank.duplicate(rep_prev)
+                rep_prev["notification_received"] = bank.received(rep_prev)
+                rep_prev["is_pending"] = (bank.pending(rep_prev)
+                                          | rep_prev["payment_status"].isin({NO_INVOICE_STATUS, COULD_NOT_CHECK_STATUS}))
+                prev_counts = counts_of(build_summary5(prev.start, prev.end, rep_prev))
+                prev_merchants = merchant_counts(build_merchants(prev.start, prev.end, rep_prev))
+                res.compared_with = f"{prev.name} (from the loaded statements)"
+        if prev_counts is None:
+            incomplete = not export_covers(payments, prev)   # the export does not go back to the period before
+            if incomplete:
+                prev_merchants = {}
+                res.compared_with = f"{prev.name}: not compared (the IremboPay export does not go back that far)"
+                res.add("warning", f"The IremboPay export does not go back to {prev.name}, so 'VS previous' shows "
+                                   "N/A - never a number that could be wrong.")
+            else:
+                prev_path, _ = find_previous_report(base_dir, period, bank)
+                if previous_report is not None:
+                    prev_path = Path(previous_report)
+                if prev_path is None:
+                    raise ReconError(f"No {bank.NAME} report found for {prev.name}. Upload it or make it first.")
+                prev_counts, _, prev_unreviewed = read_report_counts(prev_path, SUMMARY_SHEET[period.report_type], bank)
+                res.compared_with = f"{prev.name} (report of {pd.Timestamp(prev_path.stat().st_mtime, unit='s'):%d/%m/%Y})"
+                if prev_unreviewed:
+                    res.add("warning", f"{prev.name} was not reviewed: its {prev_unreviewed} missing invoice(s) are "
+                                       "counted as not found. The comparison may not be exact.")
+                prev_merchants = read_merchant_counts(prev_path, SUMMARY_SHEET[period.report_type])  # {}: it has none
         res.previous_counts = prev_counts
         week_blocks = [b for b in res.blocks if b[0] == "Summary-Weekly"]
         new_blocks = []

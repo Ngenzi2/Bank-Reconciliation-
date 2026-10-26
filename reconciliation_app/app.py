@@ -2801,7 +2801,11 @@ elif state.step == 1:
         st.checkbox(f"Compare with previous period ({prev.name})", key="compare",
                     help="Adds a 'VS prev' column to each table. When not ticked, the report is unchanged.")
         ready = not not_ended
-        if state.compare and not not_ended:             # a blocked period: nothing to compare yet
+        if state.compare and not not_ended and period.report_type == "week":
+            # a week needs no saved report: the statement files already loaded cover the week before (the same
+            # lookback that spots re-sends), so it is compared live, during Reconcile - the way the notebooks do it
+            st.caption(f"Compared live against {prev.name}, from the same statement files.")
+        elif state.compare and not not_ended:             # a blocked period: nothing to compare yet
             with st.spinner(f"Looking for the {bank.NAME} {prev.name} report…"):   # shown only if it takes a moment
                 found, problem = find_previous(prev)
             if found is not None:                       # a short note that fades out by itself (section 3)
