@@ -8,6 +8,8 @@ engine.py. The app checks every bank file at start-up and says exactly what is m
     ecobank.py   Ecobank    (an example of every optional setting)
     boa.py       Bank of Africa Rwanda (works like I&M: credits only, Value Date vs paid_at; statement checked
                  against its own totals; matching by invoice, or by Ref no when the description has none)
+    bpr.py       BPR Bank Rwanda (invoice = DOC ID; currency from IremboPay; SLA in minutes; files checked against
+                 their balances and against each other; found-but-doubtful credits go to review)
 
 To add a bank
     1. copy im.py to a new file (e.g. bk.py)
@@ -21,13 +23,13 @@ CONTENTS
     3. Optional settings (OPTIONAL): leave them out to work like I&M
     4. Checking the bank files at start-up
 """
-from . import boa, ecobank, im
+from . import boa, bpr, ecobank, im
 
 
 # =====================================================================================================================
 # 1. ACTIVE BANKS
 # =====================================================================================================================
-ACTIVE = [im, ecobank, boa]     # the first one is the default
+ACTIVE = [im, ecobank, boa, bpr]     # the first one is the default
 
 
 # =====================================================================================================================
@@ -82,6 +84,23 @@ OPTIONAL = {
     "in_period": "function(rows, attempts, start, end): which rows belong to the period",
     "tables": "function(rows, attempts, a, b): rows of the 5 tables (default: by payment date)",
     "extra_sheets": "function(rows, attempts, start, end, whole): {sheet name: table} added to the report",
+    # ---- BPR-like banks (see bpr.py)
+    "find_invoices": "function(statement, payments): the invoice of rows without one, found another way (only "
+                     "when IremboPay has it)",
+    "currency_not_found": "function(rows): the currency of a credit IremboPay's file does not have",
+    "review_reasons": "function(rows): why a credit FOUND in IremboPay still goes to review ('' = it does not)",
+    "not_found_reason": "function(rows): why a credit NOT found is in review (default: no invoice / not in the file)",
+    "check_files": "function(statements): (days covered, lines, blocking) - the files checked against each other",
+    "CURRENCY_FROM_IREMBOPAY": "True when the statement has no currency: the IremboPay one, else chosen in review",
+    "PROVIDER_ALIASES": "other IremboPay payment_provider values that also mean this bank (BPR: 'BPR' bank transfers)",
+    "SEPARATE_NO_INVOICE": "True to show the credits without invoice in their own table in Exception Resolution",
+    "SEPARATE_CREDITED_AGAIN": "True to show the extra credits of an invoice in their own table in Exception "
+                               "Resolution, next to the credit counted",
+    "NO_INVOICE_PENDING": "True: a credit with no invoice number goes straight to Pending notification (not reviewed)",
+    "DAY_AFTER_RECOMMENDED": "True to recommend (never require) the statement of the day after the period",
+    "SLA_UNIT": "'minutes' when the SLA setting is in minutes (default: days)",
+    "SLA_DEFAULT": "the SLA setting before anyone changes it (default 0)",
+    "SLA_MAX": "the largest SLA setting allowed (default 10)",
 }
 
 
