@@ -18,7 +18,7 @@ Signing in (config.py, auth):
     list_files(...)         files of a folder and of its subfolders (up to 3 levels, e.g. bank / month)
     list_tree(...)          files and folders of a folder tree, one request per level (the folders of a level
                             are asked about together: about 0.5 s a request, so this is what keeps listing fast)
-    download(file_id)       the content of a file, in memory
+    download(file_id)       the content of a file, in memory (a Google Sheet as CSV)
     find_folder / find_or_create_folder   (a folder found once is remembered for the session: forget_folders())
     upload(...)             create a file, or replace one; confirmed by Drive's checksum of the stored content
     thread_http()           a connection of its own for an upload made at the same time as another
@@ -43,6 +43,11 @@ from pathlib import Path
 OAUTH_SCOPES = ["https://www.googleapis.com/auth/drive.readonly", "https://www.googleapis.com/auth/drive.file"]
 SERVICE_ACCOUNT_SCOPES = ["https://www.googleapis.com/auth/drive"]   # limited in practice to the folders shared
 FOLDER_MIME = "application/vnd.google-apps.folder"
+SHEET_MIME = "application/vnd.google-apps.spreadsheet"     # a Google Sheet: downloaded as CSV
+# a file is of a type by its name (.csv) or, when the name has no extension, by its kind on Drive
+TYPE_MIMES = {"csv": {"text/csv", SHEET_MIME},
+              "xlsx": {"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+              "xls": {"application/vnd.ms-excel"}}
 FILE_FIELDS = "id, name, mimeType, size, modifiedTime, md5Checksum, parents"
 SHARED = {"supportsAllDrives": True}
 SIGN_IN_AGAIN = "Sign in again (side panel → Google Drive → Sign in with Google)."
@@ -411,13 +416,20 @@ class DriveClient:
         found, _ = self.list_tree(folder_id, depth)
         if extensions:
             ends = tuple(f".{e.lower()}" for e in extensions)
-            found = [f for f in found if f.name.lower().endswith(ends)]
+            mimes = set().union(*(TYPE_MIMES.get(e.lower(), set()) for e in extensions))
+            found = [f for f in found if f.name.lower().endswith(ends) or f.mime in mimes]
         return sorted(found, key=lambda f: f.modified, reverse=True)
 
     # ---- reading --------------------------------------------------------------------------------------------------
-    def download(self, file_id: str) -> bytes:
-        """The content of a file, in memory (nothing is written on the computer)."""
-        data = self._run(self.service.files().get_media(fileId=file_id, **SHARED), "download the file")
+    def download(self, file_id: str, mime: str = "", http=None) -> bytes:
+        """The content of a file, in memory (nothing is written on the computer). A Google Sheet (mime) is
+        downloaded as CSV (its first sheet). http: a connection of its own (thread_http), to download several files
+        at the same time."""
+        if mime == SHEET_MIME:
+            data = self._run(self.service.files().export_media(fileId=file_id, mimeType="text/csv"),
+                             "download the Google Sheet", http=http)
+            return data if isinstance(data, bytes) else bytes(data)
+        data = self._run(self.service.files().get_media(fileId=file_id, **SHARED), "download the file", http=http)
         return data if isinstance(data, bytes) else bytes(data)
 
     # ---- folders --------------------------------------------------------------------------------------------------

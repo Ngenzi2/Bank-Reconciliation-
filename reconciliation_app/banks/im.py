@@ -12,8 +12,9 @@ The I&M statement
 Dates on an I&M statement
     - Transaction Date = the day the bank posted the payment
     - Value Date       = the day the payment took place; when the SLA is met it is the paid_at day in IremboPay
-    So the period and the SLA use the Value Date. A payment can be posted after its period ends (late weekend
-    payments are posted on Monday) or sit in the file of the day before the period.
+    So the period and the SLA use the Value Date. A payment is posted on its Value Date or later, never before: a
+    payment made on a weekend or a holiday is posted on the next working day, so a period ending on a weekend or a
+    holiday needs the statement of the next working day.
 
 CONTENTS
     1. Identity            4. Reading a statement
@@ -39,9 +40,9 @@ STATEMENT_SHEET = "I&M statement" # name of the statement sheet in the report
 
 # IremboPay statuses that count as paid
 COMPLETED_STATUSES = {"SETTLED", "PAID", "PAYOUT_INITIATED"}
-# pending = not paid yet: NEW, or EXPIRED (an invoice the IremboPay check of the review found expired: it is in the
-# Pending table and keeps EXPIRED as its status in the report; approved 2026-10-12, as for Ecobank)
-PENDING_STATUSES = {"NEW", "EXPIRED"}
+# pending = not paid yet: payment_status NEW (20/10/2026: "expired" is not a payment status - an expired
+# invoice was never paid, it stays NEW; the expiry is a note in the report)
+PENDING_STATUSES = {"NEW"}
 
 
 # =====================================================================================================================
@@ -61,8 +62,15 @@ _IREMBO = "IREMBO PAYMENT"               # words that mark an IremboPay payment 
 # =====================================================================================================================
 # 3. FILES NEEDED (used by the checks of step 3)
 # =====================================================================================================================
-MONDAY_AFTER_WEEKEND = True       # a period that ends on Saturday/Sunday also needs Monday's statement
-DAY_BEFORE_CURRENCIES = ["RWF"]   # the statement of the day before the period is recommended (warning only)
+MONDAY_AFTER_WEEKEND = True       # a period that ends on a weekend or a holiday also needs the statement of the next
+                                  # working day (Monday, or later after a holiday: Settings → public holidays)
+MISSING_DAYS_BLOCK = False        # 26/10/2026: a day with no statement only warns in step 3 (Run allowed): a day
+                                  # may simply have had no transaction
+MISSING_DAYS_NOTE = False         # 26/10/2026: the "No statement for ..." note is NOT added to step 6 nor to the
+                                  # Slack message (the other banks keep it)
+DAY_BEFORE_CURRENCIES = []        # 20/10/2026: no day-before recommendation - the Transaction Date is never before the
+                                  # Value Date, so the day before holds no payment of the period
+SEPARATE_CREDITED_AGAIN = True    # step 5: the extra credits of an invoice in a table of their own (20/10/2026)
 
 
 # =====================================================================================================================
@@ -155,21 +163,38 @@ def sla(rows: pd.DataFrame, sla_days: int):
 
 
 # =====================================================================================================================
-# 6. CALCULATIONS (one True/False per bank row). Every I&M credit of the period is a processed payment;
-#    these decide the other summary tables.
+# 6. CALCULATIONS (one True/False per bank row). Processed = the invoices on both sides, each once (engine,
+#    20/10/2026); these decide which of the other summary tables an invoice goes in.
 # =====================================================================================================================
 def received(rows: pd.DataFrame) -> pd.Series:
-    """Notification received by Irembo: found, paid through I&M, and completed in IremboPay."""
-    return (rows["found_in_irembopay"] & rows["payment_provider"].eq(PROVIDER)
-            & rows["payment_status"].isin(COMPLETED_STATUSES))
+    """Notification received: in IremboPay, paid (paid_at filled, whatever the status) through this bank."""
+    import engine                                 # (here: engine imports the banks)
+    return engine.paid_through(rows, PROVIDER)
 
 
 def pending(rows: pd.DataFrame) -> pd.Series:
-    """Pending notification: the invoice is not paid yet in IremboPay (NEW, or EXPIRED)."""
-    return rows["payment_status"].isin(PENDING_STATUSES)
+    """Pending notification: in IremboPay but not paid (no paid_at)."""
+    import engine                                 # (here: engine imports the banks)
+    return engine.not_paid(rows, PENDING_STATUSES)
 
 
 def duplicate(rows: pd.DataFrame) -> pd.Series:
-    """Duplicate payment: paid on I&M, but IremboPay says it was paid with another channel."""
-    return (rows["found_in_irembopay"] & rows["payment_provider"].notna()
-            & rows["payment_provider"].ne(PROVIDER) & ~rows["payment_status"].isin(PENDING_STATUSES))
+    """Duplicate Payment: in IremboPay, paid (paid_at), but through another provider."""
+    import engine                                 # (here: engine imports the banks)
+    return engine.paid_elsewhere(rows, PROVIDER)
+
+
+def review_reasons(rows: pd.DataFrame) -> pd.Series:
+    """Why a credit FOUND in IremboPay still goes to Exception Resolution ("" = it does not). Only one case
+    (20/10/2026): an invoice credited more than once - the earliest credit (Value Date, then Tran Id) counts, every
+    other credit of that invoice goes to the step-5 table "Invoice credited more than once" to be viewed."""
+    out = pd.Series("", index=rows.index, dtype=object)
+    # 26/10/2026: also an invoice NOT found in IremboPay - its second credit goes to "credited more than once" too
+    found = rows[rows["invoice_number"].notna()]
+    for _, group in found.groupby("invoice_number"):
+        if len(group) < 2:
+            continue
+        group = group.sort_values(["Value Date", "Tran Id"], kind="stable")
+        kept = str(group["Tran Id"].iloc[0]).strip()
+        out[group.index[1:]] = f"Invoice credited again: the credit counted is {kept}"
+    return out

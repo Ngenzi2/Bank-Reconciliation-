@@ -58,9 +58,9 @@ FILE_TYPES = ["xlsx", "xls"]
 STATEMENT_SHEET = "BOA statement"
 
 COMPLETED_STATUSES = {"SETTLED", "PAID", "PAYOUT_INITIATED"}     # same as I&M
-# pending = not paid yet: NEW, or EXPIRED (an invoice the IremboPay check of the review found expired: it is in the
-# Pending table and keeps EXPIRED as its status in the report; approved 2026-10-12, as for Ecobank)
-PENDING_STATUSES = {"NEW", "EXPIRED"}
+# pending = not paid yet: payment_status NEW (20/10/2026: "expired" is not a payment status - an expired
+# invoice was never paid, it stays NEW; the expiry is a note in the report)
+PENDING_STATUSES = {"NEW"}
 
 
 # =====================================================================================================================
@@ -84,6 +84,9 @@ DETAIL_COLUMNS = ["Branch", "Ref check"]                   # shown in the report
 # =====================================================================================================================
 MONDAY_AFTER_WEEKEND = False      # BOA gives weekend credits a Monday Value Date: they belong to Monday
 DAY_BEFORE_CURRENCIES = []        # no payment of the period sits in the statement of the day before
+SEPARATE_CREDITED_AGAIN = True     # step 5: the extra credits of an invoice in a table of their own (20/10/2026)
+MISSING_DAYS_BLOCK = False         # a day with no statement may simply have had no transaction (the export has no
+                                   # "from / to" dates): a warning, Run stays possible, the Slack message says it
 
 
 # =====================================================================================================================
@@ -278,20 +281,40 @@ def sla(rows: pd.DataFrame, sla_days: int):
 
 
 # =====================================================================================================================
-# 7. CALCULATIONS (one True/False per credit; every credit of the period is a processed payment)
+# 7. CALCULATIONS (one True/False per credit; processed = the invoices on both sides, each once - engine)
 # =====================================================================================================================
 def received(rows: pd.DataFrame) -> pd.Series:
-    """Notification received by Irembo: found, paid through Bank of Africa, and completed in IremboPay."""
-    return (rows["found_in_irembopay"] & rows["payment_provider"].eq(PROVIDER)
-            & rows["payment_status"].isin(COMPLETED_STATUSES))
+    """Notification received: in IremboPay, paid (paid_at filled, whatever the status) through this bank."""
+    import engine                                 # (here: engine imports the banks)
+    return engine.paid_through(rows, PROVIDER)
 
 
 def pending(rows: pd.DataFrame) -> pd.Series:
-    """Pending notification: the invoice is not paid yet in IremboPay (NEW, or EXPIRED)."""
-    return rows["payment_status"].isin(PENDING_STATUSES)
+    """Pending notification: in IremboPay but not paid (no paid_at)."""
+    import engine                                 # (here: engine imports the banks)
+    return engine.not_paid(rows, PENDING_STATUSES)
 
 
 def duplicate(rows: pd.DataFrame) -> pd.Series:
-    """Paid with another channel: credited on BOA, but IremboPay says another provider was used."""
-    return (rows["found_in_irembopay"] & rows["payment_provider"].notna()
-            & rows["payment_provider"].ne(PROVIDER) & ~rows["payment_status"].isin(PENDING_STATUSES))
+    """Duplicate Payment: in IremboPay, paid (paid_at), but through another provider."""
+    import engine                                 # (here: engine imports the banks)
+    return engine.paid_elsewhere(rows, PROVIDER)
+
+
+def review_reasons(rows: pd.DataFrame) -> pd.Series:
+    """Why a credit FOUND in IremboPay still goes to Exception Resolution ("" = it does not). Only one case
+    (20/10/2026): an invoice credited more than once - the credit IremboPay recorded counts (its Ref no is the
+    provider_reference, see "Ref check"), otherwise the earliest; every other credit of that invoice goes to the
+    step-5 table "Invoice credited more than once" to be viewed."""
+    out = pd.Series("", index=rows.index, dtype=object)
+    # 26/10/2026: also an invoice NOT found in IremboPay - its second credit goes to "credited more than once" too
+    found = rows[rows["invoice_number"].notna()]
+    for _, group in found.groupby("invoice_number"):
+        if len(group) < 2:
+            continue
+        check = group["Ref check"].fillna("").astype(str) if "Ref check" in group else pd.Series("", index=group.index)
+        recorded = check.eq("Ref no = provider_reference") | check.str.startswith("matched by Ref no")
+        group = group.assign(_r=(~recorded).astype(int)).sort_values(["_r", "Value Date", "Ref no"], kind="stable")
+        kept = str(group["Ref no"].iloc[0]).strip()
+        out[group.index[1:]] = f"Invoice credited again: the credit counted is {kept}"
+    return out

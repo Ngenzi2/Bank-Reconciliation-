@@ -157,7 +157,8 @@ def no_transaction_fact(path, record) -> Fact | None:
 
 def daily_facts(month: Fact, details: pd.DataFrame, pending: pd.DataFrame, duplicate: pd.DataFrame, bank,
                 weekend: dict | None = None) -> list:
-    """The days of a monthly report, from its detail sheets: processed = its Payment details rows, received = those
+    """The days of a monthly or weekly report, from its detail sheets: processed = its Payment details rows (each
+    invoice once; Ecobank: SUCCESS requests), received = those
     with notification_received, late = SLA violated, pending / paid with another channel = the rows of those sheets;
     by the bank date, per currency. They are kept only when they add up exactly to the month's own tables (a bank
     whose tables follow other rules, or an older report, has no days rather than wrong ones)."""
@@ -166,9 +167,22 @@ def daily_facts(month: Fact, details: pd.DataFrame, pending: pd.DataFrame, dupli
     if details is None or not {day_col, "Currency"} <= set(details.columns):
         return []
     truthy = lambda col: details[col].astype(str).str.lower().isin(["true", "1", "1.0"]) if col in details else None
-    parts = {"processed": details, "received": details[truthy("notification_received")]
-             if "notification_received" in details else None,
-             "sla": details[details["sla_status"].astype(str).eq("SLA violated")] if "sla_status" in details else None,
+    # processed (26/10/2026): every credit, each invoice once (not the extra credits); Ecobank: SUCCESS requests only
+    keep = pd.Series(True, index=details.index)
+    status = details["review_status"].fillna("").astype(str) if "review_status" in details else pd.Series("", index=details.index)
+    keep &= ~status.str.startswith("Excluded")              # 26/10/2026: an excluded row stays, in no table
+    extra = truthy("is_extra_credit") if "is_extra_credit" in details else pd.Series(False, index=details.index)
+    if bank.CODE == "ECO" and "Cba Rsp Code" in details:
+        keep &= details["Cba Rsp Code"].map(bank._code).eq("000")
+    done = details[keep & ~extra]
+    # an extra credit counts in Received when the review put it there (26/10/2026); Pending / Duplicate: their sheets
+    received_rows = (details[(keep & ~extra & truthy("notification_received")) | (keep & extra & status.eq("Notification received"))]
+                     if "notification_received" in details else None)
+    if received_rows is not None and "invoice_number" in received_rows:          # each invoice once
+        received_rows = received_rows[~(received_rows["invoice_number"].notna()
+                                        & received_rows["invoice_number"].duplicated())]
+    parts = {"processed": done, "received": received_rows,
+             "sla": done[done["sla_status"].astype(str).eq("SLA violated")] if "sla_status" in details else None,
              "pending": pending, "duplicate": duplicate}
     if any(v is None or not {day_col, "Currency"} <= set(v.columns) for v in parts.values()):
         return []
@@ -259,8 +273,9 @@ def period_end(key: pd.Timestamp, kind: str) -> pd.Timestamp:
 def period_label(key: pd.Timestamp, kind: str, short: bool = False) -> str:
     if kind == "day":
         return f"{key:%d/%m}" if short else f"{key:%A %d/%m/%Y}"
-    if kind == "week":
-        return f"{key:%d/%m}" if short else f"Week of {key:%d/%m/%Y}"
+    if kind == "week":                                  # 'W1 Oct' / 'Week 1 · October 2026 (28/09)' (engine.week_number)
+        month, n = engine.week_number(key)
+        return f"W{n} {month:%b}" if short else f"Week {n} · {month:%B %Y} ({key:%d/%m})"
     if kind == "month":
         return f"{key:%b %Y}" if short else f"{key:%B %Y}"
     if kind == "quarter":
@@ -680,7 +695,8 @@ def partial(facts: list, kind: str, first, last=None) -> list:
 def breakdown(facts: list, kind: str, first, last, currency: str, banks=None) -> pd.DataFrame:
     """The level below the period chosen (a year -> its quarters, a quarter -> its months, a month -> its weeks,
     a week -> its days), one row each with its figures; empty for a day."""
-    child = CHILD.get("month" if kind == "custom" else kind)
+    base_kind = "month" if kind == "custom" else kind
+    child = CHILD.get(base_kind)
     if child is None:
         return pd.DataFrame()
     first = pd.Timestamp(first)
@@ -694,13 +710,38 @@ def breakdown(facts: list, kind: str, first, last, currency: str, banks=None) ->
         t = totals(part, currency)
         r = rates(t)
         cut = key < first or period_end(key, child) > end      # e.g. a week across the month end: its part only
-        rows.append({"key": key, "Period": period_label(key, child) + (" (part in this period)" if cut else ""),
+        name = (f"Week {engine.week_number(key, month=first)[1]}" if child == "week" and base_kind == "month"
+                else period_label(key, child))          # inside a month: its own weeks (Week 1 … Week 5)
+        rows.append({"key": key, "Period": name + (" (part in this period)" if cut else ""),
                      "Payments": t["processed"],
                      "Received %": None if r["receipt"] is None else round(r["receipt"] * 100, 2),
                      "On time %": None if r["ontime"] is None else round(r["ontime"] * 100, 1),
                      "Late": t["sla"], "Pending": t["pending"], "Other channel": t["duplicate"],
                      "Status": STATUS_TEXT[status(t)]})
     return pd.DataFrame(rows)
+
+
+def children(facts: list, kind: str, first, last=None, currency: str = "All", banks=None) -> list:
+    """The periods one level below the one chosen, for the charts (a year -> its quarters, a quarter -> its months,
+    a month -> its weeks, a week -> its days), in order. Each: {"key", "label", "partial" (a week cut by the month
+    end: only its part in this period), the 5 counts, "amounts": {currency: amount received}}. Empty for a day."""
+    base = "month" if kind == "custom" else kind
+    child = CHILD.get(base)
+    if child is None:
+        return []
+    first = pd.Timestamp(first)
+    end = period_end(period_key(pd.Timestamp(last if last is not None else first), base), base)
+    pool = [f for f in _facts_for(facts, child) if first <= f.start <= end and (banks is None or f.bank in banks)]
+    out = []
+    for key in sorted({period_key(f.start, child) for f in pool}):
+        t = totals([f for f in pool if period_key(f.start, child) == key], currency)
+        label = (f"{key:%a %d/%m}" if child == "day"
+                 else f"Week {engine.week_number(key, month=first)[1]}" if child == "week"   # the month's own weeks
+                 else period_label(key, child, short=True))
+        out.append({"key": key, "label": label, "partial": key < first or period_end(key, child) > end,
+                    **{m: t[m] for m in METRICS},
+                    "amounts": {c: a.get("received", 0.0) for c, a in t["amounts"].items()}})
+    return out
 
 
 # =====================================================================================================================

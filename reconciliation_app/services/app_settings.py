@@ -7,6 +7,8 @@ changed with BANK_RECON_APP_SETTINGS). Every change records who made it and when
     targets      the Dashboard and Slack targets: notifications received >= receipt, payments on time >= ontime
     banks        per bank: sla_days = the days allowed between the bank date and IremboPay paid_at (banks whose SLA
                  rule uses days; a bank with a fixed rule, e.g. Ecobank's same minute, has none)
+    holidays     Rwanda public holidays: a payment made on a weekend or a holiday is posted on the next working day,
+                 so a period ending on one needs that day's statement (I&M). Some dates move every year (Easter, Eid)
     editors      the Google accounts allowed to change these settings (managed by an administrator)
     history      the changes: when, who, what, before -> after (the last 500)
 
@@ -29,7 +31,23 @@ import config
 import engine
 
 FILE = Path(os.environ.get("BANK_RECON_APP_SETTINGS") or config.PROJECT_DIR / "app_settings.json")
-DEFAULTS = {"targets": {"receipt": 0.99, "ontime": 0.90}, "banks": {}, "editors": [], "history": []}
+# Rwanda public holidays 2026 (Easter and the two Eid dates move every year; the Eid dates are announced late: check
+# them in Settings)
+HOLIDAYS_2026 = [
+    {"date": "2026-01-01", "name": "New Year's Day"}, {"date": "2026-01-02", "name": "Day after New Year"},
+    {"date": "2026-02-01", "name": "National Heroes' Day"}, {"date": "2026-03-20", "name": "Eid al-Fitr (check)"},
+    {"date": "2026-04-03", "name": "Good Friday"}, {"date": "2026-04-06", "name": "Easter Monday"},
+    {"date": "2026-04-07", "name": "Genocide against the Tutsi Memorial Day"}, {"date": "2026-05-01", "name": "Labour Day"},
+    {"date": "2026-05-27", "name": "Eid al-Adha (check)"}, {"date": "2026-07-01", "name": "Independence Day"},
+    {"date": "2026-07-04", "name": "Liberation Day"}, {"date": "2026-08-07", "name": "Umuganura"},
+    {"date": "2026-08-15", "name": "Assumption Day"}, {"date": "2026-12-25", "name": "Christmas Day"},
+    {"date": "2026-12-26", "name": "Boxing Day"},
+]
+DEFAULTS = {"targets": {"receipt": 0.99, "ontime": 0.90}, "banks": {}, "editors": [], "history": [],
+            "holidays": HOLIDAYS_2026,
+            # Follow-up page (22/10/2026): the reports followed up (period from this date) and the days before an open
+            # item is overdue (red, and in the Slack reminder)
+            "followup": {"from": "2026-10-01", "days": 7}}
 SLA_DAYS_MAX = 10
 ROLES = {"admin": "Administrator", "editor": "Editor", "viewer": "Viewer"}
 
@@ -51,6 +69,10 @@ def load(path: Path | None = None) -> dict:
         data["banks"] = {str(k): dict(v) for k, v in (saved.get("banks") or {}).items()}
         data["editors"] = sorted({str(e).strip().lower() for e in saved.get("editors") or [] if str(e).strip()})
         data["history"] = list(saved.get("history") or [])[-500:]
+        if isinstance(saved.get("followup"), dict):
+            data["followup"].update({k: v for k, v in saved["followup"].items() if k in ("from", "days")})
+        if isinstance(saved.get("holidays"), list):
+            data["holidays"] = _clean_holidays(saved["holidays"])
     return data
 
 
@@ -86,11 +108,21 @@ def can_edit(r: str) -> bool:
 
 
 def sla_days(data: dict, bank) -> int:
-    """The SLA days of a bank (0 = paid_at on the same day as the bank date); 0 for a bank with a fixed rule."""
+    """The SLA setting of a bank: days (0 = paid_at on the same day as the bank date), or minutes for a bank whose
+    SLA_UNIT is "minutes" (BPR: 1 by default); 0 for a bank with a fixed rule."""
     bank = engine.get_bank(bank)
     if not engine.option(bank, "SLA_DAYS_SETTING", True):
         return 0
-    return int((data["banks"].get(bank.CODE) or {}).get("sla_days", 0))
+    return int((data["banks"].get(bank.CODE) or {}).get("sla_days", engine.option(bank, "SLA_DEFAULT", 0)))
+
+
+def sla_unit(bank) -> str:
+    """'days' or 'minutes': what the SLA setting of a bank counts."""
+    return engine.option(engine.get_bank(bank), "SLA_UNIT", "days")
+
+
+def sla_max(bank) -> int:
+    return int(engine.option(engine.get_bank(bank), "SLA_MAX", SLA_DAYS_MAX))
 
 
 def change(what: str, before, after, who: str, data: dict | None = None, path: Path | None = None) -> dict:
@@ -121,13 +153,13 @@ def set_sla_days(bank, days: int, who: str, path: Path | None = None) -> dict:
     bank = engine.get_bank(bank)
     if not engine.option(bank, "SLA_DAYS_SETTING", True):
         raise SettingsError(f"{bank.NAME} has a fixed SLA rule: there are no days to set.")
-    if not 0 <= int(days) <= SLA_DAYS_MAX:
-        raise SettingsError(f"The SLA days must be between 0 and {SLA_DAYS_MAX}.")
+    if not 0 <= int(days) <= sla_max(bank):
+        raise SettingsError(f"The SLA {sla_unit(bank)} must be between 0 and {sla_max(bank)}.")
     data = load(path)
     old = sla_days(data, bank)
     if old != int(days):
         data["banks"].setdefault(bank.CODE, {})["sla_days"] = int(days)
-        data = change(f"{bank.NAME}: SLA days", old, int(days), who, data, path)
+        data = change(f"{bank.NAME}: SLA {sla_unit(bank)}", old, int(days), who, data, path)
     return data
 
 
@@ -142,4 +174,54 @@ def set_editors(editors: list, who: str, path: Path | None = None) -> dict:
         old = ", ".join(data["editors"]) or "none"
         data["editors"] = new
         data = change("Editors", old, ", ".join(new) or "none", who, data, path)
+    return data
+
+
+def _clean_holidays(rows) -> list:
+    """[{"date": "YYYY-MM-DD", "name": ...}] sorted, one per date; rows without a valid date are left out."""
+    out = {}
+    for r in rows or []:
+        date = r.get("date") if isinstance(r, dict) else None
+        name = str((r.get("name") if isinstance(r, dict) else "") or "").strip()
+        try:
+            day = datetime.strptime(str(date)[:10], "%Y-%m-%d").strftime("%Y-%m-%d")
+        except (TypeError, ValueError):
+            continue
+        out[day] = name or "Holiday"
+    return [{"date": d, "name": n} for d, n in sorted(out.items())]
+
+
+def set_holidays(rows: list, who: str, path: Path | None = None) -> dict:
+    """Save the public holidays as `who` (an editor or administrator); rows: [{"date", "name"}]."""
+    for r in rows:
+        if str(r.get("date") or "").strip() and not _clean_holidays([r]):
+            raise SettingsError(f"Not a date: {r.get('date')} (use YYYY-MM-DD).")
+    data = load(path)
+    new = _clean_holidays(rows)
+    if new != data["holidays"]:
+        before = {h["date"]: h["name"] for h in data["holidays"]}
+        after = {h["date"]: h["name"] for h in new}
+        added = [f"{d} {after[d]}" for d in after if d not in before or before[d] != after[d]]
+        removed = [f"{d} {before[d]}" for d in before if d not in after]
+        data["holidays"] = new
+        data = change("Public holidays", "removed: " + (", ".join(removed) or "none"),
+                      "added/changed: " + (", ".join(added) or "none"), who, data, path)
+    return data
+
+
+def set_followup(start, days: int, who: str, path: Path | None = None) -> dict:
+    """Save the Follow-up settings as `who`: the first period followed up (a date) and the days before overdue."""
+    try:
+        start = datetime.strptime(str(start)[:10], "%Y-%m-%d").strftime("%Y-%m-%d")
+    except ValueError:
+        raise SettingsError("The follow-up start must be a date.") from None
+    if not 1 <= int(days) <= 90:
+        raise SettingsError("The days before an item is overdue must be between 1 and 90.")
+    data = load(path)
+    for key, label, v in (("from", "Follow-up: reports from", start), ("days", "Follow-up: overdue after (days)",
+                                                                      int(days))):
+        old = data["followup"][key]
+        if old != v:
+            data["followup"][key] = v
+            data = change(label, old, v, who, data, path)
     return data

@@ -163,12 +163,15 @@ def test_matching_september(tmp_path):
     assert "Not settled (FAILED)" in d.loc["S00017", "Reason"]                 # an unknown status is not success
     assert "Other channel (MTN_MOMO)" in d.loc["S00005", "Reason"]
     t = e.counts_of(res.blocks[-1][2])
-    assert t["Overall processed payments"]["Total"] == 14
-    assert t["Overall notifications received by Irembo"]["Total"] == 8         # 001 002 004 007 008x2 018 030
-    assert t["Pending notifications"]["Total"] == 1                            # 003 (NEW)
+    # 26/10/2026: processed = every credit on the statement, each invoice once: 14 - the extra credit 009 = 13
+    # (the 3 not found - 006 016 019 - are processed and decided in Exception Resolution); received = paid_at filled
+    # through BOA, whatever the status (003 NEW and 017 FAILED have a paid_at)
+    assert t["Overall processed payments"]["Total"] == 13
+    assert t["Overall notifications received by Irembo"]["Total"] == 9         # 001-004 007 008 017 018 030
+    assert t["Pending notifications"]["Total"] == 0                            # every IremboPay record has a paid_at
     assert t["Duplicate Payment"]["Total"] == 1                                # 005 (another channel)
-    # SLA as for I&M: paid_at day vs Value Date, 0 days allowed -> 002 (+3) and the double credit 008 (-2, x2)
-    assert t["SLA Violated"]["Total"] == 3
+    # SLA as for I&M: paid_at day vs Value Date, 0 days allowed -> 002 (+3) and 008 (-2, counted once)
+    assert t["SLA Violated"]["Total"] == 2
     assert d.loc["S00001", "sla_status"] == "On time" and d.loc["S00008", "sla_status"] == "SLA violated"
     assert d.loc["S00001", "Branch"] == "HEAD OFFICE"
 
@@ -251,3 +254,12 @@ def test_im_unchanged(tmp_path):
     res = e.run(tmp_path, e.make_period("month", "2026-08-01"), files, require_review=False, bank="IM",
                 report_dir=tmp_path / "r")
     assert (res.bank_rows, res.not_found) == (5419, 10)
+
+
+def test_an_extra_credit_goes_to_review_next_to_the_credit_counted(tmp_path):
+    # 20/10/2026: the invoice credited twice counts once (S00008, the credit IremboPay recorded); S00009 is reviewed
+    res, d = run_september(tmp_path)
+    reasons = dict(zip(res.review["Ref no"], res.review["Reason"]))
+    assert reasons["S00009"] == "Invoice credited again: the credit counted is S00008"
+    assert "S00008" not in reasons
+    assert bool(d.loc["S00009", "is_extra_credit"]) and not bool(d.loc["S00008", "is_extra_credit"])

@@ -115,8 +115,88 @@ PAYMENT_REQUIRED = ["invoice_number", "amount", "currency", "payment_status", "p
 # ---- review (step 4 of the app): the 5 choices and the columns the user fills in
 TABLE_CHOICES = ["Notification received", "Pending notification", "Paid with other channel",
                  "Failed notification", "Exclude"]
+# 26/10/2026: an extra credit / debit (a second one for an invoice already counted) is not in Processed, but the
+# table chosen for it in Exception Resolution is read: it counts there (a second payment = a double payment)
+EXTRA_DECIDED = {"Notification received": "received", "Pending notification": "pending",
+                 "Paid with other channel": "duplicate"}
+
+
+EXCLUDED = "Excluded (not counted)"          # 26/10/2026: an excluded row stays in the report, with this status
+NOT_COUNTED = "Not counted (second credit)"   # an extra credit in no table (Failed notification / no decision)
+
+
+def with_extra_decisions(rows: pd.DataFrame, m: dict, window: pd.Series) -> dict:
+    """The tables `m` (masks) plus the extra credits of the window put in a table in Exception Resolution
+    (Failed notification / Exclude / no decision: in no table). A row excluded in the review is in no table
+    (26/10/2026: it is not removed from the report any more - it stays in the statement, with a comment)."""
+    if "review_table" not in rows:
+        return m
+    table = rows["review_table"].fillna("").astype(str)
+    excluded = table.eq("Exclude")
+    out = {k: v & ~excluded for k, v in m.items()}
+    if "is_extra_credit" in rows:
+        # 26/10/2026: an invoice counts at most ONCE in each table - an extra credit put in a table that already has
+        # its invoice (its counted credit, or an earlier extra one) is not counted again (it stays, with a note)
+        extra = window & rows["is_extra_credit"].fillna(False).astype(bool) & ~excluded
+        inv = rows["invoice_number"].astype(object).where(rows["invoice_number"].notna(), "").astype(str)
+        for choice, key in EXTRA_DECIDED.items():
+            there = set(inv[out[key]])
+            cand = inv[extra & table.eq(choice) & inv.ne("") & ~inv.isin(there)]
+            add = pd.Series(False, index=rows.index)
+            add[cand[~cand.duplicated()].index] = True       # the first of them only
+            out[key] = out[key] | add
+    return out
+
+
+TABLE_NAMES = {"received": "Notification received", "pending": "Pending notification",
+               "duplicate": "Duplicate payment"}
+
+
+def table_notes(rows: pd.DataFrame, whole: dict, bank) -> pd.Series:
+    """26/10/2026: "Report note" of each row of an invoice credited / debited more than once - why the row is in its
+    table (or in none) and where the other credit of the invoice went."""
+    bank = get_bank(bank)
+    ref, day = bank.COLUMNS.get("reference"), bank.COLUMNS["payment_date"]
+    notes = pd.Series("", index=rows.index, dtype=object)
+    if "is_extra_credit" not in rows:
+        return notes
+    inv = rows["invoice_number"].astype(object).where(rows["invoice_number"].notna(), "").astype(str)
+    many = inv.ne("") & inv.duplicated(keep=False)
+    where = pd.Series("", index=rows.index, dtype=object)
+    for key, name in TABLE_NAMES.items():
+        where[whole[key] & where.eq("")] = name
+    extra = rows["is_extra_credit"].fillna(False).astype(bool)
+    table = rows["review_table"].fillna("").astype(str) if "review_table" in rows else pd.Series("", index=rows.index)
+
+    def shown(choice):                       # the table a review choice puts a row in
+        return TABLE_NAMES[EXTRA_DECIDED[choice]]
+
+    def label(i):
+        r = str(rows.at[i, ref]) if ref and ref in rows and pd.notna(rows.at[i, ref]) else ""
+        d = pd.to_datetime(rows.at[i, day], errors="coerce")
+        return " ".join(x for x in (r, f"of {d:%d/%m %H:%M}" if pd.notna(d) else "") if x)
+
+    for _, idx in rows[many].groupby(inv[many]).groups.items():
+        for i in idx:
+            if where[i]:
+                why = (f"In {where[i]}: " + ("second credit of this invoice, put here in Exception Resolution"
+                                             if extra[i] else "the credit counted for this invoice"))
+            elif extra[i] and table[i] in EXTRA_DECIDED:
+                why = f"Not counted: the invoice is already in {shown(table[i])}"
+            elif extra[i]:
+                why = "Not counted: second credit of this invoice" + (" (excluded)" if table[i] == "Exclude" else "")
+            else:
+                why = "The credit counted for this invoice"
+            others = [f"{label(j)} -> {where[j] or (f'not counted (already in {shown(table[j])})' if extra[j] and table[j] in EXTRA_DECIDED else 'no table')}"
+                      for j in idx if j != i]
+            notes[i] = why + ". Other credit(s) of the invoice: " + "; ".join(others) + "."
+    return notes
+
+
 EDIT_COLS = ["Reviewed (Yes/No)", "Report table", "SLA violated (Yes/No)", "Correct invoice number",
-             "payment_status", "payment_provider", "paid_at (YYYY-MM-DD HH:MM:SS)", "Merchant name", "Comment"]
+             "payment_status", "payment_provider", "paid_at (YYYY-MM-DD HH:MM:SS)", "Merchant name", "Comment",
+             "Currency (chosen)"]                  # the last one: banks whose statement has no currency (BPR)
+CURRENCY_CHOSEN = "Currency (chosen)"
 SUGGEST_COL = "Suggestion from"            # filled when an earlier review already decided the invoice
 STORE_COLS = ["bank", "period", "key", "invoice_number"] + EDIT_COLS + ["saved_at"]   # columns of the review store
 STORE_NAME = ".review_store.csv"
@@ -131,7 +211,8 @@ OLD_SHEETS = {"Payment per merchant", "Debited more than once"}   # Ecobank shee
 NOT_FOUND_SHEET = "not found in IremboPay"     # only in old reports (removed when they are made again)
 REPORT_SHEETS = ({"Summary-Daily", "Summary-Weekly", "Summary-Monthly", "Pending notification",
                   "Duplicate payment other channel", NOT_FOUND_SHEET, "Payment details"}
-                 | {b.STATEMENT_SHEET for b in BANKS.values()})          # sheets written by the app (the rest = user's)
+                 | {b.STATEMENT_SHEET for b in BANKS.values()}
+                 | {s for b in BANKS.values() for s in getattr(b, "EXTRA_SHEETS", [])})   # written by the app (rest = user's)
 REPORT_SUFFIX = "_recon_summary_"              # report file = <CODE>_recon_summary_<period label>.xlsx
 
 # ---- fast Excel reading when python-calamine is installed (Setup installs it); pandas' default otherwise
@@ -178,7 +259,7 @@ class Period:
     def name(self):
         """How the period is shown to the user: 'September 2026', 'week 07/09 - 13/09/2026', ..."""
         return {"day": f"{self.start:%A %d %B %Y}",
-                "week": f"week {self.start:%d/%m} - {self.last_day:%d/%m/%Y}",
+                "week": "w" + f"{week_name(self)} ({self.start:%d/%m} - {self.last_day:%d/%m/%Y})"[1:],
                 "month": f"{self.start:%B %Y}"}[self.report_type]
 
     @property
@@ -225,9 +306,111 @@ def period_not_ended(period: Period, today=None) -> str | None:
     return f"{what} has not ended yet.\nIt can be reconciled from {period.end:%A %d/%m/%Y}."
 
 
+# ---- what IremboPay says about a matched row (26/10/2026, every bank): paid = paid_at is filled, whatever the
+#      payment_status; the decision of Exception Resolution always wins
+def is_paid(rows: pd.DataFrame) -> pd.Series:
+    table = rows["review_table"].fillna("") if "review_table" in rows else pd.Series("", index=rows.index)
+    paid = rows["paid_at"].notna() | table.isin(["Notification received", "Paid with other channel"])
+    return paid & table.ne("Pending notification")
+
+
+def bank_providers(bank) -> set:
+    """The IremboPay payment_provider values that mean this bank: PROVIDER, plus PROVIDER_ALIASES (27/10/2026, BPR:
+    'BPR' - a bank transfer into IremboPay's BPR account - is BPR too, like 'BPR_RW')."""
+    bank = get_bank(bank)
+    return {bank.PROVIDER, *option(bank, "PROVIDER_ALIASES", [])}
+
+
+def _providers(provider) -> set:
+    return set(provider) if isinstance(provider, (set, list, tuple, frozenset)) else {provider}
+
+
+def paid_through(rows: pd.DataFrame, provider) -> pd.Series:
+    """Notification received: in IremboPay, paid (paid_at), through this bank (provider: one name or several)."""
+    return (rows["found_in_irembopay"].fillna(False).astype(bool) & rows["payment_provider"].isin(_providers(provider))
+            & is_paid(rows))
+
+
+def paid_elsewhere(rows: pd.DataFrame, provider) -> pd.Series:
+    """Duplicate Payment: in IremboPay, paid (paid_at), but through another provider (not one of this bank's)."""
+    return (rows["found_in_irembopay"].fillna(False).astype(bool) & rows["payment_provider"].notna()
+            & ~rows["payment_provider"].isin(_providers(provider)) & is_paid(rows))
+
+
+def not_paid(rows: pd.DataFrame, pending_statuses) -> pd.Series:
+    """Pending notification: in IremboPay but not paid (no paid_at), or a row the bank's rules make pending (BPR: a
+    credit with no invoice number, status NEW)."""
+    known = rows["found_in_irembopay"].fillna(False).astype(bool) | rows["payment_status"].isin(pending_statuses)
+    return known & ~is_paid(rows)
+
+
+def week_number(monday, month=None) -> tuple:
+    """(month, n) of the Monday-to-Sunday week starting `monday` (decided 23/10/2026). Its month: the month given
+    (a block of a monthly report), else the month where most of its days are (the month of its Thursday). n = its
+    place among the Monday-to-Sunday weeks that touch that month: the week of the 1st is Week 1 (also when it starts
+    in the month before). E.g. 28/09-04/10/2026 = October Week 1; 07/09-13/09/2026 = September Week 2."""
+    monday = pd.Timestamp(monday).normalize()
+    if month is None:
+        month = (monday + pd.Timedelta(days=3)).replace(day=1)
+    first = pd.Timestamp(month).replace(day=1)
+    base = first - pd.Timedelta(days=first.dayofweek)
+    return first, (monday - base).days // 7 + 1
+
+
+def week_name(period: "Period", short: bool = False) -> str:
+    """'Week 1 · October 2026' (short: 'Week 1') of a weekly period; '' for a day or a month."""
+    if period.report_type != "week":
+        return ""
+    month, n = week_number(period.start)
+    return f"Week {n}" if short else f"Week {n} · {month:%B %Y}"
+
+
+# public holidays (Settings page, app_settings.json): a payment made on a weekend or a holiday is posted on the next
+# working day. Set by the app at each run (set_holidays); empty = weekends only.
+HOLIDAYS: dict = {}                       # Timestamp -> name
+
+
+def set_holidays(holidays) -> None:
+    """holidays: [{"date": "2026-04-06", "name": "Easter Monday"}, ...] (or (date, name) pairs)."""
+    HOLIDAYS.clear()
+    for h in holidays or []:
+        date, name = (h.get("date"), h.get("name", "")) if isinstance(h, dict) else h
+        day = pd.to_datetime(date, errors="coerce")
+        if pd.notna(day):
+            HOLIDAYS[pd.Timestamp(day).normalize()] = str(name or "Holiday")
+
+
+def is_working_day(day) -> bool:
+    day = pd.Timestamp(day).normalize()
+    return day.dayofweek < 5 and day not in HOLIDAYS
+
+
+def next_working_day_after(period: Period):
+    """When the period ends on a weekend or a holiday: the first working day after it (its payments are posted
+    then), skipping weekends and holidays (e.g. a week ending Sunday 05/04/2026 -> Wednesday 08/04: Easter Monday
+    and 07/04 are holidays). None when the period ends on a working day."""
+    day = period.last_day
+    if is_working_day(day):
+        return None
+    day = day + pd.Timedelta(days=1)
+    while not is_working_day(day):
+        day = day + pd.Timedelta(days=1)
+    return day
+
+
 def extra_monday(period: Period, bank=None):
-    """Monday after the period, when the bank needs it (period ending on a weekend), else None."""
-    return period.monday_after if get_bank(bank).MONDAY_AFTER_WEEKEND else None
+    """The next working day after the period, when the bank needs it (MONDAY_AFTER_WEEKEND: the period ends on a
+    weekend or a holiday, whose payments are posted on the next working day), else None. Usually a Monday."""
+    return next_working_day_after(period) if get_bank(bank).MONDAY_AFTER_WEEKEND else None
+
+
+def closed_days_before(day) -> list:
+    """The weekend days and holidays just before a working day (the days whose payments it holds), oldest first."""
+    out, d = [], pd.Timestamp(day).normalize() - pd.Timedelta(days=1)
+    while not is_working_day(d):
+        out.insert(0, d)
+        d -= pd.Timedelta(days=1)
+    return out
 
 
 # =====================================================================================================================
@@ -238,7 +421,8 @@ def report_path(base_dir: Path, period: Period, bank=None, root: Path | None = N
     root: output/ by default; the app gives its session's temporary folder (reports are kept on Google Drive)."""
     code = get_bank(bank).CODE
     root = Path(root) if root is not None else Path(base_dir) / "output"
-    return root / period.report_type / f"{code}{REPORT_SUFFIX}{period.label}.xlsx"
+    week = f" ({week_name(period, short=True).lower()})" if period.report_type == "week" else ""   # ' (week 1)'
+    return root / period.report_type / f"{code}{REPORT_SUFFIX}{period.label}{week}.xlsx"
 
 
 def report_bank(path: Path) -> str:
@@ -248,7 +432,7 @@ def report_bank(path: Path) -> str:
 
 def report_label(path: Path) -> str:
     """Period label from a report file name ('IM_recon_summary_01-09-2026_to_30-09-2026' -> '01-09-2026_to_...')."""
-    return Path(path).stem.split(REPORT_SUFFIX, 1)[-1]
+    return re.sub(r" \(week \d+\)", "", Path(path).stem.split(REPORT_SUFFIX, 1)[-1])   # without ' (week 1)'
 
 
 def bank_cols(bank=None) -> list:
@@ -275,6 +459,7 @@ class UploadedFile:
     other_credits: int = 0                 # credits on the statement that are not IremboPay payments
     bank: str = ""                         # bank code (bank files only)
     providers: frozenset | None = None     # payment_provider values found (payment files only, e.g. {"I_M"})
+    balances: dict | None = None           # opening / closing / net of a statement (BPR: the checks between files)
 
 
 def file_digest(content: bytes) -> str:
@@ -297,7 +482,7 @@ def read_bank_file(name: str, content: bytes, bank=None) -> UploadedFile:
         raise ReconError(f"{name}: no dates found in this bank file.")
     return UploadedFile(name, "bank", file_digest(content), data, info["currency"],
                         pd.Timestamp(first).normalize(), pd.Timestamp(last).normalize(), len(data), other_credits,
-                        bank.CODE)
+                        bank.CODE, balances=info.get("balances"))
 
 
 def read_payment_file(name: str, content: bytes, bank=None) -> UploadedFile:
@@ -340,6 +525,7 @@ class Check:
     blocking: list = field(default_factory=list)     # Run is blocked
     warnings: list = field(default_factory=list)
     lines: list = field(default_factory=list)        # (ok: bool, text) shown as a checklist
+    missing: list = field(default_factory=list)      # days with no statement that do not block, e.g. "17/10 to 18/10"
 
 
 def _ranges(days):
@@ -365,6 +551,8 @@ def accept_file(period: Period, f: UploadedFile, accepted: list, bank=None) -> s
     # the days a file may cover: statements from the day before (late payments) to the Monday after a weekend
     if f.kind == "bank":
         window_start, window_end = period.day_before, extra_monday(period, bank) or period.last_day
+        if option(bank, "DAY_AFTER_RECOMMENDED", False):
+            window_end = max(window_end, period.last_day + pd.Timedelta(days=1))
         earlier = option(bank, "ACCEPT_EARLIER_DAYS", 0)      # payments of the period requested before it
         if earlier:
             window_start = period.start - pd.Timedelta(days=earlier)
@@ -403,6 +591,10 @@ def check_period(period: Period, files: list, bank=None, today=None) -> Check:
         covered = set()
         for f in mine:
             covered |= set(pd.date_range(f.first, f.last))
+        if hasattr(bank, "check_files") and mine:          # the balances: nothing missing between the files
+            covered, more_lines, more_blocking = bank.check_files(mine)
+            chk.lines += more_lines
+            chk.blocking += more_blocking
         if not mine:
             chk.lines.append((False, f"{label}: no file added → upload {what}(s) for "
                                      f"{period.start:%d/%m} to {(monday or period.last_day):%d/%m/%Y}"))
@@ -413,19 +605,31 @@ def check_period(period: Period, files: list, bank=None, today=None) -> Check:
                 txt = f"{a:%A %d/%m}" if a == b else f"{a:%d/%m} to {b:%d/%m}"
                 why = ""
                 if monday is not None and a <= monday <= b:
-                    why = " (Monday after the weekend: late weekend payments are posted on Monday"
-                    why += (f"; Monday's statement is available from {monday + pd.Timedelta(days=1):%A %d/%m})"
+                    closed = closed_days_before(monday)
+                    names = [HOLIDAYS[d] for d in closed if d in HOLIDAYS]
+                    why = (f" (next working day: payments of {closed[0]:%d/%m}" + (f" to {closed[-1]:%d/%m}"
+                           if len(closed) > 1 else "") + (f", {' and '.join(names)}," if names else "")
+                           + f" are posted on {monday:%A %d/%m}")
+                    why += (f"; its statement is available from {monday + pd.Timedelta(days=1):%A %d/%m})"
                             if monday >= today else ")")
                 chk.lines.append((False, f"{label}: {txt} missing → upload {what} for "
                                          f"{'that day' if a == b else 'those days'}{why}"))
             if gaps and block_missing:
                 chk.blocking.append(f"{label}: some days are missing.")
             elif gaps:                                         # some banks: a warning only, Run stays possible
-                chk.warnings.append(f"{label}: {sum(1 for _ in gaps)} day(s) have no statement. Run is allowed, but "
-                                    "payments of those days will be missing from the report. Upload them if you can.")
+                days_txt = ", ".join(f"{a:%d/%m}" if a == b else f"{a:%d/%m} to {b:%d/%m}" for a, b in _ranges(gaps))
+                chk.missing.append(f"{label}: {days_txt}")
+                chk.warnings.append(f"{label}: no statement for {days_txt}. Run is allowed: those days may simply have "
+                                    "had no transaction. If they had some, upload their statement, otherwise their "
+                                    "payments will be missing from the report. The Slack message will say it.")
             else:
                 chk.lines.append((True, f"{label}: {period.start:%d/%m} to {max(needed):%d/%m} covered"))
         # the statement of the day before may hold payments of the first day (recommended, never blocking)
+        day_after = period.last_day + pd.Timedelta(days=1)
+        if (option(bank, "DAY_AFTER_RECOMMENDED", False) and day_after < today and day_after not in covered
+                and mine):
+            chk.warnings.append(f"Recommended: upload the statement of {day_after:%d/%m/%Y}. Payments made late on "
+                                f"{period.last_day:%d/%m/%Y} are booked the next morning.")
         if cur in bank.DAY_BEFORE_CURRENCIES and period.day_before < today and period.day_before not in covered:
             chk.warnings.append(f"Recommended: upload the {cur} statement for {period.day_before:%d/%m/%Y}. "
                                 f"It may contain payments with {bank.COLUMNS['payment_date']} {period.start:%d/%m/%Y}.")
@@ -450,20 +654,23 @@ def check_period(period: Period, files: list, bank=None, today=None) -> Check:
 
 def _reverse_check(period: Period, bank, statements: list, pays: list, chk: Check):
     """IremboPay payments made through this bank in the period that are on no uploaded statement."""
-    on_statement = set(bank.clean_statement(pd.concat([f.data for f in statements], ignore_index=True))["invoice_number"])
     p = pd.concat([f.data for f in pays], ignore_index=True)
-    p = p[p["payment_provider"].eq(bank.PROVIDER) & p["payment_status"].isin(bank.COMPLETED_STATUSES)
+    rows = bank.clean_statement(pd.concat([f.data for f in statements], ignore_index=True))
+    if hasattr(bank, "find_invoices"):                    # rows without invoice found another way (BPR)
+        rows = bank.find_invoices(rows, p)
+    on_statement = set(rows["invoice_number"])
+    p = p[p["payment_provider"].isin(bank_providers(bank)) & p["payment_status"].isin(bank.COMPLETED_STATUSES)
           & p["paid_at"].between(period.start, period.end, inclusive="left")]
-    missing = p[~p["invoice_number"].isin(on_statement)].drop_duplicates("invoice_number")
+    missing = p[~p["invoice_number"].isin(on_statement)].drop_duplicates("invoice_number").sort_values("paid_at")
+    n = p["invoice_number"].nunique()
+    title = f"Paid in IremboPay through {bank.NAME}"
     if missing.empty:
-        chk.lines.append((True, f"IremboPay {bank.NAME} payments: all {len(p):,} found on the statements"))
+        chk.lines.append((True, f"{title}: all {n:,} are in the {bank.NAME} statements"))
         return
-    days = missing["paid_at"].dt.normalize().value_counts().sort_index()
-    shown = ", ".join(f"{d:%d/%m} ({n})" for d, n in list(days.items())[:8]) + (" …" if len(days) > 8 else "")
-    chk.lines.append((False, f"IremboPay {bank.NAME} payments: {len(missing):,} of {len(p):,} are on no statement"))
-    chk.warnings.append(f"{len(missing):,} IremboPay {bank.NAME} payment(s) paid in the period are on no uploaded "
-                        f"statement, paid on: {shown}. Upload the statements of the days they were requested "
-                        "(the same day or a few days before).")
+    # 26/10/2026: one line only (no warning, no list under it)
+    k = len(missing)
+    text = f"{title}: {k:,} of {n:,} {'is' if k == 1 else 'are'} not in the {bank.NAME} statements"
+    chk.lines.append((False, text))
 
 
 # =====================================================================================================================
@@ -604,15 +811,20 @@ def review_rows(base_dir: Path, period: Period, not_found: pd.DataFrame, bank=No
     for c in EDIT_COLS + [SUGGEST_COL]:
         review[c] = ""
     mine = store[store["period"] == period.store_key].drop_duplicates("key", keep="last").set_index("key")
-    others = store[(store["period"] != period.store_key) & store["Reviewed (Yes/No)"].map(is_yes)]
+    others = store[(store["period"] != period.store_key) & store["Reviewed (Yes/No)"].map(is_yes).astype(bool)]
     by_key = others.drop_duplicates("key", keep="last").set_index("key")
     by_inv = (others[others["invoice_number"].ne("")]
               .drop_duplicates("invoice_number", keep="last").set_index("invoice_number"))
     suggested = 0
+    no_currency = option(bank, "CURRENCY_FROM_IREMBOPAY", False)
     for i, r in review.iterrows():
-        if r["_key"] in mine.index:                       # 1. decided for this period: use it as it is
+        key = r["_key"]
+        if key not in mine.index and no_currency:         # saved while its currency was still unknown (blank)
+            blank = "|" + key.split("|", 1)[1]
+            key = blank if blank in mine.index else key
+        if key in mine.index:                             # 1. decided for this period: use it as it is
             for c in EDIT_COLS:
-                review.at[i, c] = mine.loc[r["_key"], c]
+                review.at[i, c] = mine.loc[key, c]
             continue
         inv = str(r["invoice_number"]) if pd.notna(r["invoice_number"]) else ""
         source = by_key.loc[r["_key"]] if r["_key"] in by_key.index else (by_inv.loc[inv] if inv in by_inv.index else None)
@@ -634,6 +846,8 @@ def apply_review(merged: pd.DataFrame, not_found: pd.DataFrame, payments: pd.Dat
     merged = merged.copy()
     current = merged["period"].eq("current")
     merged["originally_not_found"] = ~merged["found_in_irembopay"]
+    to_review = merged["_to_review"] if "_to_review" in merged else merged["originally_not_found"]
+    choose_currency = option(bank, "CURRENCY_FROM_IREMBOPAY", False)
     for c in ("review_status", "review_table", "review_comment", "sla_override"):
         merged[c] = ""
     merged["_key"] = key_of(merged, bank)
@@ -642,7 +856,7 @@ def apply_review(merged: pd.DataFrame, not_found: pd.DataFrame, payments: pd.Dat
     counts, messages, exclude_keys = {"Not reviewed": 0}, [], []
 
     for _, r in review.iterrows():
-        rows = current & merged["originally_not_found"] & merged["_key"].eq(r["_key"])
+        rows = current & to_review & merged["_key"].eq(r["_key"])
         if not is_yes(r["Reviewed (Yes/No)"]):
             merged.loc[rows, "review_status"] = "Not reviewed"
             counts["Not reviewed"] += 1
@@ -651,6 +865,18 @@ def apply_review(merged: pd.DataFrame, not_found: pd.DataFrame, payments: pd.Dat
         if table_choice and table_choice not in TABLE_CHOICES:
             table_choice = ""
         correct_inv = str(r["Correct invoice number"]).strip()
+        if choose_currency and table_choice != "Exclude":   # no currency on the statement: IremboPay's, or chosen
+            known = merged.loc[rows, "Currency"].fillna("").astype(str).ne("").all()
+            chosen = str(r.get(CURRENCY_CHOSEN, "")).strip().upper()
+            if correct_inv and correct_inv in pay_by_invoice.index:
+                merged.loc[rows, "Currency"] = pay_by_invoice.loc[correct_inv, "currency"]
+            elif chosen in bank.CURRENCIES:
+                merged.loc[rows, "Currency"] = chosen
+            elif not known:                                 # reviewed, but its currency is still unknown
+                merged.loc[rows, "review_status"] = "Not reviewed"
+                counts["Not reviewed"] += 1
+                counts["Currency to choose"] = counts.get("Currency to choose", 0) + 1
+                continue
         manual = {"payment_status": str(r["payment_status"]).strip().upper(),
                   "payment_provider": str(r["payment_provider"]).strip(),
                   "paid_at": str(r["paid_at (YYYY-MM-DD HH:MM:SS)"]).strip(),
@@ -685,13 +911,18 @@ def apply_review(merged: pd.DataFrame, not_found: pd.DataFrame, payments: pd.Dat
             merged.loc[rows, "found_in_irembopay"] = True
         elif table_choice == "Pending notification":
             merged.loc[rows, "payment_provider"] = bank.PROVIDER
-            # NEW, unless the status typed in the review is one the bank counts as pending (Ecobank: EXPIRED too)
-            merged.loc[rows, "payment_status"] = (manual["payment_status"] if manual["payment_status"]
-                                                  in option(bank, "PENDING_STATUSES", {"NEW"}) else "NEW")
+            # always NEW (20/10/2026): "expired" is not a payment status - an expired invoice was never paid, so its
+            # payment status is NEW; the expiry is shown as a note (review status / comment)
+            merged.loc[rows, "payment_status"] = "NEW"
             merged.loc[rows, "found_in_irembopay"] = True
         elif table_choice == "Paid with other channel":
+            # 27/10/2026: the provider IremboPay recorded is kept (its origin); the one typed in the review, else
+            # "OTHER", only when IremboPay has none
             provider = manual["payment_provider"]
-            merged.loc[rows, "payment_provider"] = provider if provider and provider != bank.PROVIDER else "OTHER"
+            recorded = merged.loc[rows, "payment_provider"]
+            typed = provider if provider and provider not in bank_providers(bank) else "OTHER"
+            merged.loc[rows, "payment_provider"] = recorded.where(recorded.notna() & recorded.astype(str).str.strip()
+                                                                  .ne(""), typed)
             if manual["payment_status"] in ("", "NEW"):
                 merged.loc[rows, "payment_status"] = "PAID"
             merged.loc[rows, "found_in_irembopay"] = True
@@ -704,7 +935,13 @@ def apply_review(merged: pd.DataFrame, not_found: pd.DataFrame, payments: pd.Dat
             merged.loc[rows, "currency"] = merged.loc[rows, "currency"].fillna(merged.loc[rows, "Currency"])
 
         # ---- what the row became (shown in the report), and an SLA decided by hand
-        if table_choice:
+        expired = (manual["payment_status"] == "EXPIRED"
+                   or "expired" in str(r["Comment"]).lower())    # IremboPay checkout: the invoice expired unpaid
+        if table_choice == "Pending notification" and expired:
+            status = "Pending notification (invoice expired)"
+        elif table_choice == "Exclude":
+            status = EXCLUDED
+        elif table_choice:
             status = table_choice
         elif merged.loc[rows, "found_in_irembopay"].any():
             status = f"Matched to invoice {correct_inv}" if correct_inv in pay_by_invoice.index else "Resolved manually"
@@ -718,14 +955,17 @@ def apply_review(merged: pd.DataFrame, not_found: pd.DataFrame, payments: pd.Dat
         if sla in ("yes", "y", "no", "n"):
             merged.loc[rows, "sla_override"] = "SLA violated" if sla.startswith("y") else "On time"
     merged["paid_at"] = pd.to_datetime(merged["paid_at"], errors="coerce")
+    if counts.get("Currency to choose"):
+        messages.append(("warning", f"{counts['Currency to choose']} credit(s) marked reviewed have no currency (not in "
+                                    "IremboPay): choose it in the Currency column, then save again."))
 
     nf = not_found.copy()
     nf["_key"] = key_of(nf, bank)
     info = merged.drop_duplicates("_key").set_index("_key")[["review_status", "review_comment"]]
     nf = nf.join(info, on="_key").drop(columns="_key")
-    if exclude_keys:                                      # "Exclude": the row leaves the report
-        merged = merged[~(merged["period"].eq("current") & merged["_key"].isin(exclude_keys))].reset_index(drop=True)
-        messages.append(("info", f"{len(exclude_keys)} row(s) excluded from the report, as chosen in the review."))
+    if exclude_keys:                  # "Exclude" (26/10/2026): the row stays in the statement, in no table
+        messages.append(("info", f"{len(exclude_keys)} row(s) excluded, as chosen in the review: they stay in the "
+                                 "statement with their comment, but are counted in no table."))
     return merged, nf, counts, messages
 
 
@@ -780,6 +1020,19 @@ def save_uploaded_report(base_dir: Path, period: Period, name: str, content: byt
         wb.close()
         mine = get_bank(bank)
         made_here = [kind for kind, sheet in SUMMARY_SHEET.items() if sheet in sheets]
+        if made_here and is_no_transaction_report(tmp, period):  # a No-Transaction Report of this bank and period
+            wb = load_workbook(tmp, read_only=True, data_only=True)
+            ws = wb[SUMMARY_SHEET[period.report_type]]
+            title, dates = str(ws.cell(1, 1).value or ""), str(ws.cell(2, 1).value or "")
+            wb.close()
+            if not title.startswith(mine.FULL_NAME):
+                raise ReconError(f"{name}: this No-Transaction Report is not for {mine.NAME} ({title}).")
+            if f"{period.start:%d/%m/%Y}" not in dates:
+                raise ReconError(f"{name}: this No-Transaction Report is for '{dates}', not for {period.name}.")
+            target = report_path(base_dir, period, bank, root)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp.replace(target)
+            return target
         if not made_here or not any(b.STATEMENT_SHEET in sheets for b in BANKS.values()):
             raise ReconError(f"{name}: this is not a reconciliation report made by this app.")
         if mine.STATEMENT_SHEET not in sheets:                       # 1. the right bank
@@ -819,7 +1072,7 @@ def merchant_counts(table) -> dict:
                                                        table["Number of Transactions"])}
 
 
-def add_vs_merchants(table: pd.DataFrame, prev, unit: str) -> pd.DataFrame:
+def add_vs_merchants(table: pd.DataFrame, prev, unit: str, prev_no_tx: bool = False) -> pd.DataFrame:
     """Add 'VS prev <unit> (%)' to a Payment per merchant table: the change of each merchant (same currency).
     prev None = nothing to compare (empty column); a merchant missing before (or a previous report without
     the table, prev {}) = "N/A"."""
@@ -831,13 +1084,20 @@ def add_vs_merchants(table: pd.DataFrame, prev, unit: str) -> pd.DataFrame:
     out = []
     for m, c, n in zip(t["Merchant name"], t["Currency"], t["Number of Transactions"]):
         before = prev.get((str(m), str(c)), 0)
-        out.append("N/A" if not before else f"{(n - before) / before * 100:.2f}%")
+        out.append(_from_zero(n) if prev_no_tx and not before
+                   else "N/A" if not before else f"{(n - before) / before * 100:.2f}%")
     t[col] = out
     return t
 
 
-def add_vs_column(tables: dict, prev_counts, unit: str) -> dict:
-    """Add 'VS prev <unit> (%)' (change in the number of transactions); empty when there is nothing to compare."""
+def _from_zero(n) -> str:
+    """The change from a period with no transactions: 'No change' (still none) or '+100.00%' (some now)."""
+    return "No change" if not n else "+100.00%"
+
+
+def add_vs_column(tables: dict, prev_counts, unit: str, prev_no_tx: bool = False) -> dict:
+    """Add 'VS prev <unit> (%)' (change in the number of transactions); empty when there is nothing to compare.
+    prev_no_tx: the previous period was a No-Transaction Report (all 0): 'No change' or '+100.00%', never N/A."""
     col = f"VS prev {unit} (%)"
     out = {}
     for title, t in tables.items():
@@ -846,7 +1106,8 @@ def add_vs_column(tables: dict, prev_counts, unit: str) -> dict:
             t[col] = None
         else:
             prev = prev_counts[title]
-            t[col] = [("N/A" if not prev["Total" if pd.isna(c) else c]
+            t[col] = [(_from_zero(n) if prev_no_tx and not prev["Total" if pd.isna(c) else c]
+                       else "N/A" if not prev["Total" if pd.isna(c) else c]
                        else f"{(n - prev['Total' if pd.isna(c) else c]) / prev['Total' if pd.isna(c) else c] * 100:.2f}%")
                       for c, n in zip(t["Currency"], t["Number of Transactions"])]
         out[title] = t
@@ -864,6 +1125,8 @@ class RunResult:
     messages: list = field(default_factory=list)      # (level, text): "info", "warning" or "success"
     bank_rows: int = 0                                # statement rows in the period
     not_found: int = 0                                # rows not found in IremboPay
+    to_review: int = 0                                # rows in Exception Resolution: not found + found but to check
+    currency_to_choose: int = 0                       # reviewed rows whose currency is still to choose (BPR)
     review: pd.DataFrame | None = None                # the rows to review (step 4 of the app)
     not_reviewed: int = 0
     stopped_for_review: bool = False                  # True: no report yet, some rows are not reviewed
@@ -895,10 +1158,12 @@ class RunResult:
 
 def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare: bool = False,
         require_review: bool = True, bank=None, report_dir: Path | None = None,
-        previous_report: Path | None = None) -> RunResult:
+        previous_report: Path | None = None, checkout: dict | None = None) -> RunResult:
     """Reconcile the uploaded files for one bank and period, and write the report.
     report_dir: where the Excel is written (default output/; the app gives a temporary folder).
     previous_report: the report compared with (default: looked for in output/).
+    checkout: {invoice: IremboPay checkout answer} of every invoice, looked up before the run (banks with
+    CHECKOUT_ALL: Ecobank, BPR); kept in the report's Payment details ("IremboPay check").
     Steps: A payments  B statement  C match  D review  E SLA  F summary tables  G totals check  H comparison
     I report + run log."""
     bank = get_bank(bank)
@@ -923,6 +1188,10 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
 
     # ---- A. payments: one per invoice (the successful transaction, else the latest one) ----
     payments = pd.concat(pays, ignore_index=True)
+    if option(bank, "ALL_PROVIDER_REFERENCES", False):     # every IremboPay transaction of an invoice (BPR: which
+        refs = (payments.assign(_r=payments["provider_reference"].fillna("").astype(str).str.strip())   # credits it
+                .groupby("invoice_number")["_r"].agg(lambda r: "|".join(sorted(set(r) - {""}))))       # recorded)
+        payments["_provider_refs"] = payments["invoice_number"].map(refs).fillna("")
     payments["_successful"] = payments["transaction_status"].astype(str).str.upper().eq("SUCCESSFUL")
     payments = (payments.sort_values(["invoice_number", "_successful", "created_at"], ascending=[True, False, False])
                 .drop_duplicates("invoice_number", keep="first").drop(columns="_successful").reset_index(drop=True))
@@ -933,6 +1202,8 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
     statement = statement.drop_duplicates(
         subset=option(bank, "DUPLICATE_KEY", None) or ["Currency"] + present(ref, posted, paid_on, desc, amount)
     ).reset_index(drop=True)
+    if hasattr(bank, "find_invoices"):                    # some banks: rows without invoice found another way (BPR)
+        statement = bank.find_invoices(statement, payments)
     attempts = statement                                  # every statement row (some banks keep one per invoice)
     if hasattr(bank, "one_row_per_invoice"):
         statement = bank.one_row_per_invoice(statement, payments).reset_index(drop=True)
@@ -943,6 +1214,12 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
     merged = statement.merge(payments, on="invoice_number", how="left", indicator=True)
     merged["found_in_irembopay"] = merged["_merge"].eq("both")
     merged = merged.drop(columns="_merge")
+    if option(bank, "CURRENCY_FROM_IREMBOPAY", False):     # no currency on the statement: the IremboPay one
+        merged["Currency"] = merged["currency"].astype(object).where(merged["found_in_irembopay"]
+                                                                     & merged["currency"].notna(), "")
+        if hasattr(bank, "currency_not_found"):            # a credit IremboPay's file does not have: the bank's rule
+            lost = ~merged["found_in_irembopay"]                                  # (the reviewer can change it)
+            merged.loc[lost, "Currency"] = bank.currency_not_found(merged[lost])
     if hasattr(bank, "in_period"):                        # the bank's own rule
         in_period = bank.in_period(merged, attempts, start, end)
     else:                                                 # default: payment date inside the period
@@ -956,19 +1233,42 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
     if no_invoice:
         res.add("warning", f"{no_invoice} bank row(s) have no invoice number in the description.")
     res.bank_rows = int(current.sum())
+    flagged = pd.Series(False, index=merged.index)
+    reasons = pd.Series("", index=merged.index, dtype=object)
+    if hasattr(bank, "review_reasons"):                   # found, but to be checked (e.g. BPR: another provider)
+        reasons[current] = bank.review_reasons(merged[current])
+        flagged = current & merged["found_in_irembopay"] & reasons.ne("")
+    merged["_to_review"] = (current & ~merged["found_in_irembopay"]) | flagged
+    # the extra credits of an invoice credited more than once (BPR): never the one counted in the summary tables
+    merged["_credited_again"] = reasons.astype(str).str.startswith("Invoice credited again")
+    no_invoice_pending = current & merged["invoice_number"].isna() & option(bank, "NO_INVOICE_PENDING", False)
+    for col in option(bank, "ALWAYS_REVIEW_COLUMNS", []):   # e.g. a credit cancelled by a debit: still reviewed
+        if col in merged:
+            no_invoice_pending &= merged[col].fillna("").astype(str).eq("")
+    merged.loc[no_invoice_pending, "_to_review"] = False   # BPR: no invoice number -> Pending, never reviewed
     per_cur = merged[current].groupby("Currency").agg(rows=("found_in_irembopay", "size"),
                                                       matched=("found_in_irembopay", "sum"), amount=(amount, "sum"))
     order = [cur for cur in bank.CURRENCIES if cur in per_cur.index] + [cur for cur in per_cur.index
                                                                          if cur not in bank.CURRENCIES]
-    res.by_currency = {cur: {"rows": int(per_cur.at[cur, "rows"]), "matched": int(per_cur.at[cur, "matched"]),
+    res.by_currency = {(cur or "Not in IremboPay"): {"rows": int(per_cur.at[cur, "rows"]), "matched": int(per_cur.at[cur, "matched"]),
                              "not_found": int(per_cur.at[cur, "rows"] - per_cur.at[cur, "matched"]),
                              "amount": float(per_cur.at[cur, "amount"])} for cur in order}
-    not_found = merged[current & ~merged["found_in_irembopay"]].copy()
+    not_found = merged[merged["_to_review"]].copy()
     not_found["Bank channel"] = bank.channel(not_found)
-    not_found["Reason"] = ["No invoice number in description" if pd.isna(inv) else "Invoice not in IremboPay payment file"
-                           for inv in not_found["invoice_number"]]
+    if hasattr(bank, "not_found_reason"):
+        not_found["Reason"] = bank.not_found_reason(not_found)
+    else:
+        not_found["Reason"] = ["No invoice number in description" if pd.isna(inv)
+                               else "Invoice not in IremboPay payment file" for inv in not_found["invoice_number"]]
+    found_rows = not_found["found_in_irembopay"].astype(bool)
+    not_found.loc[found_rows, "Reason"] = reasons[found_rows[found_rows].index]
+    again = ~found_rows & reasons.reindex(not_found.index).fillna("").astype(str).str.startswith("Invoice credited again")
+    if again.any():
+        not_found.loc[again, "Reason"] = [f"{a} ({b})" for a, b in zip(reasons.reindex(not_found.index)[again],
+                                                                       not_found.loc[again, "Reason"])]
     not_found = not_found[bank_cols(bank)].sort_values(paid_on)
-    res.not_found = len(not_found)
+    res.not_found = int((current & ~merged["found_in_irembopay"]).sum())
+    res.to_review = len(not_found)
     res.timings["match"] = time.perf_counter() - t
 
     # ---- D. review: apply the saved decisions; stop here when some rows are not reviewed yet ----
@@ -978,9 +1278,15 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
         res.add("info", f"{suggested} invoice(s) were already decided in an earlier review: the decision is filled in "
                         "as a suggestion. Check it and set Reviewed = Yes.")
     merged, not_found, counts, msgs = apply_review(merged, not_found, payments, review, bank)
+    if no_invoice_pending.any():                          # BPR: the credits with no invoice number are pending
+        auto = merged["period"].eq("current") & merged["invoice_number"].isna() & ~merged["_to_review"]
+        merged.loc[auto, "payment_status"] = "NEW"
+        merged.loc[auto, "review_status"] = "Pending notification (no invoice number)"
+        res.add("info", f"{int(auto.sum())} credit(s) with no invoice number are in Pending notification.")
     res.messages += msgs
     res.review = review.drop(columns="_key").reset_index(drop=True)
     res.not_reviewed = counts["Not reviewed"]
+    res.currency_to_choose = counts.pop("Currency to choose", 0)          # BPR: reviewed rows without a currency
     res.review_counts = {k: v for k, v in counts.items() if v and k != "Not reviewed"}
     res.timings["review"] = time.perf_counter() - t
     if require_review and res.not_reviewed:
@@ -998,8 +1304,19 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
     rep = (merged[merged["period"] == "current"].sort_values(present(paid_on, posted, ref))
            .reset_index(drop=True))
     has_invoice = rep["invoice_number"].notna()
+    if checkout is not None:                               # what IremboPay's checkout said, before the run
+        rep["IremboPay check"] = rep["invoice_number"].map(lambda i: checkout.get(str(i), "") if pd.notna(i) else "")
     rep["times_on_statement"] = rep.groupby("invoice_number")["invoice_number"].transform("size")
-    rep["is_extra_credit"] = has_invoice & rep.duplicated("invoice_number", keep="first")
+    # the invoice is the unique identifier: an invoice credited more than once counts once (the credit IremboPay
+    # recorded when the bank says which one, otherwise the first); the others are extra credits
+    order = rep.sort_values(["_credited_again"], kind="stable") if "_credited_again" in rep else rep
+    extra = order.index[has_invoice[order.index] & order.duplicated("invoice_number", keep="first")]
+    rep["is_extra_credit"] = rep.index.isin(extra)
+    if "review_table" in rep:          # 26/10/2026: an extra credit in no table stays in the statement, with a comment
+        loose = rep["is_extra_credit"] & ~rep["review_table"].fillna("").isin(list(EXTRA_DECIDED) + ["Exclude"])
+        status = rep["review_status"].fillna("").astype(str)
+        rep.loc[loose, "review_status"] = status[loose].map(lambda v: f"{v} - {NOT_COUNTED.lower()}" if v
+                                                            else NOT_COUNTED)
     rep["paid_other_channel"] = bank.duplicate(rep)
     rep["notification_received"] = bank.received(rep)
     rep["is_pending"] = bank.pending(rep)
@@ -1009,7 +1326,7 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
     amount_diff = rep["amount"].notna() & (rep["amount"] - rep[amount]).abs().gt(0.005)
     currency_diff = rep["currency"].notna() & rep["currency"].ne(rep["Currency"])
     parts = [
-        ("Other channel (" + provider_ + ")").where(found_ & rep["payment_provider"].ne(bank.PROVIDER), ""),
+        ("Other channel (" + provider_ + ")").where(found_ & ~rep["payment_provider"].isin(bank_providers(bank)), ""),
         ("Not settled (" + status_ + ")").where(found_ & ~rep["payment_status"].isin(bank.COMPLETED_STATUSES), ""),
         ("Amount difference (bank " + rep[amount].map("{:,.2f}".format) + " vs IremboPay "
          + rep["amount"].fillna(0).map("{:,.2f}".format) + ")").where(found_ & amount_diff, ""),
@@ -1023,13 +1340,21 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
     rep["Reason"] = combined.where(found_, "Not found in IremboPay")
 
     def table_rows(a, b):
-        """Rows of each of the 5 tables for [a, b): the bank's own rule, or by payment date (default)."""
+        """Rows of each of the 5 tables for [a, b): the bank's own rule, or by payment date (default).
+        Rule (26/10/2026): Processed = every credit on the statement whose bank date is in [a, b), each invoice once
+        (a second credit goes to Exception Resolution). Notification received = processed, paid (paid_at) through
+        this bank; Duplicate Payment = paid through another provider; Pending = in IremboPay, not paid. What the
+        rules do not cover is decided in Exception Resolution. SLA violated = the late ones of Processed."""
+        window = (rep[paid_on] >= a) & (rep[paid_on] < b)        # the bank date (Value Date, VALUE_DATE, Request Date)
         if hasattr(bank, "tables"):
-            return bank.tables(rep, attempts, a, b)
-        window = (rep[paid_on] >= a) & (rep[paid_on] < b)
-        return {"processed": window, "received": window & rep["notification_received"],
-                "sla": window & rep["sla_status"].eq("SLA violated"), "pending": window & rep["is_pending"],
-                "duplicate": window & rep["paid_other_channel"]}
+            return with_extra_decisions(rep, bank.tables(rep, attempts, a, b), window)
+        processed = window & ~rep["is_extra_credit"]              # every credit on the statement, each invoice once
+        received = processed & rep["notification_received"]
+        duplicate = processed & rep["paid_other_channel"] & ~received
+        pending = processed & rep["is_pending"] & ~received & ~duplicate
+        return with_extra_decisions(rep, {"processed": processed, "received": received,
+                                          "sla": processed & rep["sla_status"].eq("SLA violated"), "pending": pending,
+                                          "duplicate": duplicate}, window)
 
     def build_summary5(a, b):
         """The 5 summary tables for [a, b): one row per currency + a total row (count only, no amount).
@@ -1096,7 +1421,9 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
                               if d.dayofweek == 0]
             weeks = list(zip(cuts, cuts[1:] + [end]))
         for i, (a, b) in enumerate(weeks, 1):
-            res.blocks.append(("Summary-Weekly", f"Week {i}: {a:%d/%m/%Y} - {b - one_day:%d/%m/%Y}",
+            # a weekly report: its week name (Week 1 · October 2026); a monthly report: its blocks in order
+            name = week_name(period) if period.report_type == "week" else f"Week {i}"
+            res.blocks.append(("Summary-Weekly", f"{name}: {a:%d/%m/%Y} - {b - one_day:%d/%m/%Y}",
                                build_summary5(a, b)))
             res.merchants[res.blocks[-1][1]] = build_merchants(a, b)
         if period.report_type == "month":
@@ -1132,8 +1459,13 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
             prev_path = Path(previous_report)
         if prev_path is None:
             raise ReconError(f"No {bank.NAME} report found for {prev.name}. Upload it or make it first.")
-        prev_counts, _, prev_unreviewed = read_report_counts(prev_path, SUMMARY_SHEET[period.report_type], bank)
-        res.compared_with = f"{prev.name} (report of {pd.Timestamp(prev_path.stat().st_mtime, unit='s'):%d/%m/%Y})"
+        prev_no_tx = is_no_transaction_report(prev_path, prev)   # the bank had no transactions then: all 0
+        if prev_no_tx:
+            prev_counts, prev_unreviewed = read_previous_counts(prev_path, prev, bank), 0
+        else:
+            prev_counts, _, prev_unreviewed = read_report_counts(prev_path, SUMMARY_SHEET[period.report_type], bank)
+        res.compared_with = (f"{prev.name} (" + ("No-Transaction Report" if prev_no_tx else "report")
+                             + f" of {pd.Timestamp(prev_path.stat().st_mtime, unit='s'):%d/%m/%Y})")
         res.previous_counts = prev_counts
         if prev_unreviewed:
             res.add("warning", f"{prev.name} was not reviewed: its {prev_unreviewed} missing invoice(s) are counted as "
@@ -1150,8 +1482,9 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
                 prev_m = merchant_counts(res.merchants.get(week_blocks[i - 1][1])) if i > 0 else None
                 res.merchants[heading] = add_vs_merchants(res.merchants[heading], prev_m, "Week")
             else:
-                new_blocks.append((sheet_name, heading, add_vs_column(tables, prev_counts, period.unit)))
-                res.merchants[heading] = add_vs_merchants(res.merchants[heading], prev_merchants, period.unit)
+                new_blocks.append((sheet_name, heading, add_vs_column(tables, prev_counts, period.unit, prev_no_tx)))
+                res.merchants[heading] = add_vs_merchants(res.merchants[heading], prev_merchants, period.unit,
+                                                          prev_no_tx)
         res.blocks = new_blocks
     res.timings["summary"] = time.perf_counter() - t
 
@@ -1163,9 +1496,11 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
         "payment_provider", "payment_channel", "transaction_status", "name", "created_at",
         "paid_at", "settled_at", "provider_reference", "transaction_reference",
         sla_col, "sla_status", "review_status", "review_comment",
-        "notification_received", "times_on_statement", "is_extra_credit", "Reason", "Source file"]
-    detail = rep[[col for col in detail_cols if col in rep.columns]]
+        "notification_received", "times_on_statement", "is_extra_credit", "Reason", "Report note", "IremboPay check",
+        "Source file"]
     whole = table_rows(start, end)
+    rep["Report note"] = table_notes(rep, whole, bank)          # an invoice credited more than once: why, where
+    detail = rep[[col for col in detail_cols if col in rep.columns]]
     sheets = {"Pending notification": detail[whole["pending"]].sort_values(paid_on),
               "Duplicate payment other channel": detail[whole["duplicate"]].sort_values(["payment_provider", paid_on]),
               bank.STATEMENT_SHEET: rep[statement_cols + ["invoice_number", "Source file"]]}
@@ -1187,6 +1522,36 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
 # =====================================================================================================================
 # 10. RUN LOG (output/run_log.csv: one line per run, shown in "Recent runs" in the side panel)
 # =====================================================================================================================
+def report_figures(blocks: list) -> dict:
+    """The figures of a report, read from its main summary block (the month, or the day / week): the same numbers as
+    the Excel, the PDF, Slack and the dashboard (20/10/2026: processed = the invoices on both sides, each once).
+    -> {"processed", "received", "rate", "currencies": [(currency, processed, received)]}."""
+    main = next((b for b in blocks if b[0] in ("Summary-Monthly", "Summary-Daily")), blocks[-1] if blocks else None)
+    if main is None:
+        return {"processed": 0, "received": 0, "rate": None, "currencies": []}
+    proc, rec = main[2]["Overall processed payments"], main[2]["Overall notifications received by Irembo"]
+    total = lambda t: int(t.loc[t["Currency"].isna(), "Number of Transactions"].iloc[0])
+    by_cur = lambda t: {c: int(n) for c, n in zip(t["Currency"], t["Number of Transactions"]) if pd.notna(c)}
+    p, r = total(proc), total(rec)
+    pc, rc = by_cur(proc), by_cur(rec)
+    return {"processed": p, "received": r, "rate": r / p if p else None,
+            "currencies": [(c, pc[c], rc.get(c, 0)) for c in pc if pc[c] or rc.get(c, 0)]}
+
+
+def statement_invoices(files: list, bank=None) -> list:
+    """Every invoice number of the uploaded statements (found the way the run finds them: BPR also by its references
+    in the IremboPay file), for the checkout check made before the run (CHECKOUT_ALL)."""
+    bank = get_bank(bank)
+    statements = [f.data for f in files if f.kind == "bank"]
+    pays = [f.data for f in files if f.kind == "payments"]
+    if not statements:
+        return []
+    rows = bank.clean_statement(pd.concat(statements, ignore_index=True))
+    if hasattr(bank, "find_invoices") and pays:
+        rows = bank.find_invoices(rows, pd.concat(pays, ignore_index=True))
+    return sorted({str(i) for i in rows["invoice_number"].dropna() if str(i).strip()})
+
+
 def _log_run(output_dir: Path, res: RunResult, sla_days: int):
     """Add one line for this run: when, bank, period, results, and the seconds spent per step."""
     main = next((b for b in res.blocks if b[0] in ("Summary-Monthly", "Summary-Daily")),
@@ -1255,6 +1620,10 @@ MERCHANT_SLOT = (6, 2)                       # Payment per merchant: right of "D
 GS_STEP = 8                                  # rows between two slots
 GS_BLOCK = 2 + 3 * GS_STEP                   # rows taken by one block (heading + 3 slots)
 GS_WIDTHS = {"A": 40, "B": 26, "C": 17, "D": 12, "E": 18, "F": 40, "G": 26, "H": 17, "I": 14, "J": 18, "K": 18}
+# with a comparison the left tables have one more column (VS prev): the right ones move one column further (G), so an
+# empty column (F) still separates them; without a comparison the layout is unchanged (right tables in F)
+GS_WIDTHS_COMPARED = {"A": 40, "B": 26, "C": 17, "D": 12, "E": 18, "F": 3, "G": 40, "H": 26, "I": 17, "J": 14,
+                      "K": 18, "L": 18}
 RECONCILED_CELL = (1, 6)                     # F1 of each summary sheet: "Reconciled on: Thursday 08/10/2026"
 RECONCILED_LABEL = "Reconciled on: "
 
@@ -1310,22 +1679,25 @@ def _write_table(ws, top, left, title, table):
 def _write_summary(ws, blocks, reconciled_on=None, merchants=None):
     """A summary sheet: the day it was reconciled (F1), then the blocks one under the other (heading, the 5 tables,
     and Payment per merchant in the 6th place). A block is GS_BLOCK rows, more when its merchant table is long."""
-    for col, w in GS_WIDTHS.items():
+    compared = any(str(c).startswith("VS prev") for _, tables in blocks for t in tables.values() for c in t.columns)
+    shift = 1 if compared else 0                  # the right tables: column F, or G when there is a comparison
+    for col, w in (GS_WIDTHS_COMPARED if compared else GS_WIDTHS).items():
         ws.column_dimensions[col].width = w
     if reconciled_on is not None:
-        ws.cell(*RECONCILED_CELL, f"{RECONCILED_LABEL}{reconciled_on:%A %d/%m/%Y}").font = Font(size=12, italic=True)
+        ws.cell(RECONCILED_CELL[0], RECONCILED_CELL[1] + shift,
+                f"{RECONCILED_LABEL}{reconciled_on:%A %d/%m/%Y}").font = Font(size=12, italic=True)
     base = 1
     for heading, tables in blocks:
         ws.cell(base, 1, heading).font = Font(size=14, bold=True)
         for title, table in tables.items():
             col, slot = GS_SLOTS[title]
-            _write_table(ws, base + 2 + slot * GS_STEP, col, title, table)
+            _write_table(ws, base + 2 + slot * GS_STEP, col + (shift if col > 1 else 0), title, table)
         height = GS_BLOCK
         table = (merchants or {}).get(heading)
         if table is not None:
             col, slot = MERCHANT_SLOT
             top = base + 2 + slot * GS_STEP
-            _write_table(ws, top, col, MERCHANT_TITLE, table)
+            _write_table(ws, top, col + shift, MERCHANT_TITLE, table)
             height = max(GS_BLOCK, top - base + 2 + len(table) + 3)       # a long table pushes the next block down
         base += height
 
@@ -1376,6 +1748,17 @@ STATUS_FILL, STATUS_INK = PatternFill("solid", start_color="FFF3D6"), "7A4E00"  
 def previous_column(period: Period) -> str:
     """The name of the column with the previous period's counts: 'Previous week' / 'Previous month' / 'Previous day'."""
     return f"Previous {period.unit.lower()}"
+
+
+def is_no_transaction_report(path: Path, period: Period) -> bool:
+    """True when the report is a No-Transaction Report (its summary sheet has a 'Reconciliation status' row)."""
+    wb = load_workbook(path, data_only=True)
+    try:
+        sheet = SUMMARY_SHEET[period.report_type]
+        ws = wb[sheet] if sheet in wb.sheetnames else None
+        return ws is not None and any(ws.cell(r, 1).value == "Reconciliation status" for r in range(1, ws.max_row + 1))
+    finally:
+        wb.close()
 
 
 def read_previous_counts(path: Path, period: Period, bank=None) -> dict:
@@ -1520,7 +1903,8 @@ def period_title(kind: str, label: str) -> str:
         if kind == "month":
             return f"Month · {a:%B %Y}"
         if kind == "week":
-            return f"Week · {a:%d/%m} – {last:%d/%m/%Y}"
+            month, n = week_number(a)
+            return f"Week {n} · {month:%B %Y} ({a:%d/%m} – {last:%d/%m/%Y})"
         return f"Day · {a:%d/%m/%Y}"
     except Exception:
         return f"{kind} · {label}"
@@ -1605,6 +1989,14 @@ def _read_merchant_table(ws, top: int, col: int) -> pd.DataFrame:
     return t
 
 
+def _right_col(ws, row: int, col: int, title: str):
+    """The column of a table titled `title` on `row`: `col`, or the next one (right tables of a compared report)."""
+    for c in ((col, col + 1) if col > 1 else (col,)):
+        if ws.cell(row, c).value == title:
+            return c
+    return None
+
+
 def read_merchant_counts(path: Path, sheet: str) -> dict:
     """{(merchant, currency): transactions} of the first Payment per merchant table of a summary sheet; {} when
     the report has none (made before 12/10/2026): the comparison then says N/A."""
@@ -1614,31 +2006,54 @@ def read_merchant_counts(path: Path, sheet: str) -> dict:
             return {}
         ws = wb[sheet]
         for r in range(1, ws.max_row + 1):
-            col, _ = MERCHANT_SLOT
-            if ws.cell(r, col).value == MERCHANT_TITLE:
+            col = _right_col(ws, r, MERCHANT_SLOT[0], MERCHANT_TITLE)
+            if col is not None:
                 return merchant_counts(_read_merchant_table(ws, r, col))
         return {}
     finally:
         wb.close()
 
 
-def read_report(path: Path) -> dict:
+class _Cell:
+    __slots__ = ("value",)
+
+    def __init__(self, value):
+        self.value = value
+
+
+class _Grid:
+    """A summary sheet read once in read-only mode, kept in memory: ws.cell(row, col).value and ws.max_row as with
+    openpyxl, without loading the whole workbook (the Payment details sheet is large). Same values, much faster."""
+
+    def __init__(self, ws):
+        self.rows = [list(r) for r in ws.iter_rows(values_only=True)]
+        self.max_row = len(self.rows)
+
+    def cell(self, row: int, column: int) -> _Cell:
+        if 1 <= row <= len(self.rows) and 1 <= column <= len(self.rows[row - 1]):
+            return _Cell(self.rows[row - 1][column - 1])
+        return _Cell(None)
+
+
+def read_report(path: Path, count_reviewed: bool = True) -> dict:
     """Read a saved report back: {"report_type", "bank", "title", "blocks": [(sheet, heading, tables)], "not_found",
     "reconciled_on" ('Thursday 08/10/2026', or "" for reports made before it was recorded),
     "merchants": {heading: Payment per merchant table} (empty for reports made before 12/10/2026)}.
-    Works for reports made by this app (same layout as _write_summary)."""
+    Works for reports made by this app (same layout as _write_summary). count_reviewed=False skips the count of
+    reviewed rows ("not_found" = 0) and so the large Payment details sheet: the dashboard does not use it."""
     path = Path(path)
     kind = path.parent.name if path.parent.name in SUMMARY_SHEET else "month"
     code = report_bank(path)
     currencies = BANKS[code].CURRENCIES if code in BANKS else []
-    wb = load_workbook(path, data_only=True)
+    wb = load_workbook(path, data_only=True, read_only=True)     # read only: the summary sheets are copied to memory
     try:
         blocks, reconciled_on, merchants = [], "", {}
         for sheet in ("Summary-Daily", "Summary-Weekly", "Summary-Monthly"):
             if sheet not in wb.sheetnames:
                 continue
-            ws = wb[sheet]
-            stamp = str(ws.cell(*RECONCILED_CELL).value or "")
+            ws = _Grid(wb[sheet])
+            stamp = str(ws.cell(*RECONCILED_CELL).value or "") or str(ws.cell(RECONCILED_CELL[0],
+                                                                                  RECONCILED_CELL[1] + 1).value or "")
             if stamp.startswith(RECONCILED_LABEL):
                 reconciled_on = stamp[len(RECONCILED_LABEL):]
             # a block = a heading in column A with "Overall processed payments" two rows below (found by looking:
@@ -1650,7 +2065,8 @@ def read_report(path: Path) -> dict:
                 tables = {}
                 for title, (col, slot) in GS_SLOTS.items():
                     top = base + 2 + slot * GS_STEP
-                    if ws.cell(top, col).value != title:
+                    col = _right_col(ws, top, col, title)
+                    if col is None:
                         continue
                     headers = []
                     c = col
@@ -1673,15 +2089,16 @@ def read_report(path: Path) -> dict:
                 if len(tables) == len(GS_SLOTS):
                     blocks.append((sheet, heading, tables))
                     col, slot = MERCHANT_SLOT
-                    if ws.cell(base + 2 + slot * GS_STEP, col).value == MERCHANT_TITLE:
+                    col = _right_col(ws, base + 2 + slot * GS_STEP, col, MERCHANT_TITLE)
+                    if col is not None:
                         merchants[heading] = _read_merchant_table(ws, base + 2 + slot * GS_STEP, col)
         not_found = 0                                             # rows that went through the review
-        if "Payment details" in wb.sheetnames:
+        if count_reviewed and "Payment details" in wb.sheetnames:
             ws = wb["Payment details"]
-            headers = [c.value for c in ws[1]]
+            headers = list(next(ws.iter_rows(min_row=1, max_row=1, values_only=True), ()))
             if "review_status" in headers:
                 col = headers.index("review_status")
-                not_found = sum(1 for row in ws.iter_rows(min_row=2, values_only=True) if row[col])
+                not_found = sum(1 for row in ws.iter_rows(min_row=2, values_only=True) if len(row) > col and row[col])
     finally:
         wb.close()
     if not blocks:
@@ -1814,7 +2231,7 @@ def report_pdf(path: Path) -> bytes:
     def distribution_chart(tables, width, height):
         """Small compact distribution chart for received, pending, duplicate and not-found totals."""
         counts = counts_of(tables)
-        labels = ["Received", "Pending", "Duplicate", "Not found"]
+        labels = ["Received notification", "Pending", "Duplicate", "Not found"]
         values = [
             counts.get("Overall notifications received by Irembo", {}).get("Total", 0),
             counts.get("Pending notifications", {}).get("Total", 0),
@@ -1856,11 +2273,11 @@ def report_pdf(path: Path) -> bytes:
             return int(row["Number of Transactions"].iloc[0]), (row["%"].iloc[0] if "%" in t else None)
 
         processed, _ = total("Overall processed payments")
-        _, rec_pct = total("Overall notifications received by Irembo")
+        rec_n, rec_pct = total("Overall notifications received by Irembo")
         sla, _ = total("SLA Violated")
         values = [
-            ("Processed", f"{processed:,}"),
-            ("Received", f"{rec_pct:.2%}"),
+            ("Processed transaction", f"{processed:,}"),
+            ("Received notification", f"{rec_n:,} ({rec_pct:.2%})"),
             ("SLA violated", f"{sla:,}"),
             ("Pending (NEW)", f"{total('Pending notifications')[0]:,}"),
             ("Duplicate", f"{total('Duplicate Payment')[0]:,}"),
@@ -2010,13 +2427,14 @@ def custom_content(res: RunResult, opts: dict, bank=None) -> dict:
 
     # ---- the overview: key figures and one line per currency
     if "overview" in chosen:
+        fig = report_figures(res.blocks)                  # the report's own figures (summary tables)
         if inc.get("kpis"):
-            rate = res.matched / res.bank_rows if res.bank_rows else 0
-            out["kpis"] = [("Processed", f"{res.bank_rows:,}"), ("Matched", f"{res.matched:,}"),
-                           ("Match rate", f"{rate:.2%}")]
+            out["kpis"] = [("Processed transaction", f"{fig['processed']:,}"),
+                           ("Received notification", f"{fig['received']:,}"),
+                           ("Received notification rate", f"{fig['rate']:.2%}" if fig["rate"] is not None else "N/A")]
         if inc.get("currency"):
-            out["currency_lines"] = [f"{cur} · {d['rows']:,} rows · {d['matched']:,} matched"
-                                     for cur, d in res.by_currency.items()]
+            out["currency_lines"] = [f"{cur} · Processed transaction {p:,} · Received notification {r:,}"
+                                     for cur, p, r in fig["currencies"]]
 
     # ---- the other sections: a summary table or a chart, and the list of invoices when there is one
     details = res.sheets.get("Payment details", pd.DataFrame())

@@ -120,7 +120,7 @@ def test_step6_message_reads_the_report_and_links_it():
     assert [c["text"] for c in table_rows[1]] == ["Payments processed", "5,419", "100%", "5,419,000"]
     assert [c["text"] for c in table_rows[3]] == ["Late (SLA violated)", "19", "0.35%", "19,000"]
     assert "Exception value (pending + other channel): RWF 10,000" in text
-    assert "*1.* RSSB — 1,000 · 50.0%" in text and "All" not in text.split("Top merchants")[1]
+    assert "*1.* RSSB — 1,000 · 50.0% · RWF 0" in text and "All" not in text.split("Top merchants")[1]
     assert ("Explore the full report:* <https://drive.google.com/file/d/X/view|📊 Excel report> · "
             "<https://drive.google.com/file/d/P/view|📄 PDF report>") in text
     assert p["text"].startswith("I&M Bank · August 2026 · 5,419 payments")
@@ -151,3 +151,8 @@ def test_step6_message_is_sent_as_blocks(monkeypatch):
     monkeypatch.setattr(slack.urllib.request, "urlopen", fake)
     slack.send_payload(blocks_msg(), "https://hooks.slack.com/services/T/B/x")
     assert sent["blocks"][0]["type"] == "header" and "5,419" not in sent["text"]
+
+
+def test_merchant_amounts_are_in_full_below_a_million():
+    assert M.money(25000) == "25,000" and M.money(140000) == "140,000" and M.money(999999) == "999,999"
+    assert M.money(39577000) == "39.6M" and M.money(1_000_000) == "1.0M"

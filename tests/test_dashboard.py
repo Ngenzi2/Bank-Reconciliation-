@@ -172,7 +172,7 @@ def test_each_level_shows_the_level_below_and_partial_periods_count_months():
     q = d.breakdown(facts, "quarter", pd.Timestamp("2026-07-01"), None, "All")
     assert list(q["Period"]) == ["August 2026"]
     w = d.breakdown(facts, "month", pd.Timestamp("2026-08-01"), None, "All")
-    assert list(w["Period"]) == ["Week of 27/07/2026 (part in this period)", "Week of 03/08/2026"]
+    assert list(w["Period"]) == ["Week 1 (part in this period)", "Week 2"]          # the month's own weeks
     assert d.CHILD["week"] == "day" and d.CHILD["day"] is None
     assert d.partial(facts, "quarter", pd.Timestamp("2026-07-01")) == [("IM", pd.Timestamp("2026-07-01"), 1, 3, "months")]
     assert d.totals(d.select(facts, "day", pd.Timestamp("2026-08-03")))["processed"] == 2

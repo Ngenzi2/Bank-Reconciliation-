@@ -43,6 +43,7 @@ import io
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -58,7 +59,8 @@ APP_DIR = Path(__file__).resolve().parent
 # the app's own code besides app.py; reloaded in this order (each one only uses the ones before it).
 # integrations/ and config.py are not reloaded: a connected Drive client and its error class must stay the same.
 RELOADED = ["services.app_settings", "pdf_report", "integrations.irembopay_checkout", "integrations.slack", "services.session_files",
-            "services.report_history", "services.dashboard", "services.dashboard_view", "services.pay_files", "services.slack_message"]
+            "services.report_history", "services.dashboard", "services.dashboard_view", "services.pay_files", "services.slack_message",
+            "services.facts_cache", "services.followup"]
 
 
 def _code_mtime():
@@ -90,7 +92,8 @@ import config                                  # Google Drive settings (no secre
 from integrations import google_drive
 from integrations.google_drive import DriveClient, DriveError
 from integrations import irembopay_checkout, slack
-from services import app_settings, dashboard, dashboard_view, pay_files, report_history, slack_message
+from services import (app_settings, dashboard, dashboard_view, drive_statements, facts_cache, followup, pay_files,
+                      report_history, slack_message)
 from services.session_files import SessionFolder
 
 
@@ -99,6 +102,8 @@ from services.session_files import SessionFolder
 # =====================================================================================================================
 # the "Bank Reconciliation" folder (output/ is created inside it); IM_RECON_BASE is only used for testing
 BASE_DIR = Path(os.environ.get("IM_RECON_BASE", Path(__file__).resolve().parent.parent))
+DASH_CACHE = BASE_DIR / "output" / ".dashboard_facts.pkl"     # the dashboard's figures, kept on this computer
+FOLLOWUP_CACHE = BASE_DIR / "output" / ".followup_items.pkl"   # the follow-up items of each report, the same way
 BRAND = "#123239"          # IremboPay dark teal
 ACCENT = "#99E378"         # IremboPay green
 # the side menu background: the two curves of the Irembo mark, in a faint green on the dark teal (like the brand
@@ -187,6 +192,8 @@ st.markdown(f"""
   .ntx-paper .status td {{background: #FFF3D6; color: #7A4E00;}}
   .ntx-paper .status .title {{font-weight: 700; font-size: 1rem;}}
   div[data-testid="stMetricValue"] {{font-size: 1.5rem;}}
+  /* the app is smaller as at 85 % zoom (23/10/2026) through the base font size (.streamlit/config.toml,
+     baseFontSize = 14): no browser zoom - the charts' hover needs the page at its real scale */
   /* side panel: IremboPay colours (the Nunito font is set for the whole app in .streamlit/config.toml) */
   .side-head {{display: flex; align-items: center; gap: .55rem; margin: .1rem 0 .55rem 0;
                font-family: "Nunito", sans-serif; font-weight: 800; font-size: 1.08rem; color: var(--rc-ink);}}
@@ -203,8 +210,11 @@ st.markdown(f"""
   [data-testid="stSelectboxVirtualDropdown"] > div {{max-height: 80px !important; overflow-y: auto !important;}}
   section[data-testid="stSidebar"] [data-testid="stSelectbox"] input {{cursor: pointer; caret-color: transparent;}}
   /* a wider side panel with a larger page menu (Dashboard, Reconciliation, Reports, Bank Management, Settings) */
-  section[data-testid="stSidebar"] {{width: 380px !important; min-width: 380px !important;}}
-  section[data-testid="stSidebar"][aria-expanded="false"] {{min-width: 0 !important;}}
+  section[data-testid="stSidebar"] {{width: 330px !important; min-width: 330px !important;}}
+  /* closed: Streamlit slides the panel only by its own width (300px), so the wider panel is hidden entirely */
+  section[data-testid="stSidebar"][data-collapsed="true"],
+  section[data-testid="stSidebar"][aria-expanded="false"] {{width: 0 !important; min-width: 0 !important;
+      overflow: hidden !important;}}
   /* the side menu: dark teal with the Irembo curves in the background (green tint), "Payment Operations" on top,
      then Workspace / Configuration; the page open has a green bar and a green dot */
   section[data-testid="stSidebar"] > div {{background-color: #133A3B; background-image: {SIDE_BG};
@@ -268,6 +278,8 @@ st.markdown(f"""
   .up-file-name {{font-weight: 650; font-size: 1.12rem; margin: .2rem 0 .15rem 0; word-break: break-all;}}
   .up-file-path {{font-size: .88rem; opacity: .65;}}
   .up-help {{font-size: .86rem; opacity: .7; line-height: 1.55; margin-top: .35rem;}}
+  .chk-lines {{display: flex; flex-direction: column; gap: .3rem; margin: .1rem 0 .2rem;}}
+  .chk-line {{line-height: 1.45;}}
   /* Google Drive: "Select IremboPay file", one card per file (a radio list drawn as cards) */
   .pay-pick-title {{font-weight: 800; font-size: 1.08rem; margin: .35rem 0 .1rem 0;}}
   .pay-pick-sub {{font-size: .9rem; opacity: .7; margin-bottom: .2rem;}}
@@ -305,21 +317,25 @@ st.markdown(f"""
   .st-key-drive_pay_pick [role="radiogroup"] > div[data-selected="true"] [data-testid="stRadioCaption"]::after {{
       content: "Selected"; display: block; color: var(--rc-green); font-size: .85rem; font-weight: 650; margin-top: .3rem;}}
   /* the bank files added: cards in the upload area (scroll inside it) */
-  .st-key-up_bank_files {{background: #F7FAFA; border: 1.5px solid #CFE3E6; border-radius: 18px; padding: .9rem 1rem;}}
-  .st-key-up_bank_files [class*="st-key-upf_"] {{background: #fff; border-radius: 12px !important;
-      border-color: #E1EEF0 !important; padding: .55rem .7rem !important;}}
-  .st-key-up_bank_files [class*="st-key-upf_"] {{position: relative; gap: 0;}}
-  .st-key-up_bank_files [class*="st-key-upf_x_"] {{position: absolute; right: .5rem; top: 50%; transform: translateY(-50%);
-      width: auto !important;}}
+  .st-key-up_bank_files, .st-key-up_pay_files {{background: #F7FAFA; border: 1.5px solid #CFE3E6; border-radius: 18px;
+      padding: .9rem 1rem;}}
+  .st-key-up_bank_files [class*="st-key-upf_"], .st-key-up_pay_files [class*="st-key-upf_"] {{background: #fff;
+      border-radius: 12px !important; border-color: #E1EEF0 !important; padding: .55rem .7rem !important;}}
+  .st-key-up_bank_files [class*="st-key-upf_"], .st-key-up_pay_files [class*="st-key-upf_"] {{position: relative; gap: 0;}}
+  .st-key-up_bank_files [class*="st-key-upf_x_"], .st-key-up_pay_files [class*="st-key-upf_x_"] {{position: absolute;
+      right: .5rem; top: 50%; transform: translateY(-50%); width: auto !important;}}
   .upf {{padding-right: 1.6rem;}}
-  .st-key-up_bank_card [data-testid="stFileUploaderDropzone"] > span > button {{min-height: 2.9rem !important; height: 2.9rem;}}
+  .st-key-up_bank_card [data-testid="stFileUploaderDropzone"] > span > button,
+  .st-key-up_pay_card [data-testid="stFileUploaderDropzone"] > span > button {{min-height: 2.9rem !important; height: 2.9rem;}}
   /* the files area takes the free height of the card, so "Choose bank file" lines up with "Add selected file" */
-  .st-key-up_bank_card [data-testid="stLayoutWrapper"]:has(> .st-key-up_bank_files) {{flex: 1 1 auto; display: flex;
-      flex-direction: column;}}
-  .st-key-up_bank_files {{flex: 1 1 auto; height: auto !important; min-height: 300px; max-height: 520px;}}
-  .st-key-up_bank_card, .st-key-up_pay_card {{display: flex; flex-direction: column;}}
-  .st-key-up_pay_card:not(:has(> .st-key-drive_pay_add)) > :last-child,
-  .st-key-up_pay_card > .st-key-drive_pay_add {{margin-top: auto;}}     /* Add + Refresh at the bottom of the card */
+  /* 26/10/2026: no empty space - the files area is as tall as its files (it scrolls past 520px) */
+  .st-key-up_bank_files, .st-key-up_pay_files {{flex: none; height: auto !important; min-height: 0;
+      max-height: 520px;}}
+  .st-key-up_bank_card, .st-key-up_pay_card {{display: flex; flex-direction: column; height: auto !important;
+      align-self: flex-start;}}
+  [data-testid="stLayoutWrapper"]:has(> .st-key-up_bank_card),
+  [data-testid="stLayoutWrapper"]:has(> .st-key-up_pay_card) {{flex: none; height: auto;}}
+
   .upf {{display: flex; align-items: center; gap: .7rem; min-width: 0;}}
   .upf-ic {{width: 2.1rem; height: 2.4rem; border-radius: 7px; color: #fff; font-size: .68rem; font-weight: 800; flex: none;
       display: flex; align-items: flex-end; justify-content: center; padding-bottom: .3rem; box-sizing: border-box;}}
@@ -331,28 +347,34 @@ st.markdown(f"""
   .upf-c.usd {{background: #DCEFF2; color: #1F6E7A;}}
   .upf-n {{font-size: .8rem; color: var(--rc-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
       margin-top: .15rem;}}
-  .st-key-up_bank_files [class*="st-key-upf_x_"] button {{color: #9AA8AD; min-height: 0; padding: 0;}}
-  .st-key-up_bank_files [class*="st-key-upf_x_"] button:hover {{color: #C2413D;}}
+  .st-key-up_bank_files [class*="st-key-upf_x_"] button, .st-key-up_pay_files [class*="st-key-upf_x_"] button {{
+      color: #9AA8AD; min-height: 0; padding: 0;}}
+  .st-key-up_bank_files [class*="st-key-upf_x_"] button:hover,
+  .st-key-up_pay_files [class*="st-key-upf_x_"] button:hover {{color: #C2413D;}}
+  .upf-ic.pay {{background: #2E7D4F;}} .upf-c.pay {{background: #E3F2E9; color: #2E7D4F;}}
   .upf-foot {{text-align: center; font-size: .85rem; color: var(--rc-green); font-weight: 700; margin: -.3rem 0 .2rem 0;}}
   /* both cards as tall as the taller one */
-  [data-testid="stLayoutWrapper"]:has(> .st-key-up_bank_card),
-  [data-testid="stLayoutWrapper"]:has(> .st-key-up_pay_card) {{flex: 1 1 auto;}}
-  .st-key-up_bank_card, .st-key-up_pay_card {{height: 100%;}}
+
   /* the bank card: its upload area grows to fill the card (no empty space under the text when the IremboPay card
      is taller), its icon and text stay centred */
-  .st-key-up_bank_card > [data-testid="stElementContainer"]:has(.up-drop-fill) {{flex: 1 1 auto; display: flex;}}
+  .st-key-up_bank_card > [data-testid="stElementContainer"]:has(.up-drop-fill),
+  .st-key-up_pay_card > [data-testid="stElementContainer"]:has(.up-drop-fill) {{flex: 1 1 auto; display: flex;}}
   .st-key-up_bank_card [data-testid="stElementContainer"]:has(.up-drop-fill) > div,
   .st-key-up_bank_card [data-testid="stElementContainer"]:has(.up-drop-fill) [data-testid="stMarkdown"],
   .st-key-up_bank_card [data-testid="stElementContainer"]:has(.up-drop-fill) [data-testid="stMarkdown"] > div,
-  .st-key-up_bank_card [data-testid="stMarkdownContainer"]:has(> .up-drop-fill) {{height: 100%; width: 100%;
+  .st-key-up_bank_card [data-testid="stMarkdownContainer"]:has(> .up-drop-fill),
+  .st-key-up_pay_card [data-testid="stElementContainer"]:has(.up-drop-fill) > div,
+  .st-key-up_pay_card [data-testid="stElementContainer"]:has(.up-drop-fill) [data-testid="stMarkdown"],
+  .st-key-up_pay_card [data-testid="stElementContainer"]:has(.up-drop-fill) [data-testid="stMarkdown"] > div,
+  .st-key-up_pay_card [data-testid="stMarkdownContainer"]:has(> .up-drop-fill) {{height: 100%; width: 100%;
       margin-bottom: 0;}}
   .up-drop-fill {{height: 100%; box-sizing: border-box; margin: 0; display: flex; flex-direction: column;
       align-items: center; justify-content: center;}}
   /* under the two main buttons ("Choose bank file", "Add selected file" / "Choose IremboPay file") the same room:
      the bank card's note, the IremboPay card's "Refresh files" or note; so the two buttons stay on one line */
-  .st-key-up_bank_card .up-help, .st-key-up_pay_card .up-help {{height: 4.4rem; box-sizing: border-box;
-      overflow: hidden; margin-top: 0;}}
-  .st-key-drive_pay_refresh {{height: 3.4rem;}}     /* + the 1rem gap between two elements = the note's 4.4rem */
+  .st-key-up_bank_card .up-help, .st-key-up_pay_card .up-help {{margin-top: 0;}}
+  .st-key-up_bank_card [data-testid="stElementContainer"]:has(.up-help:empty),
+  .st-key-up_pay_card [data-testid="stElementContainer"]:has(.up-help:empty) {{display: none;}}
   /* the upload widget becomes one big button ("Choose … file"); a file can still be dropped on it */
   .st-key-up_bank_card [data-testid="stFileUploaderDropzone"],
   .st-key-up_pay_card [data-testid="stFileUploaderDropzone"] {{padding: 0; border: none; background: transparent;
@@ -387,15 +409,28 @@ st.markdown(f"""
       font-size: 1.02rem;}}
   /* the source switch fills the card's width: two equal halves, the chosen one in teal */
   .st-key-up_pay_card .st-key-pay_source {{width: 100% !important;}}
-  .st-key-up_pay_card [data-testid="stButtonGroup"] {{width: 100%;}}
-  .st-key-up_pay_card [data-testid="stButtonGroup"] [role="radiogroup"] {{width: 100%; max-width: 100% !important;
+  .st-key-up_pay_card [data-testid="stButtonGroup"],
+  .st-key-up_bank_card [data-testid="stButtonGroup"] {{width: 100%;}}
+  .st-key-up_pay_card [data-testid="stButtonGroup"] [role="radiogroup"],
+  .st-key-up_bank_card [data-testid="stButtonGroup"] [role="radiogroup"] {{width: 100%; max-width: 100% !important;
       display: flex; gap: .5rem;}}
-  .st-key-up_pay_card [data-testid="stButtonGroup"] button {{flex: 1 1 0; min-height: 2.9rem; border-radius: 10px;
+  .st-key-up_pay_card [data-testid="stButtonGroup"] button,
+  .st-key-up_bank_card [data-testid="stButtonGroup"] button {{flex: 1 1 0; min-height: 2.9rem; border-radius: 10px;
       background: rgba(128,128,128,.10); border: 1px solid transparent;}}
-  .st-key-up_pay_card [data-testid="stButtonGroup"] button p {{font-size: 1.02rem;}}
-  .st-key-up_pay_card [data-testid="stButtonGroup"] button[aria-checked="true"] {{background: {BRAND};
+  .st-key-up_pay_card [data-testid="stButtonGroup"] button p,
+  .st-key-up_bank_card [data-testid="stButtonGroup"] button p {{font-size: 1.02rem;}}
+  .st-key-up_pay_card [data-testid="stButtonGroup"] button[aria-checked="true"],
+  .st-key-up_bank_card [data-testid="stButtonGroup"] button[aria-checked="true"],
+  .st-key-up_pay_card [data-testid="stButtonGroup"] button[aria-checked="true"]:hover,
+  .st-key-up_bank_card [data-testid="stButtonGroup"] button[aria-checked="true"]:hover,
+  .st-key-up_pay_card [data-testid="stButtonGroup"] button[aria-checked="true"]:focus,
+  .st-key-up_bank_card [data-testid="stButtonGroup"] button[aria-checked="true"]:focus {{background: {BRAND} !important;
       border-color: {BRAND};}}
-  .st-key-up_pay_card [data-testid="stButtonGroup"] button[aria-checked="true"] p {{color: #fff;}}
+  .st-key-up_pay_card [data-testid="stButtonGroup"] button[aria-checked="true"] p,
+  .st-key-up_bank_card [data-testid="stButtonGroup"] button[aria-checked="true"] p {{color: #fff;}}
+  /* the bank card: the switch takes the line, the retry icon stays at its side */
+  .st-key-bank_src_row {{flex-wrap: nowrap;}}
+  .st-key-bank_src_row > [data-testid="stElementContainer"]:has([data-testid="stButtonGroup"]) {{flex: 1 1 auto;}}
   .rh-empty {{text-align: center; padding: 1.6rem 1rem; opacity: .75; border: 1px dashed rgba(128,128,128,.45);
               border-radius: 12px; font-size: .92rem;}}
   .rh-sub {{font-size: .9rem; color: #D6E4E6; margin-top: -.25rem;}}
@@ -480,14 +515,68 @@ st.markdown(f"""
   .dt-s {{font-size: .74rem; color: var(--rc-muted); line-height: 1.35;}}
   .dt-targets {{font-size: .86rem; color: var(--rc-ink); border: 1px solid rgba(128,128,128,.28); border-radius: 10px;
                padding: .5rem .75rem; margin: -.3rem 0 .9rem 0; line-height: 1.6;}}
-  .st-key-dash_tools button[data-testid="stPopoverButton"] {{border-radius: 999px; border: 1px solid #DCE9EB;
-      background: #fff; color: #123239; font-weight: 700; min-height: 2.6rem; width: 100%; padding: 0 .55rem;
-      box-shadow: 0 2px 8px rgba(18,50,57,.06);}}
-  .st-key-dash_tools [data-testid="stColumn"]:first-child button[data-testid="stPopoverButton"] {{background: #123239;
-      color: #99E378; border-color: #123239;}}
-  .st-key-dash_tools button[data-testid="stPopoverButton"] div[aria-hidden="true"] {{display: none;}}
-  .st-key-dash_tools button[data-testid="stPopoverButton"] p {{white-space: nowrap; font-weight: 700;}}
+  /* the dashboard's bar (23/10/2026): one white card; Year | Quarter | Month | Week as tabs on the left (the one
+     chosen white and raised on a grey track), the drop-downs on the right, light with a thin border */
+  .st-key-dash_tools {{background: #fff; border: 1px solid #E1EEF0; border-radius: 14px; padding: .5rem .55rem;
+      box-shadow: 0 1px 3px rgba(18,50,57,.06);}}
+  .st-key-dash_kind_tabs [data-testid="stButtonGroup"] [role="radiogroup"], .st-key-dash_bank_tabs [data-testid="stButtonGroup"] [role="radiogroup"] {{background: #F1F5F6; border-radius: 10px;
+      padding: 4px; gap: 2px; width: fit-content;}}
+  .st-key-dash_kind_tabs [data-testid="stButtonGroup"] button, .st-key-dash_bank_tabs [data-testid="stButtonGroup"] button {{border: none !important; background: transparent;
+      border-radius: 8px !important; min-height: 2.3rem; padding: 0 .5rem; color: #5E7378; box-shadow: none;}}
+  .st-key-dash_kind_tabs [data-testid="stButtonGroup"] [role="radiogroup"], .st-key-dash_bank_tabs [data-testid="stButtonGroup"] [role="radiogroup"] {{flex-wrap: nowrap;}}
+  .st-key-dash_kind_tabs [data-testid="stButtonGroup"] button p, .st-key-dash_bank_tabs [data-testid="stButtonGroup"] button p {{font-size: .92rem; font-weight: 600;}}
+  .st-key-dash_kind_tabs [data-testid="stButtonGroup"] button[aria-checked="true"], .st-key-dash_bank_tabs [data-testid="stButtonGroup"] button[aria-checked="true"] {{background: #fff !important;
+      color: #123239 !important; box-shadow: 0 1px 3px rgba(18,50,57,.14);}}
+  .st-key-dash_kind_tabs [data-testid="stButtonGroup"] button[aria-checked="true"] p, .st-key-dash_bank_tabs [data-testid="stButtonGroup"] button[aria-checked="true"] p {{color: #123239;}}
+  .st-key-dash_tools button[data-testid="stPopoverButton"] {{border-radius: 9px; border: 1px solid #DCE3E5;
+      background: #fff; color: #123239; min-height: 2.5rem; width: 100%; padding: 0 .5rem; box-shadow: none;}}
+  .st-key-dash_tools button[data-testid="stPopoverButton"]:hover {{border-color: #2B8A99;}}
+  .st-key-dash_tools [data-testid="stSelectbox"] [role="group"] {{background: #fff !important;
+      border: 1px solid #DCE3E5 !important; border-radius: 9px !important; min-height: 2.5rem;}}
+  .st-key-dash_tools [data-testid="stSelectbox"] [role="group"]:hover {{border-color: #2B8A99 !important;}}
+  .st-key-dash_tools [data-testid="stSelectbox"] input {{font-weight: 600; color: #123239;}}
+  .dash-vs {{font-weight: 700; color: #5E7378; font-size: .9rem; padding: 0 .1rem; height: 2.5rem; display: flex;
+      align-items: center;}}
+  .st-key-dash_drops [data-testid="stElementContainer"]:has(.dash-vs),
+  .st-key-dash_drops [data-testid="stElementContainer"]:has(.dash-vs) [data-testid="stMarkdownContainer"],
+  .st-key-dash_drops [data-testid="stElementContainer"]:has(.dash-vs) [data-testid="stMarkdown"] {{margin: 0 !important;
+      padding: 0 !important; display: flex; align-items: center;}}
+  .st-key-dash_drops, .st-key-dash_tools > :has(> .st-key-dash_drops),
+  .st-key-dash_tools [data-testid="stLayoutWrapper"]:has(> .st-key-dash_drops) {{margin-left: auto;}}
+  .st-key-dash_tools > div, .st-key-dash_tools [data-testid="stPopover"],
+  .st-key-dash_tools button[data-testid="stPopoverButton"] {{flex-shrink: 0; min-width: max-content;}}
+  .st-key-dash_tools button[data-testid="stPopoverButton"] {{padding: 0 .65rem; width: auto !important;}}
+  .st-key-dash_tools button[data-testid="stPopoverButton"] div, .st-key-dash_tools button[data-testid="stPopoverButton"] span,
+  .st-key-dash_tools button[data-testid="stPopoverButton"] [data-testid="stMarkdownContainer"] {{max-width: none !important;
+      width: auto !important; overflow: visible !important;}}
+  /* every one opens a menu: the ▾ arrow says so (a drop-down, not a button) */
+  .st-key-dash_tools button[data-testid="stPopoverButton"] div[aria-hidden="true"] {{display: flex; margin-left: auto;
+      opacity: .75; flex: none;}}
+  .st-key-dash_tools button[data-testid="stPopoverButton"] div[aria-hidden="true"] [data-testid="stIconMaterial"] {{
+      font-size: 1.15rem;}}
+  .st-key-dash_tools button[data-testid="stPopoverButton"] > div {{gap: .35rem; width: 100%;}}
+  .st-key-dash_tools button[data-testid="stPopoverButton"] p {{white-space: nowrap; font-weight: 600; font-size: .95rem;}}
   .st-key-dash_tools [data-testid="stTooltipHoverTarget"] {{justify-content: stretch !important;}}
+  /* the dashboard's chart cards (22/10/2026): white cards, a title and its line, Chart | Table and ⬇ PDF */
+  [class*="st-key-dcard_"] {{background: #fff; border-radius: 14px !important; border-color: #E1EEF0 !important;
+      box-shadow: 0 1px 3px rgba(18,50,57,.06); padding: 1rem 1.2rem !important;}}
+  .dc-t {{font-size: 1.02rem; font-weight: 800; color: #123239;}}
+  .dc-s {{font-size: .82rem; color: var(--rc-muted); margin-top: .1rem;}}
+  [class*="st-key-dcard_"] [data-testid="stButtonGroup"] button {{min-height: 2rem; padding: 0 .7rem;}}
+  [class*="st-key-dcard_"] [data-testid="stButtonGroup"] button p {{font-size: .85rem;}}
+  [class*="st-key-dash_pdf_"] button {{min-height: 2rem; border-radius: 9px;}}
+  [class*="st-key-dash_pdf_"] button p {{font-size: .85rem;}}
+  .dash-sub {{font-size: .95rem; color: var(--rc-muted); padding-top: .55rem;}} .dash-sub b {{color: #123239;}}
+  .dash-miss {{font-size: .82rem; color: #8A5B00; margin-top: .3rem;}}
+  .dk-red {{color: #C2413D;}}
+  [class*="st-key-dcard_"] [data-testid="stElementToolbar"] {{display: none;}}   /* our Table / ⬇ PDF instead */
+  .dc-note {{font-size: .76rem; color: var(--rc-muted); text-align: center; margin-top: .2rem;}}
+  /* the two cards of a row: the same height */
+  [data-testid="stHorizontalBlock"]:has(> [data-testid="stColumn"] [class*="st-key-dcard_"]) > [data-testid="stColumn"] >
+      [data-testid="stVerticalBlock"] {{height: 100%;}}
+  [data-testid="stLayoutWrapper"]:has(> [class*="st-key-dcard_"]) {{height: 100%;}}
+  [class*="st-key-dcard_"] {{height: 100%;}}
+  [class*="st-key-dash_pdf_"] button p {{white-space: nowrap;}}
   .dt-cover {{font-size: .84rem; color: var(--rc-muted); border: 1px solid rgba(128,128,128,.22);
               border-radius: 10px; padding: .45rem .75rem; margin: 0 0 .9rem 0;}}
   .dt-path {{font-size: .85rem; font-weight: 800; color: var(--rc-muted);}}
@@ -737,6 +826,26 @@ def previous_counts():
         session.remove(path)
 
 
+def checkout_all(invoices: list) -> dict:
+    """{invoice: answer} of IremboPay's checkout for every invoice of the statements (Ecobank, BPR: 26/10/2026),
+    before the run; a progress bar meanwhile (about 50 invoices a second). The answers stay for the session, so
+    Exception Resolution shows them at once."""
+    checker = state.get("checkout")
+    if checker is None:
+        checker = state.checkout = irembopay_checkout.Checker()
+    checker.add(invoices)
+    bar = st.progress(0.0, text=f"Checking {len(invoices):,} invoices on IremboPay's checkout…")
+    while True:
+        done, total, _ = checker.progress(invoices)
+        bar.progress(done / total if total else 1.0, text=f"Checking invoices on IremboPay's checkout… "
+                                                          f"{done:,} of {total:,}")
+        if done >= total:
+            break
+        time.sleep(.4)
+    bar.empty()
+    return {i: checker.answer(i) for i in invoices}
+
+
 def run_reconciliation(acc):
     """engine.run for the current period, with the report written in the session's temporary folder. When a report
     is made, its Excel and PDF are read into memory (state.report_mem) and the file is deleted; the previous report
@@ -750,10 +859,21 @@ def run_reconciliation(acc):
             if prev_info is None:
                 raise engine.ReconError(f"No {bank.NAME} report found for {prev.name}. " + (problem or ""))
             prev_file = previous_file(prev, prev_info, session)
+        checkout = None
+        if engine.option(bank, "CHECKOUT_ALL", False):     # Ecobank, BPR: every invoice through the checkout first
+            checkout = checkout_all(engine.statement_invoices(acc, bank))
         res = engine.run(BASE_DIR, period, acc, sla_days=sla_days, compare=compare, bank=bank,
-                         report_dir=session.path, previous_report=prev_file)
+                         report_dir=session.path, previous_report=prev_file, checkout=checkout)
         if prev_info is not None:
-            res.compared_with = f"{period.previous().name} (report {prev_info['where']})"
+            kind = "No-Transaction Report" if "No-Transaction" in (res.compared_with or "") else "report"
+            res.compared_with = f"{period.previous().name} ({kind} {prev_info['where']})"
+        # days with no statement that did not block Run (e.g. Bank of Africa: maybe no transaction): said in step 6
+        # and in the Slack message, so someone checks them
+        res.coverage_note = (engine.check_period(period, acc, bank).missing     # I&M (26/10/2026): not said
+                             if engine.option(bank, "MISSING_DAYS_NOTE", True) else [])
+        for note in res.coverage_note:
+            res.add("warning", f"No statement for {note.split(': ', 1)[-1]} ({note.split(':')[0]}): no transaction "
+                               "those days, or the statement is missing - please check.")
         if res.report_file is not None:
             state.report_mem = {"name": res.report_file.name, "xlsx": res.report_file.read_bytes(),
                                 "pdf": pdf_report.report_pdf(res.report_file)}
@@ -962,7 +1082,8 @@ def auto_delivery(res, mem):
 
     def send():
         for native in (True, False):                    # Slack's table; else the same table as text
-            payload = slack_message.build_blocks(bank, period, res.blocks, res.merchants, links, res.ran_at, native)
+            payload = slack_message.build_blocks(bank, period, res.blocks, res.merchants, links, res.ran_at, native,
+                                                 notes=getattr(res, "coverage_note", []))
             try:
                 slack.send_payload(payload, url)
                 done.update(sent_at=pd.Timestamp.now(), payload=payload, error=None)
@@ -990,7 +1111,8 @@ def auto_delivery(res, mem):
         st.rerun()
 
 
-def slack_send_card(text: str, report_name: str, link, note: str = "", key: str = "slack", drive_hint: bool = True):
+def slack_send_card(text: str, report_name: str, link, note: str = "", key: str = "slack", drive_hint: bool = True,
+                    label: str = "💬 Send to Slack"):
     """The message shown first, then sent to the channel of the saved webhook on click (the webhook is set in the
     side panel, Slack). `report_name` tells whether this very message was already sent ("Send again")."""
     url = slack.load_webhook()
@@ -1007,7 +1129,7 @@ def slack_send_card(text: str, report_name: str, link, note: str = "", key: str 
         st.markdown('<div class="prev-found save-note"><b>Message sent to Slack</b> <span>the channel of the saved '
                     'webhook</span></div>', unsafe_allow_html=True)
     already = state.get("slack_sent") == (report_name, text)
-    if st.button("💬 Send again to Slack" if already else "💬 Send to Slack", type="primary", key=f"{key}_send",
+    if st.button("💬 Send again to Slack" if already else label, type="primary", key=f"{key}_send",
                  help="Posts the message above to the Slack channel"):
         try:
             with st.spinner("Sending to Slack…"):
@@ -1226,17 +1348,66 @@ def irembopay_from_drive(pay_types):
                                 help="Every file of IremboPay File, of every bank"):
         state[all_key] = True
         st.rerun()
-    if st.button("Add selected file", type="primary", key="drive_pay_add", width="stretch", disabled=picked is None):
-        try:
-            with st.spinner(f"Downloading {picked.name}…"):
-                return picked.name, client.download(picked.id), "payments"
-        except DriveError as err:
-            st.error(str(err), icon="⚠️")
-    if st.button("Refresh files", key="drive_pay_refresh", icon=":material/refresh:", width="stretch",
-                 help="List the files in IremboPay File again"):
+    # 26/10/2026: "Add selected file" and "Refresh files" on one line (less space)
+    with st.container(horizontal=True, gap="small", key="drive_pay_buttons"):
+        add = st.button("Add selected file", type="primary", key="drive_pay_add", width="stretch",
+                        disabled=picked is None)
+        refresh = st.button("Refresh files", key="drive_pay_refresh", icon=":material/refresh:", width="stretch",
+                            help="List the files in IremboPay File again")
+    if refresh:
         state.drive_pay_list = None
         st.rerun()
+    if add:
+        try:
+            with st.spinner(f"Downloading {picked.name}…"):
+                return picked.name, client.download(picked.id, picked.mime), "payments"
+        except DriveError as err:
+            st.error(str(err), icon="⚠️")
     return None
+
+
+def statements_from_drive(end):
+    """Step 2, bank statements from Google Drive (Ecobank, 26/10/2026): no list - the app reads the IREMBO PAY files
+    of the bank's Drive folder itself and adds those whose days (read inside each file) fall from the period's first
+    day to `end`. Done once per period; "Read again" does it again. Returns [(name, content, "bank")] of the files not
+    added yet; they are then read and checked exactly like uploaded ones (in memory only)."""
+    client, problem = drive_client()
+    folder = getattr(config.load(), engine.option(bank, "DRIVE_STATEMENTS", ""), "")
+
+    def panel(name, note=""):
+        st.markdown(f'<div class="up-file"><div class="up-file-label">Google Drive</div>'
+                    f'<div class="up-file-name">{_esc(name)}</div>'
+                    + (f'<div class="up-help">{note}</div>' if note else "") + "</div>", unsafe_allow_html=True)
+
+    if client is None or not folder:
+        panel("Not available", _esc(problem or f"No {bank.NAME} statements folder is set "
+                                    f"({engine.option(bank, 'DRIVE_STATEMENTS', '')} in drive_settings.toml)."))
+        return []
+    key = (bank.CODE, period.label, f"{end:%Y-%m-%d}", folder)
+    new = []
+    if state.get("drive_stmt_key") != key:
+        bar = st.progress(0.0, text=f"Reading the {bank.NAME} statements on Google Drive…")
+        try:
+            got = drive_statements.pick(client, folder, bank, period.start, end, BASE_DIR / "output" / ".drive_statements.pkl",
+                                        done=lambda i, n: bar.progress(i / n, text=f"Reading the {bank.NAME} "
+                                                                                   f"statements on Google Drive… {i} of {n}"))
+        except DriveError as err:
+            bar.empty()
+            panel("Could not read the folder", _esc(str(err)))
+            return []
+        bar.empty()
+        state.drive_stmt_key, state.drive_stmt_info = key, got
+        new = [(name, content, "bank") for name, content in got.files
+               if engine.file_digest(content) not in state.files]
+    got = state.drive_stmt_info
+    # 26/10/2026: no block with the number of statements (the files added are listed below); only a problem shows
+    if got.errors:
+        panel("Some files could not be downloaded", _esc("; ".join(got.errors[:3])))
+    elif not got.files:
+        panel("No statement for this period",
+              f"None of the {got.considered} IREMBO PAY files of the folder has a day from {period.start:%d/%m} to "
+              f"{end:%d/%m/%Y}.")
+    return new
 
 
 # ---- side panel titles
@@ -1279,8 +1450,8 @@ def render_kpis(tables):
                               for cur, n, amt in zip(t["Currency"], t["Number of Transactions"], t["Total Amount"])
                               if pd.notna(cur))
     k = st.columns(5, border=True)
-    k[0].metric("Processed", f"{processed:,}", help=per_currency)
-    k[1].metric("Received", f"{rec_pct:.2%}", help=f"{rec_n:,} notifications received by Irembo")
+    k[0].metric("Processed transaction", f"{processed:,}", help=per_currency)
+    k[1].metric("Received notification", f"{rec_n:,}", help=f"{rec_pct:.2%} of the processed transactions")
     k[2].metric("SLA violated", f"{sla_n:,}", help=f"{sla_pct:.2%} of processed")
     k[3].metric("Pending (NEW)", f"{_count(tables, 'Pending notifications')[0]:,}")
     k[4].metric("Duplicate", f"{_count(tables, 'Duplicate Payment')[0]:,}", help="Paid with another channel")
@@ -1455,6 +1626,7 @@ def render_custom_preview(content: dict):
 #     the banks' settings and the app's settings. Settings changed in the app are kept in app_settings.json.
 # =====================================================================================================================
 SETTINGS = app_settings.load()
+engine.set_holidays(SETTINGS["holidays"])      # weekends + these days: payments are posted on the next working day
 # the targets set in Settings: the Dashboard's colours and findings, and the 🟢 / 🔴 of the Slack message
 dashboard.TARGET_RECEIPT = slack_message.SUCCESS_OK = SETTINGS["targets"]["receipt"]
 dashboard.TARGET_ONTIME = slack_message.SLA_OK = SETTINGS["targets"]["ontime"]
@@ -1464,6 +1636,7 @@ sla_days = app_settings.sla_days(SETTINGS, bank)       # the SLA days of the ban
 def _page_dashboard(): pass
 def _page_reconciliation(): pass
 def _page_reports(): pass
+def _page_followup(): pass
 def _page_banks(): pass
 def _page_settings(): pass
 
@@ -1472,11 +1645,13 @@ PAGES = {"dashboard": st.Page(_page_dashboard, title="Dashboard", icon=":materia
          "reconciliation": st.Page(_page_reconciliation, title="Reconciliation", icon=":material/assignment_turned_in:",
                                    url_path="reconciliation", default=True),       # the page that opens first
          "reports": st.Page(_page_reports, title="Reports", icon=":material/filter_none:", url_path="reports"),
+         "followup": st.Page(_page_followup, title="Follow-up", icon=":material/fact_check:", url_path="follow-up"),
          "banks": st.Page(_page_banks, title="Bank Management", icon=":material/account_balance:",
                           url_path="bank-management"),
          "settings": st.Page(_page_settings, title="Settings", icon=":material/settings:", url_path="settings")}
 # the side menu in two parts: the daily work, and the settings
-_current = st.navigation({"Workspace": [PAGES["reconciliation"], PAGES["dashboard"], PAGES["reports"]],
+_current = st.navigation({"Workspace": [PAGES["reconciliation"], PAGES["dashboard"], PAGES["reports"],
+                                        PAGES["followup"]],
                           "Configuration": [PAGES["banks"], PAGES["settings"]]})
 PAGE = next(k for k, pg in PAGES.items() if pg.title == _current.title)
 if state.get("goto") in PAGES and state.goto != PAGE:    # a page asked for (e.g. a test, or a link in the app)
@@ -1562,8 +1737,9 @@ with st.sidebar:
             icon = "✅" if r["result"] == "report made" else "⏸️"
             label = r["period"].replace("/", "-").replace(" - ", "_to_")
             st.caption(f"{icon} {when:%d/%m %H:%M} · {engine.period_title(r['report_type'], label)}")
+    _unit = app_settings.sla_unit(bank)
     st.caption(f"SLA ({bank.NAME}): "
-               + (f"{sla_days} day{'s' if sla_days != 1 else ''} allowed between the bank "
+               + (f"{sla_days} {_unit[:-1] if sla_days == 1 else _unit} allowed between the bank "
                   f"{bank.COLUMNS['payment_date']} and paid_at" if engine.option(bank, "SLA_DAYS_SETTING", True)
                   else f"the bank {bank.COLUMNS['payment_date']} and paid_at must be in the same minute")
                + " · set in Bank Management")
@@ -1576,7 +1752,7 @@ if not viewing:
     _h = lambda s: s.replace("&", "&amp;")
     _logo = base64.b64encode((APP_DIR / "assets" / "irembopay_wordmark.png").read_bytes()).decode()
     st.markdown(f"""<div class="app-banner"><div class="brand"><img src="data:image/png;base64,{_logo}" alt="IremboPay">
-<h1>{ {'dashboard': 'Reports Dashboard', 'reports': 'Reports', 'banks': 'Bank Management',
+<h1>{ {'dashboard': 'Reports Dashboard', 'reports': 'Reports', 'followup': 'Follow-up', 'banks': 'Bank Management',
         'settings': 'Settings'}.get(PAGE, _h(bank.FULL_NAME) + ' Reconciliation')}</h1></div></div>""",
                 unsafe_allow_html=True)
 if not viewing and PAGE == "reconciliation":
@@ -1685,27 +1861,44 @@ def _delta(ch, *, pct=True, lower_is_better=False, points=False):
 
 
 def dashboard_facts(client, root):
-    """The facts of every monthly report on Drive (first version), each report read once per session
-    (services/dashboard.py). -> (facts to use, [problems])."""
+    """The facts of every monthly report on Drive (first version) -> (facts to use, [problems]). Each report's facts
+    are kept for the session and on this computer (services/facts_cache.py, output/.dashboard_facts.pkl, keyed by the
+    report's Drive ID and last-modified date): only a new or replaced report is downloaded and read again; several
+    are downloaded at the same time."""
     cached = state.get("history_index")
     if not cached or cached[0] != root:
         with st.spinner("Reading Reconciliation Reports on Google Drive…"):
             state.history_index = (root, report_history.drive_index(client, root))
             state.history_index_at = pd.Timestamp.now()
-    records = [r for r in dashboard.report_records(state.history_index[1].records)
-               if r.kind == "month"]                    # the dashboard works by month: the monthly reports
+    # the monthly and the weekly reports (27/10/2026: a week with a weekly report uses it; a month with no monthly
+    # report yet, e.g. October, shows its weeks)
+    records = dashboard.report_records(state.history_index[1].records)
     cache = state.setdefault("dash_facts", {})
-    key = lambda r: (r.file_id, str(r.modified))       # a replaced report (same file, new content) is read again
+    key = facts_cache.key                                # a replaced report (same file, new content) is read again
     todo = [r for r in records if key(r) not in cache]
-    if todo:
-        bar = st.progress(0.0, text=f"Reading {len(todo)} report{'s' if len(todo) > 1 else ''} from Google Drive…")
+    if todo:                                             # 1. the figures already kept on this computer
+        stored = facts_cache.load(DASH_CACHE)
+        for r in todo:
+            if key(r) in stored:
+                cache[key(r)] = facts_cache.attach(stored[key(r)], r)
+        todo = [r for r in todo if key(r) not in cache]
+    if todo:                                             # 2. the others: downloaded together, then read
+        n = len(todo)
+        bar = st.progress(0.0, text=f"Downloading {n} report{'s' if n > 1 else ''} from Google Drive…")
+        data = report_history.download_many(
+            client, todo, done=lambda i: bar.progress(i / n * 0.6, text=f"Downloading reports… {i} of {n}"))
+        fresh = {}
         for i, r in enumerate(todo, 1):
             try:
-                cache[key(r)] = report_history.read_drive_facts(client, r, state.session_folder)
+                if isinstance(data.get(r.file_id), Exception):
+                    raise data[r.file_id]
+                cache[key(r)] = fresh[key(r)] = report_history.read_drive_facts(client, r, state.session_folder,
+                                                                                data.get(r.file_id))
             except (DriveError, engine.ReconError, KeyError, ValueError) as err:
-                cache[key(r)] = f"{r.name}: {err}"
-            bar.progress(i / len(todo), text=f"Reading reports from Google Drive… {i} of {len(todo)}")
+                cache[key(r)] = f"{r.name}: {err}"      # not kept on this computer: tried again next time
+            bar.progress(0.6 + i / n * 0.4, text=f"Reading reports… {i} of {n}")
         bar.empty()
+        facts_cache.save(DASH_CACHE, fresh, keep=[key(r) for r in records])
     facts = [f for r in records if isinstance(cache.get(key(r)), list) for f in cache[key(r)]]
     return dashboard.combine(facts), [cache[key(r)] for r in records if isinstance(cache.get(key(r)), str)]
 
@@ -1714,7 +1907,7 @@ STATUS_COLOR = {"good": "#2E7D4F", "warn": "#D4A72C", "bad": "#C2413D", "none": 
 STATUS_ICON = {"Off target": "🔴", "Watch": "🟠", "On target": "🟢", "No report": "⚪"}
 
 
-def _seg(label, options, key, default=None, fmt=None, help=None, wrap=False):
+def _seg(label, options, key, default=None, fmt=None, help=None, wrap=False, hide_label=False):
     """A segmented control that always has a value (the default when nothing is chosen); wrap=True: pills, which
     go on a second line when the card is narrow."""
     default = options[0] if default is None else default
@@ -1722,7 +1915,8 @@ def _seg(label, options, key, default=None, fmt=None, help=None, wrap=False):
         state[key] = default
     if wrap:
         return st.pills(label, options, key=key, format_func=fmt, help=help) or default
-    return st.segmented_control(label, options, key=key, format_func=fmt, help=help) or default
+    return st.segmented_control(label, options, key=key, format_func=fmt, help=help,
+                                label_visibility="collapsed" if hide_label else "visible") or default
 
 
 def tile_groups(tiles) -> str:
@@ -1773,16 +1967,12 @@ def dashboard_page():
         state.dash_kind, state[f"dash_period_{level}"] = level, key
     all_codes = list(engine.BANKS)
     # the hierarchy, all from the monthly reports: a year = its quarters = its months; a month holds its weeks and days
-    kinds = {"year": "Year", "quarter": "Quarter", "month": "Month", "week": "Week", "day": "Day"}
+    kinds = {"year": "Year", "quarter": "Quarter", "month": "Month", "week": "Week"}   # no day view (22/10/2026)
     if state.get("dash_bank") not in ["All"] + all_codes:
         state.dash_bank = "All"
     if state.get("dash_kind") not in kinds:
         state.dash_kind = "month"
-    compare_modes = {"previous": "The period before", "year": "Same period last year",
-                     "pick": "Another period I choose", "none": "No comparison (this period only)"}
-    if state.get("dash_compare") not in compare_modes:
-        state.dash_compare = "none"                        # by default: this period only
-    pick, kind, mode = state.dash_bank, state.dash_kind, state.dash_compare
+    pick, kind = state.dash_bank, state.dash_kind
     with_partial = bool(state.get("dash_partial", False))
     pick_banks = all_codes if pick == "All" else [pick]
     options = (dashboard.period_options([f for f in facts if f.bank in pick_banks], kind) if with_partial
@@ -1791,67 +1981,67 @@ def dashboard_page():
         state[f"dash_period_{kind}"] = options[0]
     first = state.get(f"dash_period_{kind}") if options else None
     last = None
-    # "Another period I choose": any other saved period of the same type (default: the one just before)
+    # compared with (24/10/2026): "No comparison" or any other saved period of the same type, chosen in the bar
     vs_options = [o for o in options if o != first]
-    if mode == "pick" and vs_options and state.get(f"dash_vs_{kind}") not in vs_options:
-        before_default = dashboard.previous_period(kind, first, last, "previous")
-        state[f"dash_vs_{kind}"] = (before_default[0] if before_default and before_default[0] in vs_options
-                                    else vs_options[0])
-    if not options:
-        before_span = None
-    elif mode == "pick":
-        before_span = (state[f"dash_vs_{kind}"], None) if vs_options else None
-    else:
-        before_span = dashboard.previous_period(kind, first, last, mode)
+    vs_key = f"dash_vs_{kind}"
+    if state.get(vs_key) not in ["none"] + vs_options:
+        state[vs_key] = "none"                             # by default: this period only
+    mode = "pick" if state[vs_key] in vs_options else "none"
+    before_span = (state[vs_key], None) if options and mode == "pick" else None
     label = lambda k: dashboard.period_label(k, kind) + (
         "" if dashboard.is_complete(facts, kind, k, pick_banks) else " · partial")
     found = sorted({c for f in facts for m in f.counts.values() for c in m}, key=lambda c: (c != "RWF", c))
 
-    hero_col, tools_col = st.columns([1, 1.3], vertical_alignment="top")
-    with tools_col.container(key="dash_tools"):
-        b1, b2, b3, b4, b5, b6 = st.columns([1, 3.7, 1.55, .6, .6, .6], gap="small")
-        with b1.popover(kinds[kind], width="stretch", help="Year, quarter, month, week or day"):
-            _seg("Period type", list(kinds), "dash_kind", default="month", fmt=kinds.get, wrap=True)
-        period_text = (f"📅 {dashboard.describe(kind, first)}"
-                       + (f" vs {dashboard.describe(kind, *before_span)}" if before_span else "")) if options else "📅 Period"
-        with b2.popover(period_text, width="stretch", help="The period shown and the one it is compared with"):
+    # one bar: the period tabs and the bank tabs side by side, the drop-downs on the right (each takes the room it
+    # needs; on a narrow screen the drop-downs go to the next line)
+    with st.container(key="dash_tools", horizontal=True, vertical_alignment="center", gap="small"):
+        with st.container(key="dash_kind_tabs", width="content"):     # Year | Quarter | Month | Week
+            _seg("Period type", list(kinds), "dash_kind", default="month", fmt=kinds.get, hide_label=True)
+        with st.container(key="dash_bank_tabs", width="content"):     # All | I&M | Ecobank | Bank of Africa | BPR
+            _seg("Bank", ["All"] + all_codes, "dash_bank", default="All", hide_label=True,
+                 fmt=lambda c: "All" if c == "All" else engine.BANKS[c].NAME)
+        # the drop-downs together, on the right (also when they go to the next line on a narrow screen)
+        with st.container(key="dash_drops", horizontal=True, vertical_alignment="center", gap="small", width="content"):
+            short_p = lambda k: ((lambda m, n: f"Week {n} · {m:%b %Y}")(*engine.week_number(k)) if kind == "week"
+                                 else dashboard.describe(kind, k))
+            # the period and what it is compared with: two drop-downs side by side, in the bar (24/10/2026)
             if options:
-                st.selectbox("Period", options, key=f"dash_period_{kind}", format_func=label)
-            st.selectbox("Compare with", list(compare_modes), key="dash_compare", format_func=compare_modes.get)
-            if mode == "pick":
-                if vs_options:
-                    st.selectbox("Compared with", vs_options, key=f"dash_vs_{kind}", format_func=label)
-                else:
-                    st.caption("No other saved period to compare with.")
-            st.toggle("Partial", key="dash_partial",
-                      help="Also offer the periods whose reports are not all saved (e.g. a week that "
-                           "starts in a month with no report). Off: only complete periods.")
-        with b3.popover("🏦 " + ("All banks" if pick == "All" else engine.BANKS[pick].NAME), width="stretch",
-                        help="The bank (or all banks)"):
-            st.selectbox("Bank", ["All"] + all_codes, key="dash_bank",
-                         format_func=lambda c: "All banks" if c == "All" else engine.BANKS[c].FULL_NAME)
-        with b4.popover("⚙", width="stretch", help="Currency, refresh, targets, reset"):
-            cur = _seg("Currency", ["All"] + found, "dash_cur",
-                       help="RWF or USD: every count follows that currency. All: every currency (amounts are always "
-                            "shown per currency, never added together)")
-            if st.button("🔄 Refresh", key="dash_refresh", width="stretch", help="Read the reports on Google Drive again"):
-                state.history_index, state.dash_facts = None, {}
-                if state.get("drive") is not None:
-                    state.drive.forget_folders()
-                st.rerun()
-            if st.button("🎯 Change targets", key="dash_targets", width="stretch", help="Settings → Targets"):
-                st.switch_page(PAGES["settings"])
-            if st.button("↺ Reset every filter", key="dash_reset", width="stretch"):
-                for k in [k for k in state if str(k).startswith("dash_") and k not in ("dash_facts",)]:
-                    del state[k]
-                st.rerun()
-            if st.button("→ Go to the reconciliation", key="dash_back", width="stretch"):
-                st.switch_page(PAGES["reconciliation"])
-        download_pop = b5.popover("⬇", width="stretch", help="Download this view: PDF or Excel")
-        share_pop = b6.popover("⇪", width="stretch", help="Share this view on Slack")
+                st.selectbox("Period", options, key=f"dash_period_{kind}", label_visibility="collapsed",
+                             format_func=lambda k: "📅 " + short_p(k) + (
+                                 "" if dashboard.is_complete(facts, kind, k, pick_banks) else " · partial"),
+                             width=160, help="The period shown")
+            st.markdown('<div class="dash-vs">vs</div>', unsafe_allow_html=True)
+            st.selectbox("Compared with", ["none"] + vs_options, key=vs_key, label_visibility="collapsed",
+                         format_func=lambda k: "No comparison" if isinstance(k, str) else short_p(k),
+                         width=160, help="The period it is compared with (or none)")
+            with st.popover("⚙", width="content", help="Currency, refresh, targets, reset, share on Slack"):
+                cur = _seg("Currency", ["All"] + found, "dash_cur",
+                           help="RWF or USD: every count follows that currency. All: every currency (amounts are always "
+                                "shown per currency, never added together)")
+                st.toggle("Partial periods", key="dash_partial",
+                          help="Also offer the periods whose reports are not all saved (e.g. a week that "
+                               "starts in a month with no report). Off: only complete periods.")
+                if st.button("🔄 Refresh", key="dash_refresh", width="stretch", help="Read the reports on Google Drive again"):
+                    state.history_index, state.dash_facts = None, {}
+                    if state.get("drive") is not None:
+                        state.drive.forget_folders()
+                    st.rerun()
+                if st.button("🎯 Change targets", key="dash_targets", width="stretch", help="Settings → Targets"):
+                    st.switch_page(PAGES["settings"])
+                if st.button("↺ Reset every filter", key="dash_reset", width="stretch"):
+                    for k in [k for k in state if str(k).startswith("dash_") and k not in ("dash_facts",)]:
+                        del state[k]
+                    st.rerun()
+                if st.button("→ Go to the reconciliation", key="dash_back", width="stretch"):
+                    st.switch_page(PAGES["reconciliation"])
+                st.divider()
+                st.markdown("**⇪ Share this view on Slack**")
+                share_pop = st.container()                 # filled below, once the figures are known
+            download_pop = None          # 24/10/2026: the ⬇ button is removed from the bar (each chart has its PDF)
+
     if not options:
-        hero_col.info(f"No complete {kinds[kind].lower()} with saved reports yet"
-                      + ("" if with_partial else " (switch on Partial, under the period, to see the incomplete ones)")
+        st.info(f"No complete {kinds[kind].lower()} with saved reports yet"
+                      + ("" if with_partial else " (switch on Partial periods, under ⚙, to see the incomplete ones)")
                       + ".")
         return
 
@@ -1871,7 +2061,7 @@ def dashboard_page():
     span = dashboard.describe(kind, first, last)
     span_before = dashboard.describe(kind, *before_span) if before_span and bef else ""
     if not sel:
-        hero_col.markdown(f'<div class="rh-empty">📊 No report in this view ({_esc(span)}).</div>',
+        st.markdown(f'<div class="rh-empty">📊 No report in this view ({_esc(span)}).</div>',
                           unsafe_allow_html=True)
         return
     now, before = dashboard.totals(sel, cur), (dashboard.totals(bef, cur) if bef else None)
@@ -1879,21 +2069,167 @@ def dashboard_page():
     bef_by = dashboard.by_bank(bef, cur, banks) if bef else {}
     scope_name = "All banks" if pick == "All" else engine.BANKS[pick].FULL_NAME
 
-    # ---- the main view: headline, key cards, charts, merchants, exceptions, needs attention (all from the figures)
-    tiles = dashboard.tiles(now, before, now_by, span_before)
+    # ---- the main view (22/10/2026): four key cards, then two rows of two charts; every figure from the reports
+    tiles = dashboard.tiles(now, before, now_by, span_before)          # for the Excel / Slack exports below
     gaps = dashboard.partial(sel, kind, first, last)
-    note = ""
-    if gaps:                                    # only when "Partial" is on: what this period is missing
-        note = " · this period is partial: " + "; ".join(
-            f"{engine.BANKS[c].NAME} {n} of {full} {unit}" for c, k, n, full, unit in gaps)
-    hero, grid = dashboard_view.view(facts, sel, bef, now, before, now_by, bef_by, kind, first, last, span,
-                                     span_before, scope_name, cur,
-                                     no_change="not compared" if mode == "none" else "no earlier report")
-    with hero_col:
-        st.html(hero)
-        st.markdown(f'<div class="dt-cover">Coverage: {_esc(dashboard.coverage_line(facts, banks=banks))}{_esc(note)}'
-                    + (f' · {_esc(no_compare)}' if no_compare else "") + "</div>", unsafe_allow_html=True)
-    st.html(grid)
+    ever = {f.bank for f in facts if f.bank in banks}
+    missing = [engine.BANKS[c].NAME for c in banks if c in ever and c not in {f.bank for f in sel}]
+    # under the bar: what the view shows, and what it is missing
+    st.markdown(f'<div class="dash-sub">Reconciliation results · <b>{_esc(scope_name)}</b> · {_esc(span)}'
+                + (f" vs {_esc(span_before)}" if span_before else "") + "</div>"
+                + (f'<div class="dash-miss">Not saved yet for {_esc(span)}: {_esc(", ".join(missing))}: '
+                   "the figures do not include them.</div>" if missing else "")
+                + (f'<div class="dash-miss">Partial: ' + _esc("; ".join(
+                    f"{engine.BANKS[c].NAME} {n} of {full} {unit}" for c, k, n, full, unit in gaps)) + "</div>"
+                   if gaps else "")
+                + (f'<div class="dash-miss">{_esc(no_compare)}</div>' if no_compare else ""),
+                unsafe_allow_html=True)
+    # ---- the follow-up after the report (Follow-up page): next to the report's figures, never inside them
+    fu_items, fu_dec = [], {}
+    try:
+        fu_items, fu_dec = followup_data(client, root)
+    except DriveError:
+        pass
+    p_end = dashboard.period_end(dashboard.period_key(pd.Timestamp(last if last is not None else first), kind), kind)
+    fu_start = pd.Timestamp(SETTINGS["followup"]["from"])
+    fu_days = int(SETTINGS["followup"]["days"])
+    fu_here = followup.in_period(fu_items, first, p_end, banks)
+    fu_sum = followup.summary(fu_here, fu_dec, days=fu_days)
+    fu = {"followed": p_end >= fu_start, "summary": fu_sum, "open_money": followup.money(fu_sum["open_amount"]),
+          "start": f"{fu_start:%d/%m/%Y}", "unit": kinds[kind].lower()}
+    kpis = dashboard_view.kpi_cards(now, before, fu)
+    st.html(kpis)
+
+    child = dashboard.children(facts, kind, first, last, cur, banks)
+    labels = [c["label"] for c in child]
+    part = [c["partial"] for c in child]
+    tlabels = [lab + (" (part)" if p else "") for lab, p in zip(labels, part)]     # the tables: partial periods named
+    per = {"year": "quarter", "quarter": "month", "month": "week", "week": "day"}[kind]
+    over = f"Per {per} · {span}"
+    star_note = (f'<div class="dc-note">* a {per} that is only partly in {_esc(span)}: only its part is counted</div>'
+                 if any(part) else "")
+    made = pd.Timestamp.now().strftime("%d %b %Y · %H:%M")
+    mcur = cur if cur != "All" else ("RWF" if "RWF" in now["currencies"] else (now["currencies"] or ["RWF"])[0])
+    mt, _ = dashboard.merchants(sel, bef, mcur)
+    with_data = sorted({engine.BANKS[f.bank].NAME for f in sel if f.merchants is not None and f.bank in engine.BANKS})
+    charts = [
+        ("payments", "Payments over time", over + " · processed transactions",
+         dashboard_view.lines(labels, [("Processed transaction", [c["processed"] for c in child], BRAND)], part,
+                              fill=True) + dashboard_view.chart_legend([("Processed transaction", BRAND)]) + star_note,
+         pd.DataFrame({"Period": tlabels, "Processed transaction": [c["processed"] for c in child],
+                       "Received notification": [c["received"] for c in child]})),
+        ("amount", "Amount overview", over + " · amount received",
+         dashboard_view.dual_bars(labels, [c["amounts"].get("RWF", 0.0) for c in child],
+                                  [c["amounts"].get("USD", 0.0) for c in child], part)
+         + dashboard_view.chart_legend([("RWF (left axis)", dashboard_view.TEAL), ("USD (right axis)", dashboard_view.USD_C)])
+         + star_note,
+         pd.DataFrame({"Period": tlabels, "RWF received": [round(c["amounts"].get("RWF", 0.0)) for c in child],
+                       "USD received": [round(c["amounts"].get("USD", 0.0), 2) for c in child]})),
+        ("exceptions", "Exceptions by type", over,
+         dashboard_view.lines(labels, [(n, [c[m] for c in child], col) for n, m, col in
+                                       (("SLA violated", "sla", dashboard_view.EXC["SLA violated"]),
+                                        ("Paid with other channel", "duplicate", dashboard_view.EXC["Paid with other channel"]),
+                                        ("Pending notification", "pending", dashboard_view.EXC["Pending notification"]))], part)
+         + dashboard_view.chart_legend(list(dashboard_view.EXC.items())) + star_note,
+         pd.DataFrame({"Period": tlabels, "SLA violated": [c["sla"] for c in child],
+                       "Paid with other channel": [c["duplicate"] for c in child],
+                       "Pending notification": [c["pending"] for c in child]})),
+        ("merchants", "Top merchants", f"{span} · {mcur} · " + (", ".join(with_data) if with_data else "no data"),
+         dashboard_view.merchant_bars(mt, mcur),
+         mt.head(5)[["Merchant", "Share %", "Transactions", "Amount"]].rename(
+             columns={"Share %": "Share of received notifications %", "Amount": f"Amount ({mcur})"}).round(
+             {"Share of received notifications %": 1, f"Amount ({mcur})": 0})),
+    ]
+    live = {   # on the screen: the same figures as interactive charts (they answer the cursor); None = HTML only
+        "payments": (dashboard_view.alt_lines(charts[0][4], [("Processed transaction", BRAND)], fill=True),
+                     star_note),
+        "amount": (dashboard_view.alt_dual_bars(charts[1][4]),
+                   dashboard_view.chart_legend([("RWF (left axis)", dashboard_view.TEAL),
+                                                ("USD (right axis)", dashboard_view.USD_C)]) + star_note),
+        "exceptions": (dashboard_view.alt_lines(charts[2][4], [(n, c) for n, c in dashboard_view.EXC.items()]),
+                       dashboard_view.chart_legend(list(dashboard_view.EXC.items())) + star_note)} if labels else {}
+    # ---- comparison mode (23/10/2026): this period against the one compared with, lined up by position (Week 1 with
+    #      Week 1); the same banks on both sides (like the cards)
+    if bef and before_span and labels:
+        cmp_banks = [b for b in banks if b in {f.bank for f in sel}]
+        child_b = dashboard.children(facts, kind, before_span[0], before_span[1], cur, cmp_banks)
+        n_pos = max(len(child), len(child_b))
+        pos = dashboard_view.position_labels(kind, n_pos)
+        val = lambda rows, i, f: (f(rows[i]) if i < len(rows) else None)   # a period with fewer weeks: no point
+        dates = lambda rows, i: (rows[i]["label"] if i < len(rows) else "–")
+        now_n, bef_n = span, span_before
+        p_tab = pd.DataFrame({"Position": pos,
+                              now_n: [val(child, i, lambda c: c["processed"]) for i in range(n_pos)],
+                              bef_n: [val(child_b, i, lambda c: c["processed"]) for i in range(n_pos)]})
+        p_tab["Change %"] = [round((a - b) / b * 100, 1) if a is not None and b else None
+                             for a, b in zip(p_tab[now_n].tolist(), p_tab[bef_n].tolist())]
+        p_tab[f"Weeks of {now_n}" if kind == "month" else f"In {now_n}"] = [dates(child, i) for i in range(n_pos)]
+        p_tab[f"Weeks of {bef_n}" if kind == "month" else f"In {bef_n}"] = [dates(child_b, i) for i in range(n_pos)]
+        cur_amt = state.get("dash_amt_cur") if state.get("dash_amt_cur") in ("RWF", "USD") else "RWF"
+        a_tab = pd.DataFrame({"Position": pos,
+                              now_n: [val(child, i, lambda c: round(c["amounts"].get(cur_amt, 0.0))) for i in range(n_pos)],
+                              bef_n: [val(child_b, i, lambda c: round(c["amounts"].get(cur_amt, 0.0))) for i in range(n_pos)]})
+        tb = dashboard.totals(bef, cur)
+        e_tab = pd.DataFrame({"Exception": list(dashboard_view.EXC),
+                              now_n: [now["sla"], now["duplicate"], now["pending"]],
+                              bef_n: [tb["sla"], tb["duplicate"], tb["pending"]]})
+        e_tab["Change %"] = [round((a - b) / b * 100, 1) if b else None for a, b in zip(e_tab[now_n], e_tab[bef_n])]
+        legend2 = lambda c: dashboard_view.chart_legend([(now_n, c), (f"{bef_n} (compared with)", dashboard_view.PREV)])
+        lined = f"lined up by {'day' if kind == 'week' else per} ({pos[0]} with {pos[0]})"
+        charts[0] = ("payments", "Payments over time", f"{now_n} vs {bef_n} · processed transactions · {lined}",
+                     dashboard_view.lines(pos, [(now_n, list(p_tab[now_n]), BRAND),
+                                                (bef_n, list(p_tab[bef_n]), dashboard_view.PREV)]) + legend2(BRAND),
+                     p_tab)
+        charts[1] = ("amount", "Amount overview", f"{now_n} vs {bef_n} · amount received in {cur_amt} · {lined}",
+                     dashboard_view.group_bars(pos, [(now_n, list(a_tab[now_n]), dashboard_view.TEAL),
+                                                     (bef_n, list(a_tab[bef_n]), dashboard_view.PREV)])
+                     + legend2(dashboard_view.TEAL), a_tab)
+        charts[2] = ("exceptions", "Exceptions by type", f"{now_n} vs {bef_n} · total of the period",
+                     dashboard_view.group_bars(list(dashboard_view.EXC), [(now_n, list(e_tab[now_n]), dashboard_view.BAD),
+                                                                          (bef_n, list(e_tab[bef_n]), dashboard_view.PREV)])
+                     + legend2(dashboard_view.BAD), e_tab)
+        charts[3] = (charts[3][0], charts[3][1], charts[3][2] + f" · change vs {bef_n}", charts[3][3],
+                     mt.head(5)[["Merchant", "Share %", "Transactions", "Before", "Change %", "Note"]].rename(
+                         columns={"Share %": "Share of received notifications %",
+                                  "Before": f"Transactions {bef_n}"}).round({"Share of received notifications %": 1,
+                                                                             "Change %": 1}))
+        live = {"payments": (dashboard_view.alt_compare_lines(p_tab, now_n, bef_n, BRAND), legend2(BRAND)),
+                "amount": (dashboard_view.alt_group_bars(a_tab, "Position", [(now_n, dashboard_view.TEAL),
+                                                                             (bef_n, dashboard_view.PREV)]),
+                           legend2(dashboard_view.TEAL)),
+                "exceptions": (dashboard_view.alt_group_bars(e_tab, "Exception", [(now_n, dashboard_view.BAD),
+                                                                                  (bef_n, dashboard_view.PREV)],
+                                                             horizontal=True), legend2(dashboard_view.BAD))}
+    for row in (charts[:2], charts[2:]):
+        cols = st.columns(2, gap="medium")
+        for col, (key, title, sub, chart, table) in zip(cols, row):
+            with col.container(border=True, key=f"dcard_{key}"):
+                h1, h2, h3 = st.columns([3.4, 1.9, 1.35], vertical_alignment="center")
+                h1.markdown(f'<div class="dc-t">{_esc(title)}</div><div class="dc-s">{_esc(sub)}</div>',
+                            unsafe_allow_html=True)
+                shown = h2.segmented_control(f"{title}: view", ["Chart", "Table"], default="Chart",
+                                             key=f"dash_view_{key}", label_visibility="collapsed") or "Chart"
+                if key == "amount" and bef and before_span and labels:   # comparing: one currency at a time
+                    st.segmented_control("Currency", ["RWF", "USD"], default="RWF", key="dash_amt_cur",
+                                         label_visibility="collapsed")
+                body = chart if shown == "Chart" else dashboard_view.table_html(table)
+
+                def card_pdf(title=title, sub=sub, body=body):
+                    """Made when clicked: exactly what the card shows (its chart or its table)."""
+                    return dashboard_view.pdf(dashboard_view.card_page(title, sub, scope_name, span, body, made))
+                h3.download_button("⬇ PDF", data=card_pdf, mime="application/pdf", key=f"dash_pdf_{key}",
+                                   file_name=f"{title.replace(' ', '_')}_{shown.lower()}_"
+                                             f"{re.sub(r'[^0-9A-Za-z]+', '_', span)}.pdf",
+                                   help=f"Download the {shown.lower()} shown as a PDF", width="stretch")
+                if shown == "Chart" and key in live:
+                    st.altair_chart(live[key][0], width="stretch")
+                    if live[key][1]:
+                        st.html(dashboard_view.STYLE_D + live[key][1])
+                else:
+                    st.html(body)
+    # (the Follow-up status chart was removed on 27/10/2026: the FOLLOW-UP card and the Follow-up page stay)
+    grid = kpis + dashboard_view.STYLE + "".join(f'<div class="dv-card"><h3>{_esc(t)}</h3><div class="dv-sub">{_esc(sb)}</div>{ch}</div>'
+                          for _, t, sb, ch, _ in charts)       # the page PDF (⬇ at the top) prints these blocks
 
     # what the downloads (PDF, Excel) cover: the periods up to the one shown
     base = "month" if kind == "custom" else kind
@@ -1936,42 +2272,214 @@ def dashboard_page():
         "highlights": [(i["kind"] if i["kind"] in ("good", "warn", "bad") else "info", f"{i['title']} — {i['detail']}")
                        for i in items] or [("good", "Every bank with a report is on target.")],
         "merchants": [], "merchants_missing": 0}
-    with download_pop:
-        st.caption(f"{scope_name} · {span}")
-        def dashboard_pdf_bytes():
-            """Made when the button is clicked: the blocks on the screen (the same HTML, so the same live numbers)
-            printed by Chrome; without Chrome, the earlier PDF layout of the same figures."""
-            page = dashboard_view.print_page(grid, scope_name, span, span_before,
-                                             now["currencies"] if cur == "All" else [cur],
-                                             pd.Timestamp.now().strftime("%d %b %Y · %H:%M"))
+    if download_pop is not None:                  # (the ⬇ menu: not shown since 24/10/2026)
+        with download_pop:
+            st.caption(f"{scope_name} · {span}")
+            def dashboard_pdf_bytes():
+                """Made when the button is clicked: the blocks on the screen (the same HTML, so the same live numbers)
+                printed by Chrome; without Chrome, the earlier PDF layout of the same figures."""
+                page = dashboard_view.print_page(grid, scope_name, span, span_before,
+                                                 now["currencies"] if cur == "All" else [cur],
+                                                 pd.Timestamp.now().strftime("%d %b %Y · %H:%M"))
+                try:
+                    return dashboard_view.pdf(page)
+                except (RuntimeError, OSError, subprocess.SubprocessError):
+                    return pdf_report.dashboard_pdf(export)
             try:
-                return dashboard_view.pdf(page)
-            except (RuntimeError, OSError, subprocess.SubprocessError):
-                return pdf_report.dashboard_pdf(export)
-        try:
-            st.download_button("⬇ PDF for the manager", data=dashboard_pdf_bytes, type="primary",
-                               file_name=f"Reports_dashboard_{'all_banks' if pick == 'All' else pick}_"
-                                         f"{re.sub(r'[^0-9A-Za-z]+', '_', span)}.pdf",
-                               mime="application/pdf", width="stretch", key="dash_pdf")
-        except Exception as err:                     # the page stays usable even if the PDF cannot be made
-            st.error(f"The PDF could not be made: {err}", icon="⚠️")
-        buf = io.BytesIO()
-        with pd.ExcelWriter(buf, engine="openpyxl") as xw:
-            pd.DataFrame(tiles, columns=["Figure", "Value", "Detail", "Status"]).to_excel(xw, sheet_name="Key figures", index=False)
-            sc.drop(columns="code").to_excel(xw, sheet_name="Bank scorecard", index=False)
-            tr_all.drop(columns=["code"], errors="ignore").to_excel(xw, sheet_name=f"Trend by {unit}", index=False)
-            pd.DataFrame(items).drop(columns=["score"], errors="ignore").to_excel(xw, sheet_name="Needs attention", index=False)
-            for c in found:
-                dashboard.merchants(sel, bef, c)[0].to_excel(xw, sheet_name=f"Merchants {c}", index=False)
-            dashboard.coverage(facts, kind, first, end_key, banks).to_excel(xw, sheet_name="Data behind", index=False)
-        st.download_button("⬇ Excel of this view", data=buf.getvalue(), mime=XLSX_MIME, width="stretch",
-                           file_name=f"Reports_dashboard_{re.sub(r'[^0-9A-Za-z]+', '_', span)}.xlsx", key="dash_xlsx")
+                st.download_button("⬇ PDF for the manager", data=dashboard_pdf_bytes, type="primary",
+                                   file_name=f"Reports_dashboard_{'all_banks' if pick == 'All' else pick}_"
+                                             f"{re.sub(r'[^0-9A-Za-z]+', '_', span)}.pdf",
+                                   mime="application/pdf", width="stretch", key="dash_pdf")
+            except Exception as err:                     # the page stays usable even if the PDF cannot be made
+                st.error(f"The PDF could not be made: {err}", icon="⚠️")
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as xw:
+                pd.DataFrame(tiles, columns=["Figure", "Value", "Detail", "Status"]).to_excel(xw, sheet_name="Key figures", index=False)
+                sc.drop(columns="code").to_excel(xw, sheet_name="Bank scorecard", index=False)
+                tr_all.drop(columns=["code"], errors="ignore").to_excel(xw, sheet_name=f"Trend by {unit}", index=False)
+                pd.DataFrame(items).drop(columns=["score"], errors="ignore").to_excel(xw, sheet_name="Needs attention", index=False)
+                for c in found:
+                    dashboard.merchants(sel, bef, c)[0].to_excel(xw, sheet_name=f"Merchants {c}", index=False)
+                dashboard.coverage(facts, kind, first, end_key, banks).to_excel(xw, sheet_name="Data behind", index=False)
+            st.download_button("⬇ Excel of this view", data=buf.getvalue(), mime=XLSX_MIME, width="stretch",
+                               file_name=f"Reports_dashboard_{re.sub(r'[^0-9A-Za-z]+', '_', span)}.xlsx", key="dash_xlsx")
     with share_pop:
         text = "\n".join([f"Hello Team, here is the reconciliation dashboard for {span}"
                           + (f" (vs {span_before})" if span_before else "") + f" · {scope_name}", ""]
                          + [f"• {a.title()}: {b} ({c})" for a, b, c, _ in tiles] + ["", "• Needs attention:"]
                          + ([f"   • {i['title']} — {i['detail']}" for i in items[:5]] or ["   • Nothing: all on target"]))
         slack_send_card(text, f"dashboard {span} {scope_name}", None, key="dash_slack", drive_hint=False)
+
+
+# =====================================================================================================================
+# 8a. FOLLOW-UP (22/10/2026): the pending and paid-twice items of the saved reports, and what finally happened to them
+# =====================================================================================================================
+def followup_data(client, root, refresh: bool = False):
+    """(items, decisions) of the follow-up: the items of the saved reports since the start date (Settings), read once
+    (kept for the session and on this computer, like the dashboard's figures), and the decisions shared on Drive."""
+    start = pd.Timestamp(SETTINGS["followup"]["from"])
+    cached = state.get("history_index")
+    if refresh or not cached or cached[0] != root:
+        with st.spinner("Reading Reconciliation Reports on Google Drive…"):
+            state.history_index = (root, report_history.drive_index(client, root))
+            state.history_index_at = pd.Timestamp.now()
+    reports = followup.latest_reports(state.history_index[1].records, start)
+    cache = state.setdefault("fu_items", {})
+    key = facts_cache.key
+    todo = [r for r in reports if key(r) not in cache]
+    if todo:
+        stored = followup.cache_load(FOLLOWUP_CACHE)
+        for r in todo:
+            if key(r) in stored:
+                cache[key(r)] = stored[key(r)]
+        todo = [r for r in todo if key(r) not in cache]
+    if todo:
+        with st.spinner(f"Reading {len(todo)} report{'s' if len(todo) > 1 else ''} from Google Drive…"):
+            data = report_history.download_many(client, todo)
+            fresh = {}
+            for r in todo:
+                content = data.get(r.file_id)
+                if isinstance(content, Exception) or content is None:
+                    continue                                # tried again next time
+                p = report_history.parse_name(r.name)
+                path = state.session_folder.file(p["kind"], r.name)
+                try:
+                    path.write_bytes(content)
+                    cache[key(r)] = fresh[key(r)] = followup.items_from_report(path, r, p["code"])
+                finally:
+                    state.session_folder.remove(path)
+            followup.cache_save(FOLLOWUP_CACHE, fresh, keep=[key(r) for r in reports])
+    items = followup.collect(reports, start, lambda r: cache.get(key(r), []))
+    if refresh or "fu_decisions" not in state:
+        state.fu_decisions, state.fu_file = followup.load_decisions(client, root)
+    return items, state.fu_decisions
+
+
+def followup_page():
+    st.markdown("<style>.block-container {max-width: 1600px;}</style>", unsafe_allow_html=True)
+    client, problem = drive_client()
+    root = config.load().reports_root_folder_id
+    if client is None or not root:
+        st.markdown(f'<div class="rh-empty">☁️ {_esc(problem or "No reports folder is set (reports_root_folder_id in drive_settings.toml).")}'
+                    "<br>The follow-up reads the saved reports and keeps its decisions on Google Drive.</div>",
+                    unsafe_allow_html=True)
+        return
+    days, start = int(SETTINGS["followup"]["days"]), pd.Timestamp(SETTINGS["followup"]["from"])
+    t1, t2 = st.columns([4, 1], vertical_alignment="center")
+    t1.markdown(f'<div class="dash-sub">What happened to the <b>pending</b> and <b>paid twice</b> items of the saved '
+                f'reports, after the report · reports from <b>{start:%d/%m/%Y}</b> (Settings) · overdue after '
+                f'<b>{days} days</b></div>', unsafe_allow_html=True)
+    refresh = t2.button("🔄 Refresh", key="fu_refresh", width="stretch", help="Read the reports and the decisions again")
+    try:
+        items, decisions = followup_data(client, root, refresh)
+    except DriveError as err:
+        st.error(str(err), icon="⚠️")
+        return
+    if not items:
+        st.markdown(f'<div class="rh-empty">✅ No pending or paid-twice item in the reports saved since '
+                    f'{start:%d/%m/%Y}.</div>', unsafe_allow_html=True)
+        return
+    sm = followup.summary(items, decisions, days=days)
+    cards = [("OPEN", f"{sm['open']:,}", f"{sm['by_type']['Pending'][0]:,} pending · {sm['by_type']['Paid twice'][0]:,} "
+                                         "paid twice"),
+             ("AMOUNT OPEN", followup.money(sm["open_amount"]).replace(" · ", "<br>"), "still to follow up"),
+             ("CHECKED", f"{sm['resolved']:,} of {sm['total']:,}",
+              f"{sm['resolved'] / sm['total'] * 100:.0f}% checked after the report" if sm["total"] else ""),
+             ("OVERDUE", f"{sm['overdue']:,}", f"open for more than {days} days · oldest {sm['oldest']} days")]
+    st.html(dashboard_view.STYLE_D + '<div class="dk">' + "".join(
+        f'<div class="dk-c"><div class="dk-h"><span>{a}</span></div><div class="dk-v{" dk-v2" if "<br>" in b else ""}'
+        f'{" dk-red" if a == "OVERDUE" and sm["overdue"] else ""}">{b}</div><div class="dk-s">{c}</div></div>'
+        for a, b, c in cards) + "</div>")
+
+    # ---- the list: filters, then one row per item (the decision and the comment can be changed)
+    f1, f2, f3 = st.columns([1.4, 1.4, 2.2])
+    show = f1.segmented_control("Show", ["Open", "Resolved", "All"], default="Open", key="fu_show") or "Open"
+    kinds = f2.segmented_control("Type", ["All", "Pending", "Paid twice"], default="All", key="fu_type") or "All"
+    banks_here = sorted({i["bank"] for i in items}, key=lambda c: list(engine.BANKS).index(c) if c in engine.BANKS else 99)
+    pick = f3.selectbox("Bank", ["All"] + banks_here, key="fu_bank",
+                        format_func=lambda c: "All banks" if c == "All" else engine.bank_name(c))
+    rows = [i for i in items
+            if (show == "All" or (show == "Open") == (not decisions.get(i["key"], {}).get("decision")))
+            and (kinds == "All" or i["type"] == kinds) and (pick == "All" or i["bank"] == pick)]
+    if not rows:
+        st.caption("Nothing in this view.")
+    else:
+        # IremboPay checkout, in the background: a pending invoice that is now Paid is suggested "Received later"
+        checker = state.get("checkout")
+        if checker is None:
+            checker = state.checkout = irembopay_checkout.Checker()
+        pend = [i["invoice"] for i in rows if i["type"] == "Pending" and i["invoice"]]
+        checker.add(pend)
+        d_done, d_total, _ = checker.progress(pend) if pend else (0, 0, 0)
+        table = pd.DataFrame([{
+            "_key": i["key"],
+            "Status": ("✅ Resolved" if decisions.get(i["key"], {}).get("decision")
+                       else f"{'🔴' if followup.days_open(i) > days else '🟡'} Open {followup.days_open(i)} days"),
+            "Bank": engine.bank_name(i["bank"]), "Type": i["type"], "Invoice": i["invoice"] or "(no invoice)",
+            "Amount": i["amount"], "Currency": i["currency"],
+            "Paid on": i["paid_on"].date() if i["paid_on"] is not None else None, "Merchant": i["merchant"],
+            "IremboPay says": checker.answer(i["invoice"]) if i["type"] == "Pending" and i["invoice"] else "",
+            "Decision": decisions.get(i["key"], {}).get("decision", ""),
+            "Comment": decisions.get(i["key"], {}).get("comment", ""),
+            "Decided by": (lambda x: f"{x.get('by', '')} · {x.get('at', '')}" if x else "")(decisions.get(i["key"])),
+            "Report": i["report"]} for i in rows])
+        suggest = table["Decision"].eq("") & table["Type"].eq("Pending") & table["IremboPay says"].eq("Paid")
+        table.loc[suggest, "Decision"] = "Received later"      # a suggestion: saved only when you click Save
+        if d_total and d_done < d_total:
+            st.caption(f"🔎 IremboPay check: {d_done} of {d_total} pending invoices checked… (refresh to see more)")
+        if suggest.any():
+            st.caption(f"💡 {int(suggest.sum())} pending invoice(s) are now **Paid** in IremboPay: "
+                       "\"Received later\" is filled in for you. Check them, then Save.")
+        DASH = "—"                                       # "still open" in the Decision column
+        options = [DASH] + sorted({d for v in followup.DECISIONS.values() for d in v})
+        table["Decision"] = table["Decision"].replace("", DASH)
+        edited = st.data_editor(
+            table.drop(columns="_key"), hide_index=True, width="stretch", key=f"fu_editor_{show}_{kinds}_{pick}",
+            disabled=[c for c in table.columns if c not in ("Decision", "Comment", "_key")],
+            column_config={
+                "Amount": st.column_config.NumberColumn("Amount", format="localized"),
+                "Paid on": st.column_config.DateColumn("Paid on", format="DD/MM/YYYY"),
+                "Decision": st.column_config.SelectboxColumn(
+                    "Decision", options=options, width="medium",
+                    help="Pending: Received later · Refunded · Not an Irembo payment. Paid twice: Refunded · "
+                         "Kept / used for another invoice · Bank error reversed. Empty = still open."),
+                "Comment": st.column_config.TextColumn("Comment", width="medium"),
+                "IremboPay says": st.column_config.TextColumn("IremboPay says", help="IremboPay checkout, now")})
+        edited["_key"] = table["_key"].values
+        changes, bad = {}, []
+        for (_, new), (_, old) in zip(edited.iterrows(), table.iterrows()):
+            dec, com = str(new["Decision"] or "").replace(DASH, ""), str(new["Comment"] or "")
+            before = decisions.get(new["_key"], {})
+            if dec and dec not in followup.DECISIONS[new["Type"]]:
+                bad.append(f"{new['Invoice']}: \"{dec}\" is not a choice for a {new['Type'].lower()} item")
+            elif dec != before.get("decision", "") or (dec and com != before.get("comment", "")):
+                changes[new["_key"]] = {"decision": dec, "comment": com}
+        for b in bad:
+            st.error(b, icon="⚠️")
+        c1, c2 = st.columns([1, 3])
+        if c1.button(f"💾 Save {len(changes)} decision{'s' if len(changes) != 1 else ''}", type="primary",
+                     key="fu_save", disabled=not changes or bool(bad), width="stretch",
+                     help="Saved on Google Drive, next to the reports: everyone sees the same"):
+            try:
+                with st.spinner("Saving on Google Drive…"):
+                    state.fu_decisions = followup.save_decisions(client, root, changes, current_user())
+                state.toast = f"{len(changes)} follow-up decision{'s' if len(changes) != 1 else ''} saved"
+                st.rerun()
+            except DriveError as err:
+                st.error(str(err), icon="⚠️")
+        c2.caption("Your decisions are saved only when you click Save. They are shared on Google Drive "
+                   f"(\"{followup.STORE_NAME}\" in Reconciliation Reports).")
+
+    # ---- the reminder: sent when someone clicks (the app cannot send on its own)
+    with st.container(border=True):
+        st.markdown('<div class="card-title">📣 Follow-up reminder</div>', unsafe_allow_html=True)
+        slack_send_card(followup.reminder_text(items, decisions, days), f"follow-up {pd.Timestamp.now():%Y-%m-%d}",
+                        None, key="fu_slack", drive_hint=False, label="📣 Send follow-up reminder")
+
+
+if PAGE == "followup":
+    followup_page()
+    st.stop()
 
 
 if PAGE == "dashboard":
@@ -2239,16 +2747,20 @@ def bank_management_page():
                 day_col = b.COLUMNS["payment_date"]
                 if engine.option(b, "SLA_DAYS_SETTING", True):
                     now_days = app_settings.sla_days(SETTINGS, b)
-                    new_days = st.number_input(f"SLA: days allowed between the bank {day_col} and IremboPay paid_at",
-                                               0, app_settings.SLA_DAYS_MAX, now_days, key=f"bm_sla_{code}",
+                    unit = app_settings.sla_unit(b)
+                    new_days = st.number_input(f"SLA: {unit} allowed between the bank {day_col} and IremboPay paid_at",
+                                               0, app_settings.sla_max(b), now_days, key=f"bm_sla_{code}",
                                                disabled=not app_settings.can_edit(role),
-                                               help=f"0 = paid_at must be on the same day as the bank {day_col}. "
-                                                    "Used by every reconciliation of this bank from now on.")
+                                               help=(f"0 = paid_at must be on the same day as the bank {day_col}. "
+                                                     if unit == "days" else
+                                                     f"Counted in whole minutes: 1 = paid_at in the same minute as the "
+                                                     f"bank {day_col} or the next one; more = SLA violated. ")
+                                                    + "Used by every reconciliation of this bank from now on.")
                     if app_settings.can_edit(role) and st.button("Save", type="primary", key=f"bm_save_{code}",
                                                                   disabled=new_days == now_days):
                         try:
                             app_settings.set_sla_days(b, new_days, user)
-                            state.toast = f"{b.NAME}: SLA days saved ({new_days})"
+                            state.toast = f"{b.NAME}: SLA {unit} saved ({new_days})"
                             st.rerun()
                         except app_settings.SettingsError as err:
                             st.error(str(err), icon="⚠️")
@@ -2312,6 +2824,57 @@ def settings_page():
                 st.error(str(err), icon="⚠️")
         st.markdown("**Changes**")
         history_table("Target")
+    # ---- public holidays: a payment made on a weekend or a holiday is posted on the next working day
+    with st.container(border=True):
+        st.markdown('<div class="card-title">📅 Public holidays</div>', unsafe_allow_html=True)
+        st.caption("A payment made on a weekend or a public holiday is posted on the next working day. When a period "
+                   "ends on one, step 3 asks for the statement of the next working day (I&M), e.g. a week ending "
+                   "Sunday 05/04 needs Wednesday 08/04 (Easter Monday 06/04 and 07/04 are holidays). Easter and the Eid dates "
+                   "change every year: "
+                   "check them.")
+        hol = pd.DataFrame(SETTINGS["holidays"] or [], columns=["date", "name"])
+        hol["date"] = pd.to_datetime(hol["date"], errors="coerce")
+        edited = st.data_editor(hol, key="set_holidays", hide_index=True, width="stretch",
+                                num_rows="dynamic" if app_settings.can_edit(role) else "fixed",
+                                disabled=not app_settings.can_edit(role),
+                                column_config={"date": st.column_config.DateColumn("Date", format="DD/MM/YYYY",
+                                                                                   required=True),
+                                               "name": st.column_config.TextColumn("Holiday", width="large")})
+        rows = [{"date": f"{d:%Y-%m-%d}" if pd.notna(d) else "", "name": n or ""}
+                for d, n in zip(pd.to_datetime(edited["date"], errors="coerce"), edited["name"])]
+        changed = app_settings._clean_holidays(rows) != SETTINGS["holidays"]
+        if app_settings.can_edit(role) and st.button("Save holidays", type="primary", key="set_holidays_save",
+                                                     disabled=not changed):
+            try:
+                app_settings.set_holidays(rows, user)
+                state.toast = "Public holidays saved"
+                st.rerun()
+            except app_settings.SettingsError as err:
+                st.error(str(err), icon="⚠️")
+        st.markdown("**Changes**")
+        history_table("Public holidays")
+    # ---- follow-up: the reports followed up and the days before an open item is overdue
+    with st.container(border=True):
+        st.markdown('<div class="card-title">📋 Follow-up</div>', unsafe_allow_html=True)
+        st.caption("The Follow-up page lists the pending and paid-twice items of the reports whose period starts on or "
+                   "after this date; an item still open after this many days is overdue (red, and in the reminder).")
+        fu = SETTINGS["followup"]
+        c1, c2 = st.columns(2)
+        fu_from = c1.date_input("Follow the reports from", pd.Timestamp(fu["from"]).date(), key="set_fu_from",
+                                format="DD/MM/YYYY", disabled=not app_settings.can_edit(role))
+        fu_days = c2.number_input("Overdue after (days)", 1, 90, int(fu["days"]), key="set_fu_days",
+                                  disabled=not app_settings.can_edit(role))
+        changed = f"{fu_from:%Y-%m-%d}" != fu["from"] or int(fu_days) != int(fu["days"])
+        if app_settings.can_edit(role) and st.button("Save follow-up", type="primary", key="set_fu_save",
+                                                     disabled=not changed):
+            try:
+                app_settings.set_followup(f"{fu_from:%Y-%m-%d}", int(fu_days), user)
+                state.toast = "Follow-up settings saved"
+                st.rerun()
+            except app_settings.SettingsError as err:
+                st.error(str(err), icon="⚠️")
+        st.markdown("**Changes**")
+        history_table("Follow-up")
     # ---- who may change settings
     with st.container(border=True):
         st.markdown('<div class="card-title">👥 Access</div>', unsafe_allow_html=True)
@@ -2321,7 +2884,7 @@ def settings_page():
         editors = SETTINGS["editors"]
         if role == "admin":
             text = st.text_area("Editors (one Google account per line)", "\n".join(editors), key="set_editors",
-                                help="They can change the targets and the SLA days")
+                                help="They can change the targets, the SLA days and the public holidays")
             new = [e for e in text.replace(",", "\n").splitlines() if e.strip()]
             if st.button("Save editors", type="primary", key="set_editors_save",
                          disabled=sorted(e.strip().lower() for e in new) == editors):
@@ -2354,8 +2917,20 @@ if PAGE == "settings":
 # ---- step 5, every bank: the IremboPay checkout check (integrations/irembopay_checkout.py)
 CHECKOUT_BANKS = set(engine.BANKS)           # the banks whose not-found invoices are looked up on IremboPay: all
 CHECK_COL = "IremboPay check"
+CREDITED_AGAIN = "Invoice credited again"    # start of the review reason of an extra credit (banks/bpr.py)
+
+
+def _fmt_when(v) -> str:
+    """A statement date for a read-only cell (dd/mm/yyyy, with hh:mm when it has a time); blank when unknown.
+    Text dates are day first (05/10/2026 = 5 October), as on the I&M and Bank of Africa statements."""
+    text = str(v or "").strip()
+    day_first = bool(pd.Series([text]).str.match(r"^\d{1,2}/\d{1,2}/\d{4}").iloc[0])
+    t = pd.to_datetime(v, errors="coerce", dayfirst=day_first)
+    if pd.isna(t):
+        return ""
+    return f"{t:%d/%m/%Y}" if t == t.normalize() else f"{t:%d/%m/%Y %H:%M}"
 # what an answer fills in an empty Report table cell: (Report table, payment status in the report; "" = the usual)
-CHECK_FILL = {"Paid": ("Paid with other channel", ""), "Expired": ("Pending notification", "EXPIRED"),
+CHECK_FILL = {"Paid": ("Paid with other channel", ""), "Expired": ("Pending notification", "NEW"),
               "Open, not paid yet": ("Pending notification", "NEW")}     # "Not an IremboPay invoice": left empty
 
 
@@ -2524,7 +3099,7 @@ elif state.step == 1:
             made_at = pd.Timestamp.now()            # made once: the file downloaded is the one saved on Drive
             with st.spinner(f"Looking for the {bank.NAME} {period.previous().name} report…"):
                 previous, compared_with, problem = previous_counts()
-            state.no_tx_mem = {"name": f"{bank.CODE}{engine.REPORT_SUFFIX}{period.label}.xlsx", "made_at": made_at,
+            state.no_tx_mem = {"name": engine.report_path(Path("."), period, bank).name, "made_at": made_at,
                                "xlsx": engine.no_transaction_excel(period, bank, made_at, previous),
                                "previous": previous, "compared_with": compared_with, "problem": problem}
             state.no_tx_drive = None
@@ -2551,14 +3126,33 @@ elif state.step == 2:
     st.markdown(f'<div class="card-title">② Upload the files for {period.name}</div>', unsafe_allow_html=True)
 
     # ---- the two cards; each new file is read at once and listed below
-    u1, u2 = st.columns(2)
+    u1, u2 = st.columns(2, vertical_alignment="top")
     with u1.container(border=True, key="up_bank_card"):        # 1. bank statements: from this computer
         st.markdown(f'<div class="up-head"><div class="up-tile">{UP_SVG["bank"]}</div><div>'
                     f'<div class="up-title">1. Bank statement</div><div class="up-sub">{_esc(bank.FULL_NAME)}</div>'
                     f'</div></div>', unsafe_allow_html=True)
+        bank_src, from_drive_bank = "This computer", []
+        if engine.option(bank, "DRIVE_STATEMENTS", ""):            # Ecobank: Google Drive or this computer
+            if state.get("bank_source_of") != bank.CODE:            # Google Drive first when it is set up
+                state.bank_source = ("Google Drive" if drive_client()[0] is not None
+                                     and getattr(config.load(), bank.DRIVE_STATEMENTS, "") else "This computer")
+                state.bank_source_of = bank.CODE
+            with st.container(horizontal=True, vertical_alignment="center", gap="small", key="bank_src_row"):
+                bank_src = st.segmented_control("Bank statements from", ["Google Drive", "This computer"],
+                                                key="bank_source", label_visibility="collapsed",
+                                                width="stretch") or "Google Drive"
+                # read the Drive folder again (e.g. after a file was added there): an icon next to the source
+                if bank_src == "Google Drive" and st.button("", icon=":material/refresh:", key="drive_stmt_again",
+                                                            type="tertiary", help="Read the Google Drive folder again"):
+                    state.drive_stmt_key = None
+                    st.rerun()
+            if bank_src == "Google Drive":
+                drive_end = need_to + pd.Timedelta(days=1 if engine.option(bank, "DAY_AFTER_RECOMMENDED", False) else 0)
+                from_drive_bank = statements_from_drive(drive_end)
         bank_files = sorted((f for f in acc if f.kind == "bank"), key=lambda x: (x.currency != "RWF", x.currency, x.first))
         if bank_files:                 # the files added fill the upload area: one card each, ✕ removes it
-            with st.container(height=380, border=False, key="up_bank_files"):
+            # as tall as the files; a scroll only past 8 files (26/10/2026: no empty space)
+            with st.container(height=380 if len(bank_files) > 8 else "content", border=False, key="up_bank_files"):
                 for row in range(0, len(bank_files), 2):
                     for col, f in zip(st.columns(2, gap="small"), bank_files[row:row + 2]):
                         with col.container(border=True, key=f"upf_{f.digest}"):
@@ -2567,8 +3161,9 @@ elif state.step == 2:
                             cur_cls = "usd" if f.currency == "USD" else "rwf"
                             st.markdown(f'<div class="upf" title="{_esc(f.name)}"><div class="upf-ic {cur_cls}">'
                                         f'{_esc(f.name.rsplit(".", 1)[-1].upper()[:4])}</div><div class="upf-t">'
-                                        f'<div class="upf-d">{days}</div><div class="upf-n"><span class="upf-c {cur_cls}">'
-                                        f'{_esc(f.currency or "")}</span> {f.rows:,} rows</div></div></div>',
+                                        f'<div class="upf-d">{days}</div><div class="upf-n">'
+                                        + (f'<span class="upf-c {cur_cls}">{_esc(f.currency)}</span> ' if f.currency else "")
+                                        + f'{f.rows:,} rows</div></div></div>',
                                         unsafe_allow_html=True)
                             if st.button("✕", key=f"upf_x_{f.digest}", type="tertiary"):
                                 state.files.pop(f.digest, None)
@@ -2578,24 +3173,32 @@ elif state.step == 2:
             st.markdown(f'<div class="upf-foot">{len(bank_files)} file{"s" if len(bank_files) != 1 else ""}'
                         + (" · scroll to see them all" if len(bank_files) > 10 else "") + " · ✕ removes one</div>",
                         unsafe_allow_html=True)
-        else:
+        elif bank_src == "This computer":
             # the upload area on its own: it grows so this card has no empty space under its text (section 3 CSS)
             st.markdown(f'<div class="up-drop up-drop-fill">{UP_SVG["file"]}<div class="up-drop-title">Upload bank file'
                         f'</div><div class="up-drop-sub">{"Excel" if set(bank.FILE_TYPES) <= {"xls", "xlsx"} else "Bank"}'
                         f' format · {types}</div></div>', unsafe_allow_html=True)
-        bank_up = st.file_uploader(f"{bank.NAME} bank files ({types})", type=bank.FILE_TYPES,
-                                   accept_multiple_files=True, key=f"bank_{state.uploader_round}",
-                                   label_visibility="collapsed")
+        bank_up = (st.file_uploader(f"{bank.NAME} bank files ({types})", type=bank.FILE_TYPES,
+                                    accept_multiple_files=True, key=f"bank_{state.uploader_round}",
+                                    label_visibility="collapsed") if bank_src == "This computer" else None)
         help_lines = [f"Upload the {' and '.join(bank.CURRENCIES) + ' ' if per_currency else ''}statements "
                       f"covering <b>{period.start:%d/%m} to {need_to:%d/%m/%Y}</b>."]
         if monday is not None:
-            help_lines.append(f"Include <b>Monday {monday:%d/%m}</b>: late weekend payments are posted on Monday.")
+            closed = engine.closed_days_before(monday)
+            hol = [engine.HOLIDAYS[d] for d in closed if d in engine.HOLIDAYS]
+            help_lines.append(f"Include <b>{monday:%A %d/%m}</b>: payments of the "
+                              + (f"holiday ({', '.join(hol)})" if hol and len(hol) == len(closed)
+                                 else "weekend and holiday" if hol else "weekend")
+                              + " are posted on the next working day.")
         if day_before:
             help_lines.append(f"Recommended: the {day_before} statement of <b>{period.day_before:%d/%m/%Y}</b> "
                               "(the day before).")
+        if engine.option(bank, "DAY_AFTER_RECOMMENDED", False):
+            help_lines.append(f"Recommended: the statement of <b>{period.last_day + pd.Timedelta(days=1):%d/%m/%Y}</b> "
+                              "(the day after: late evening payments are booked the next morning).")
         # once files are added, only their cards and the button stay (an empty block keeps the button's place, so
         # it stays level with "Add selected file" of the other card)
-        st.markdown(f'<div class="up-help">{"<br>".join(help_lines) if not bank_files else ""}</div>',
+        st.markdown(f'<div class="up-help">{"<br>".join(help_lines) if not bank_files and bank_src == "This computer" else ""}</div>',
                     unsafe_allow_html=True)
 
     pay_up, from_drive = None, None
@@ -2609,20 +3212,41 @@ elif state.step == 2:
         source = st.segmented_control("IremboPay file from", ["Google Drive", "This computer"], key="pay_source",
                                       label_visibility="collapsed") or "Google Drive"
         if source == "This computer":
-            st.markdown(f'<div class="up-drop">{UP_SVG["file"]}<div class="up-drop-title">Upload IremboPay file</div>'
-                        f'<div class="up-drop-sub">{pay_label.replace(".", "").upper()} format · {pay_label}</div>'
-                        '</div>', unsafe_allow_html=True)
+            pay_files = sorted((f for f in acc if f.kind == "payments"), key=lambda x: x.first)
+            if pay_files:              # the files added fill the upload area: one card each, ✕ removes it
+                with st.container(height=380 if len(pay_files) > 4 else "content", border=False, key="up_pay_files"):
+                    for f in pay_files:                     # usually one file: a full-width card each
+                        with st.container(border=True, key=f"upf_{f.digest}"):
+                            days = (f"{f.first:%d/%m}" if f.first.date() == f.last.date()
+                                    else f"{f.first:%d/%m} – {f.last:%d/%m}")
+                            st.markdown(f'<div class="upf" title="{_esc(f.name)}"><div class="upf-ic pay">'
+                                        f'{_esc(f.name.rsplit(".", 1)[-1].upper()[:4] if "." in f.name else "CSV")}'
+                                        f'</div><div class="upf-t"><div class="upf-d">{days}</div><div class="upf-n">'
+                                        f'<span class="upf-c pay">IremboPay</span> {f.rows:,} rows</div></div>'
+                                        '</div>', unsafe_allow_html=True)
+                            if st.button("✕", key=f"upf_x_{f.digest}", type="tertiary"):
+                                state.files.pop(f.digest, None)
+                                state.result = None
+                                state.uploader_round += 1
+                                st.rerun()
+                st.markdown(f'<div class="upf-foot">{len(pay_files)} file{"s" if len(pay_files) != 1 else ""}'
+                            " · ✕ removes one</div>", unsafe_allow_html=True)
+            else:
+                st.markdown(f'<div class="up-drop up-drop-fill">{UP_SVG["file"]}<div class="up-drop-title">Upload '
+                            f'IremboPay file</div><div class="up-drop-sub">{pay_label.replace(".", "").upper()} format'
+                            f' · {pay_label}</div></div>', unsafe_allow_html=True)
             pay_up = st.file_uploader(f"IremboPay payment file ({pay_label})", type=pay_types,
                                       accept_multiple_files=True, key=f"pay_{state.uploader_round}",
                                       label_visibility="collapsed")
-            st.markdown(f'<div class="up-help">The IremboPay payment file for <b>{period.name}</b>.</div>',
-                        unsafe_allow_html=True)
+            st.markdown(f'<div class="up-help">{"" if pay_files else f"The IremboPay payment file for <b>{period.name}</b>."}'
+                        '</div>', unsafe_allow_html=True)
         else:
             from_drive = irembopay_from_drive(pay_types)
 
     with st.container(border=bool(acc or rej or state.read_errors)):   # what was added, and what was refused
         new = ([(u.name, u.getvalue(), "bank") for u in bank_up or []]
-               + [(u.name, u.getvalue(), "payments") for u in pay_up or []] + ([from_drive] if from_drive else []))
+               + [(u.name, u.getvalue(), "payments") for u in pay_up or []] + ([from_drive] if from_drive else [])
+               + from_drive_bank)
         if new:
             with st.spinner("Reading the files…"):
                 for name, content, kind in new:
@@ -2716,8 +3340,10 @@ elif state.step == 3:
     chk = engine.check_period(period, acc, bank)
     with st.container(border=True):
         st.markdown(f'<div class="card-title">③ Check: {period.name}</div>', unsafe_allow_html=True)
-        for ok, text in chk.lines:
-            st.markdown(f"{'✅' if ok else '❌'} {text}")
+        # one compact list (26/10/2026: no empty space between the lines)
+        st.markdown("<div class='chk-lines'>" + "".join(
+            f"<div class='chk-line'>{'✅' if ok else '❌'} {_esc(text)}</div>" for ok, text in chk.lines) + "</div>",
+            unsafe_allow_html=True)
         for w in chk.warnings:
             st.warning(w, icon="⚠️")
         if chk.blocking:
@@ -2760,18 +3386,20 @@ elif state.step == 4:
         k[1].metric("Matched", f"{res.matched:,}")
         k[1].caption(f"{res.matched / res.bank_rows:.2%}" if res.bank_rows else "–")
         k[2].metric("Not found", f"{res.not_found:,}")
-        k[2].caption("exceptions to resolve" if res.not_found else "none")
+        to_review = getattr(res, "to_review", res.not_found)    # not found + found but to check (BPR)
+        k[2].caption(("exceptions to resolve" if to_review == res.not_found
+                      else f"{to_review:,} exceptions to resolve (with the ones to check)") if to_review else "none")
         k[3].metric("Amount", amounts[0] if amounts else "–")
         k[3].caption(" · ".join(amounts[1:]) or "")
         st.markdown("  \n".join(f"**{cur}** · {d['rows']:,} rows · {d['matched']:,} matched · "
                                 f"{d['not_found']:,} not found" for cur, d in res.by_currency.items()))
-        if res.not_found == 0:
+        if to_review == 0:
             st.success("All rows matched. No exceptions to resolve.", icon="✅")
     c1, _, c3 = st.columns([1, 1.5, 1.8])
     if c1.button("← Back", width="stretch"):
         go(3)
-    if res.not_found:
-        n = res.not_found
+    if getattr(res, "to_review", res.not_found):
+        n = getattr(res, "to_review", res.not_found)
         if c3.button(f"Review & Resolve {n:,} Exception{'s' if n > 1 else ''} →", type="primary", width="stretch"):
             go(5)
     elif c3.button("Next: download →", type="primary", width="stretch"):
@@ -2785,13 +3413,15 @@ elif state.step == 5:
     if res is None:
         go(3)
     with st.container(border=True):
-        reviewed = res.not_found - res.not_reviewed
-        st.markdown(f'<div class="card-title">⑤ Exception Resolution: the invoices not found in IremboPay '
-                    f'<span class="muted">({reviewed} of {res.not_found} resolved)</span></div>', unsafe_allow_html=True)
-        if res.not_found == 0:
+        to_review = getattr(res, "to_review", res.not_found)
+        reviewed = to_review - res.not_reviewed
+        st.markdown(f'<div class="card-title">⑤ Exception Resolution: the invoices '
+                    f'{"not found in IremboPay" if to_review == res.not_found else "to check"} '
+                    f'<span class="muted">({reviewed} of {to_review} resolved)</span></div>', unsafe_allow_html=True)
+        if to_review == 0:
             st.success("Nothing to resolve: every bank payment was found in IremboPay.", icon="✅")
         else:
-            st.progress(reviewed / res.not_found)
+            st.progress(reviewed / to_review)
             with st.expander("How to choose the Report table", expanded=res.not_reviewed > 0):
                 st.markdown(
                     "| Report table | Use it when |\n|---|---|\n"
@@ -2799,7 +3429,8 @@ elif state.step == 5:
                     "| **Pending notification** | the invoice is still NEW in IremboPay |\n"
                     "| **Paid with other channel** | IremboPay says it was paid another way (type the provider if known) |\n"
                     "| **Failed notification** | the invoice is not in IremboPay at all |\n"
-                    "| **Exclude** | not an Irembo payment |\n\n"
+                    "| **Exclude** | not an Irembo payment (it stays in the statement with your comment, "
+                    "counted in no table) |\n\n"
                     "Review and confirm all exception decisions before saving.  \n"
                     "*Suggested from* indicates a previously recorded decision requiring confirmation.")
 
@@ -2810,6 +3441,12 @@ elif state.step == 5:
                      "payment_status", "payment_provider", "paid_at (YYYY-MM-DD HH:MM:SS)", "Merchant name", "Comment"]
             DASH = "—"                          # shown for "not chosen yet" in the dropdown columns
             DROPDOWNS = ["Reviewed (Yes/No)", "Report table", "SLA violated (Yes/No)"]
+            choose_cur = engine.option(bank, "CURRENCY_FROM_IREMBOPAY", False)   # BPR: no currency on the statement
+            if hasattr(bank, "review_reasons"):          # found rows can be in review too: say why each row is here
+                shown.insert(shown.index("Bank channel") + 1, "Reason")
+            if choose_cur:
+                shown.insert(shown.index("Report table") + 1, engine.CURRENCY_CHOSEN)
+                DROPDOWNS.append(engine.CURRENCY_CHOSEN)
             table = res.review.copy()
             # ---- every bank: what IremboPay's checkout says about each invoice, looked up in the background and only
             #      shown (read only, never saved, never fills a decision): the reviewer concludes
@@ -2827,27 +3464,30 @@ elif state.step == 5:
                 # earlier decision, is never replaced; you can change any row before saving)
                 filled = {}
                 empty = table["Report table"].fillna("").astype(str).str.strip().eq("")
-                keeps = engine.option(bank, "PENDING_STATUSES", {"NEW"})   # Ecobank keeps EXPIRED; I&M / BOA: NEW
+                # only invoices IremboPay's payment file does not have: a credit found but sent to check (BPR: another
+                # provider, credited again) is decided by the reviewer, never filled from "Paid"
+                known = {str(i) for f in state.files.values() if f.kind == "payments" for i in f.data["invoice_number"]}
+                empty &= ~table["invoice_number"].astype(str).isin(known)
                 for idx, answer in table[CHECK_COL].items():
                     if empty[idx] and answer in CHECK_FILL:
                         choice, status = CHECK_FILL[answer]
-                        if status and choice == "Pending notification" and status not in keeps:
-                            status = ""                    # this bank's pending rule writes NEW (unchanged)
                         table.loc[idx, "Report table"] = choice
                         if status:
                             table.loc[idx, "payment_status"] = status
+                        # "expired" is not a payment status: the invoice stays NEW, the expiry is a note
+                        if answer == "Expired" and not str(table.loc[idx, "Comment"] or "").strip():
+                            table.loc[idx, "Comment"] = "Invoice expired (IremboPay checkout)"
                         filled[answer] = filled.get(answer, 0) + 1
                 if filled:
                     st.caption("Filled from the IremboPay check: " + " · ".join(
                         f"{n:,} {a.lower()} → {CHECK_FILL[a][0]}"
-                        + (f" ({CHECK_FILL[a][1]})" if CHECK_FILL[a][1] and (CHECK_FILL[a][1] in keeps
-                                                                          or CHECK_FILL[a][0] != "Pending notification")
-                           else "")
+                        + (" (NEW, note: invoice expired)" if a == "Expired" else "")
                         for a, n in filled.items()) + ". Not an IremboPay invoice: left for you to decide.")
             # ---- "Mark all as reviewed": Reviewed = Yes on every row at once (a row set by hand stays as it is)
             all_key = f"review_all_{bank.CODE}_{period.store_key}"
             m1, m2 = st.columns([1, 3], vertical_alignment="center")
-            still_checking = checking and checker.progress(invoices)[0] < len(invoices)
+            # done = every invoice checked (rows without an invoice number are not looked up, so they never count)
+            still_checking = checking and (lambda d, t, f: d < t)(*checker.progress(invoices))
             if not state.get(all_key):
                 if m1.button("✓ Mark all as reviewed", key=f"{all_key}_on", width="stretch", disabled=still_checking,
                              help="Available when the IremboPay check is done" if still_checking else None):
@@ -2862,18 +3502,25 @@ elif state.step == 5:
                 table["Reviewed (Yes/No)"] = "Yes"
             for c in DROPDOWNS:
                 table[c] = table[c].fillna("").astype(str).replace("", DASH)
-            edited = st.data_editor(
-                table[shown], hide_index=True, width="stretch", key=f"review_{bank.CODE}_{period.store_key}",
+            def review_editor(part, key, extra=None):
+                """extra: read-only columns shown after the invoice ({column: title})."""
+                extra = extra or {}
+                cols = shown
+                if extra:
+                    at = shown.index("invoice_number") + 1
+                    cols = shown[:at] + list(extra) + shown[at:]
+                return st.data_editor(
+                part[cols], hide_index=True, width="stretch", key=key,
                 disabled=[paid_col, "Currency", amount_col, "invoice_number", "Bank channel", engine.SUGGEST_COL,
-                          CHECK_COL],
-                column_config={
+                          CHECK_COL, "Reason"] + list(extra),
+                column_config={**{c: st.column_config.TextColumn(t) for c, t in extra.items()},
                     "Reviewed (Yes/No)": st.column_config.SelectboxColumn("Reviewed", options=[DASH, "Yes", "No"], width=95),
                     "Bank channel": st.column_config.TextColumn("Channel", width=80),
                     "Report table": st.column_config.SelectboxColumn("Report table", options=[DASH] + engine.TABLE_CHOICES,
                                                                      width="medium"),
-                    paid_col: (st.column_config.DatetimeColumn(paid_col.capitalize(), format="DD/MM/YYYY HH:mm")
+                    paid_col: (st.column_config.DatetimeColumn(paid_col.replace("_", " ").capitalize(), format="DD/MM/YYYY HH:mm")
                                if paid_col in engine.option(bank, "DATETIME_COLUMNS", [])
-                               else st.column_config.DateColumn(paid_col.capitalize(), format="DD/MM/YYYY")),
+                               else st.column_config.DateColumn(paid_col.replace("_", " ").capitalize(), format="DD/MM/YYYY")),
                     amount_col: st.column_config.NumberColumn("Amount", format="localized"),
                     "invoice_number": "Invoice",
                     CHECK_COL: st.column_config.TextColumn(
@@ -2888,7 +3535,54 @@ elif state.step == 5:
                     "payment_provider": st.column_config.TextColumn("Provider"),
                     "paid_at (YYYY-MM-DD HH:MM:SS)": st.column_config.TextColumn("paid_at", help="YYYY-MM-DD HH:MM:SS"),
                     "Merchant name": st.column_config.TextColumn("Merchant"),
+                    "Reason": st.column_config.TextColumn("Why it is here", width="medium"),
+                    engine.CURRENCY_CHOSEN: st.column_config.SelectboxColumn(
+                        "Choose currency", options=[DASH] + list(bank.CURRENCIES), width=110,
+                        help="Not in IremboPay: choose the currency of this credit (the statement has none)"),
                 })
+
+            ekey = f"review_{bank.CODE}_{period.store_key}"
+            no_inv = table["invoice_number"].isna() | table["invoice_number"].astype(str).str.strip().isin(["", "None", "nan"])
+            reason = table["Reason"].fillna("").astype(str) if "Reason" in table else pd.Series("", index=table.index)
+            again = reason.str.startswith(CREDITED_AGAIN)
+            if engine.option(bank, "SEPARATE_CREDITED_AGAIN", False) and again.any():
+                # an invoice credited more than once (BPR): the extra credits in a table of their own, each next to
+                # the credit the report counted (its bank reference, agent reference and value date)
+                ref_col, desc_col = bank.COLUMNS["reference"], bank.COLUMNS["description"]
+                stmt = {}
+                for f in state.files.values():
+                    if f.kind == "bank" and ref_col in f.data:
+                        for r, d, v in zip(f.data[ref_col].astype(str), f.data.get(desc_col, ""), f.data.get(paid_col, "")):
+                            stmt.setdefault(r.strip(), (str(d or ""), v))
+                counted = reason.str.extract(r"the (?:credit|request) counted is (\S+)", expand=False).fillna("")
+                table["_c_ref"] = counted
+                table["_c_desc"] = [stmt.get(r, ("", ""))[0] for r in counted]
+                table["_c_when"] = [_fmt_when(stmt.get(r, ("", ""))[1]) for r in counted]
+                table["_ref"] = table[ref_col].fillna("").astype(str) if ref_col in table else ""
+                table["_desc"] = table[desc_col].fillna("").astype(str) if desc_col in table else ""
+                extra = {"_ref": "Bank reference", "_desc": "Agent / description", "_c_ref": "Counted: bank ref",
+                         "_c_desc": "Counted: agent / description", "_c_when": "Counted: value date"}
+                parts = []
+                if (~again).any():
+                    parts.append(review_editor(table[~again], ekey))
+                st.markdown(f"**Invoice credited more than once ({int(again.sum())})** · the bank credited these "
+                            "invoices again. The credit already counted is on the right; each row "
+                            "here is the extra credit. A table that already has the invoice does not count it again (a note in "
+                            "the report says where each credit went). "
+                            "A wrong DOC ID: type the right one in *Correct invoice*.")
+                parts.append(review_editor(table[again], ekey + "_again", extra))
+                edited = pd.concat(parts).loc[table.index][shown]
+            elif engine.option(bank, "SEPARATE_NO_INVOICE", False) and no_inv.any():
+                # the credits without invoice (BPR: no DOC ID) in a table of their own, under the others
+                parts = []
+                if (~no_inv).any():
+                    parts.append(review_editor(table[~no_inv], ekey))
+                st.markdown(f"**Credits without DOC ID ({int(no_inv.sum())})** · the invoice is not on the statement: "
+                            "type it in *Correct invoice* when you find it, or choose the table and the currency.")
+                parts.append(review_editor(table[no_inv], ekey + "_noinv"))
+                edited = pd.concat(parts).loc[table.index]
+            else:
+                edited = review_editor(table, ekey)
             for c in DROPDOWNS:
                 edited[c] = edited[c].fillna(DASH).replace(DASH, "")
             yes_now = int(edited["Reviewed (Yes/No)"].fillna("").eq("Yes").sum())
@@ -2903,10 +3597,11 @@ elif state.step == 5:
     c1, c2, c3 = st.columns([1, 1.5, 1.8])
     if c1.button("← Back", width="stretch"):
         go(4)
-    if res.not_found and c3.button("💾  Save decisions", type="primary", width="stretch"):
+    if getattr(res, "to_review", res.not_found) and c3.button("💾  Save decisions", type="primary", width="stretch"):
         full = res.review.copy()
         for c in engine.EDIT_COLS:
-            full[c] = edited[c].fillna("").astype(str).values
+            if c in edited:                     # the currency column is shown only for banks without one (BPR)
+                full[c] = edited[c].fillna("").astype(str).values
         try:
             engine.save_decisions(BASE_DIR, period, full, bank)
             acc, _ = accepted_files()
@@ -2918,6 +3613,10 @@ elif state.step == 5:
             st.error(str(err), icon="⚠️")
     if not res.stopped_for_review and c2.button("Next: download →", width="stretch"):
         go(6)
+    if getattr(res, "currency_to_choose", 0):         # BPR: the only thing left on these rows is their currency
+        st.warning(f"**{res.currency_to_choose} credit(s) still need a currency.** They are not in IremboPay (no DOC ID), "
+                   "so the statement does not say RWF or USD: choose it in the **Choose currency** column of the "
+                   "*Credits without DOC ID* table, then **Save decisions** again.", icon="⚠️")
     if res.not_reviewed:
         st.info("The report is made as soon as every exception is resolved (Reviewed = Yes) and saved.", icon="⏸️")
 
@@ -2942,12 +3641,16 @@ elif state.step == 6:
                    + (f" · compared with {res.compared_with}" if res.compared_with else ""))
         # once the report is made, the reviewed rows are simply in the table their decision chose: they are not
         # counted or listed again here (the decisions are seen in Exception Resolution only)
+        # the report's own figures (its summary tables): the same numbers as the Excel, Slack and the dashboard
+        fig = engine.report_figures(res.blocks)
         k = st.columns(3, border=True)
-        k[0].metric("Processed", f"{res.bank_rows:,}")
-        k[1].metric("Matched", f"{res.matched:,}")
-        k[2].metric("Rate", f"{res.matched / res.bank_rows:.2%}" if res.bank_rows else "–")
-        st.markdown("  \n".join(f"**{cur}** · {d['rows']:,} rows · {d['matched']:,} matched"
-                                for cur, d in res.by_currency.items()))
+        k[0].metric("Processed transaction", f"{fig['processed']:,}",
+                    help="Invoices on both sides (statement and IremboPay), each counted once")
+        k[1].metric("Received notification", f"{fig['received']:,}", help="Notifications received by Irembo")
+        k[2].metric("Received notification rate", f"{fig['rate']:.2%}" if fig["rate"] is not None else "N/A",
+                    help="Received notification ÷ Processed transaction")
+        st.markdown("  \n".join(f"**{cur}** · Processed transaction {p:,} · Received notification {r:,}"
+                                for cur, p, r in fig["currencies"]))
         for level, text in res.messages:
             if level == "warning":                  # only problems are shown (no "all good" messages)
                 st.warning(text, icon="⚠️")
@@ -3061,7 +3764,7 @@ elif state.step == 6:
 
     c1, _, c3 = st.columns([1, 1.5, 1.8])
     if c1.button("← Back", width="stretch"):
-        go(5 if res.not_found else 4)           # Exception Resolution was skipped when nothing was missing
+        go(5 if getattr(res, "to_review", res.not_found) else 4)   # Exception Resolution skipped when nothing to resolve
     if c3.button("🔄  New report", width="stretch"):
         state.files, state.read_errors, state.result = {}, [], None
         state.customize = state.cr_preview = False

@@ -14,6 +14,7 @@ toolbarMode = "viewer"         # menu (top right) without developer options; Set
 [theme]
 primaryColor = "#123239"        # IremboPay dark teal (buttons, progress bars, selections)
 font = "Nunito, sans-serif"     # rounded, close to the iremboPay logo lettering
+baseFontSize = 14               # 23/10/2026: the whole app smaller (as at 85 % zoom) - text, spacing, buttons
 
 # the two palettes the user can choose from (menu top right > Settings > App theme; "System" follows the computer)
 [theme.light]
