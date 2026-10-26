@@ -83,7 +83,8 @@ OPTIONAL = {
     "DATETIME_COLUMNS": "statement columns with a time, formatted with hh:mm:ss",
     "TOTALS_CHECK_SKIP": "summary tables left out of the 'weeks add up to the month' check",
     # ---- the bank's own rules (functions)
-    "one_row_per_invoice": "function(rows, payments): keep one statement row per invoice",
+    "one_row_per_invoice": "function(rows, payments): adjust a bank's own statement rows, with the IremboPay "
+                           "payments available, before matching - not necessarily down to one row per invoice",
     "in_period": "function(rows, attempts, start, end): which rows belong to the period",
     "tables": "function(rows, attempts, a, b): rows of the 5 tables (default: by payment date)",
     "extra_sheets": "function(rows, attempts, start, end, whole): {sheet name: table} added to the report",

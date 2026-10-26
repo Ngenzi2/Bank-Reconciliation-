@@ -180,19 +180,24 @@ def channel(rows: pd.DataFrame) -> pd.Series:
 
 
 # =====================================================================================================================
-# 5. MATCHING: one row per invoice
+# 5. MATCHING: every successful credit is kept
+#    Every bank-SUCCESS attempt is kept, whatever else the invoice has: engine.py's own rule (the credit
+#    IremboPay recorded, or the earliest; the other one is a Bank duplicate) decides between them, the same way
+#    it already does for the other banks. Collapsing every invoice to its single first attempt here, before that
+#    rule ever saw the data, used to silently drop a genuine second credit instead of flagging it - approved
+#    2026-10-26. An invoice with no successful attempt at all keeps just its first one, so it still shows up for
+#    review instead of disappearing.
 # =====================================================================================================================
 def one_row_per_invoice(rows: pd.DataFrame, payments: pd.DataFrame) -> pd.DataFrame:
-    """The first Ecobank attempt, unless it failed and IremboPay knows the invoice: then the earliest
-    successful attempt (Biller Rsp Code 000). Attempts = how many times Ecobank tried the invoice.
-    A missing Ecobank amount is taken from IremboPay (as in the old tool)."""
+    """(engine hook, called with the IremboPay payments) Attempts = how many times Ecobank tried the invoice
+    (every attempt, success or not). A missing Ecobank amount is taken from IremboPay (as in the old tool)."""
     rows = rows.assign(Attempts=rows.groupby("invoice_number")["invoice_number"].transform("size"))
     irembo_amount = payments.drop_duplicates("invoice_number").set_index("invoice_number")["amount"]
     rows["Amount"] = rows["Amount"].fillna(rows["invoice_number"].map(irembo_amount))
-    known = rows["invoice_number"].isin(set(payments["invoice_number"]))
-    rows["_rank"] = (known & rows["Biller Rsp Code"].ne(SUCCESS)).astype(int)     # 1 = a failed attempt: kept last
-    rows = rows.sort_values(["_rank", "Request Date"], kind="stable")
-    return rows.drop_duplicates(subset="invoice_number").drop(columns="_rank")
+    success = bank_success(rows)
+    has_success = rows["invoice_number"].isin(set(rows.loc[success, "invoice_number"]))
+    first_attempt = rows.sort_values("Request Date", kind="stable").drop_duplicates("invoice_number", keep="first").index
+    return rows[success | (~has_success & rows.index.isin(first_attempt))]
 
 
 # =====================================================================================================================
