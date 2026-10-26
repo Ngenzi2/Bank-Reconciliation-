@@ -1611,6 +1611,33 @@ def _show_merchants(table):
                  height=min(38 + 35 * len(t), 420))
 
 
+def exception_table(res, bank):
+    """Pending and Duplicate invoices together, for a quick look (view only: the rules already decided and they
+    are already in the report as is - unlike Divin's Exception Resolution, there is nothing left to choose,
+    approved 2026-10-26). None when there is nothing to show."""
+    c = bank.COLUMNS
+    paid_on, amount_col = c["payment_date"], c["amount"]
+    want = ["Currency", amount_col, "invoice_number", "payment_status", "payment_provider", paid_on, "name"]
+    parts = []
+    for label, sheet_name in [("Pending", "Pending notification"), ("Duplicate", "Duplicate payment other channel")]:
+        t = res.sheets.get(sheet_name) if getattr(res, "sheets", None) else None
+        if t is None or t.empty:
+            continue
+        t = t.copy()
+        note = t["Comment"] if "Comment" in t.columns else pd.Series("", index=t.index, dtype=object)
+        if "Reason" in t.columns:
+            note = note.where(note.astype(str).ne(""), t["Reason"])
+        t["Note"] = note
+        row = t[[col for col in want if col in t.columns] + ["Note"]].copy()
+        row.insert(0, "Category", label)
+        parts.append(row)
+    if not parts:
+        return None
+    out = pd.concat(parts, ignore_index=True)
+    return out.rename(columns={paid_on: "Date", amount_col: "Amount", "invoice_number": "Invoice",
+                               "payment_status": "Status", "payment_provider": "Provider", "name": "Merchant"})
+
+
 def render_summary(blocks, report_type, merchants=None):
     """The summary: one tab for the month + one per week (a day or a week: a single summary); under each, the
     Payment per merchant table."""
@@ -2947,6 +2974,12 @@ elif state.step == 3:
                           "waited for this. Check them again later, once IremboPay's page or the internet "
                           "connection is back.")
                 st.write(", ".join(state.needs_a_look))
+        exc = exception_table(res, bank)
+        if exc is not None and len(exc):
+            with st.expander(f"⚠ Exception: Pending / Duplicate invoices ({len(exc)})"):
+                st.caption("Already decided by the rules and in the report as it is - shown here to look over, "
+                          "nothing to confirm.")
+                st.dataframe(exc, hide_index=True, width="stretch")
         with st.expander("Summary tables"):
             render_summary(res.blocks, period.report_type, res.merchants)
         with st.expander("💬 Team message (copy for Slack)"):
