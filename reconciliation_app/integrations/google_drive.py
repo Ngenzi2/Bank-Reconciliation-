@@ -470,24 +470,34 @@ class DriveClient:
         return google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=120))
 
     def upload(self, parent_id: str, name: str, data: bytes, mime: str, replace_id: str | None = None,
-               http=None) -> DriveFile:
+               http=None, as_sheet: bool = False) -> DriveFile:
         """Create the file `name` in the folder, or replace the content of the file replace_id. Returns the stored
         file only when Drive confirms it: same size and same MD5 checksum as `data`; otherwise DriveError (the
-        stored file, if any, is left as it is for investigation)."""
+        stored file, if any, is left as it is for investigation).
+        as_sheet: store an uploaded Excel file as a native Google Sheet instead (Drive converts it on upload) -
+        `mime` stays the Excel one, so Drive knows what to convert from. A converted file has no size/checksum of
+        its own to check against `data` (Drive re-encodes it), so success is instead that Drive reports it as a
+        Sheet, approved 2026-10-26."""
         try:
             from googleapiclient.http import MediaIoBaseUpload
         except ImportError:
             raise DriveError("The Google Drive libraries are not installed. Run 'Setup (run once)' again.") from None
         media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mime, resumable=False)
         if replace_id:
-            request = self.service.files().update(fileId=replace_id, media_body=media, fields=FILE_FIELDS, **SHARED)
+            kwargs = {"body": {"mimeType": SHEET_MIME}} if as_sheet else {}
+            request = self.service.files().update(fileId=replace_id, media_body=media, fields=FILE_FIELDS,
+                                                  **kwargs, **SHARED)
         else:
-            request = self.service.files().create(body={"name": name, "parents": [parent_id]}, media_body=media,
-                                                  fields=FILE_FIELDS, **SHARED)
+            body = {"mimeType": SHEET_MIME} if as_sheet else {}
+            request = self.service.files().create(body={**body, "name": name, "parents": [parent_id]},
+                                                  media_body=media, fields=FILE_FIELDS, **SHARED)
         stored = DriveFile.from_api(self._run(request, f"upload {name}", http) or {"id": ""})
         if not stored.id:
             raise DriveError(f"{name}: Google Drive did not confirm the upload.")
-        if stored.size != len(data) or stored.md5 != hashlib.md5(data).hexdigest():
+        if as_sheet:
+            if stored.mime != SHEET_MIME:
+                raise DriveError(f"{name}: Google Drive did not store this as a Google Sheet.")
+        elif stored.size != len(data) or stored.md5 != hashlib.md5(data).hexdigest():
             raise DriveError(f"{name}: Google Drive stored a different content than the one sent "
                              "(size or checksum differ). Try again.")
         return stored

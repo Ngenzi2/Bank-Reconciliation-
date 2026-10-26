@@ -700,7 +700,7 @@ def find_previous(prev):
                 f = report_history.find_previous(client, root, bank, prev,
                                                  index=drive_index_cached(client, root, fresh=True))
             if f is not None:
-                state.prev_reports[key] = {"where": "on Google Drive", "name": f.name, "file_id": f.id}
+                state.prev_reports[key] = {"where": "on Google Drive", "name": f.name, "file_id": f.id, "mime": f.mime}
                 return state.prev_reports[key], ""
             missing[key] = pd.Timestamp.now()
         except DriveError as err:
@@ -720,7 +720,7 @@ def previous_file(prev, prev_info, session) -> Path:
         if client is None:
             raise engine.ReconError(f"Google Drive: {problem}")
         try:
-            data = client.download(prev_info["file_id"])
+            data = client.download(prev_info["file_id"], prev_info.get("mime", ""))
         except DriveError as err:
             raise engine.ReconError(f"The previous report could not be downloaded: {err}") from None
     else:
@@ -838,7 +838,7 @@ def _open_history_report(rec, client):
         if rec.source == "Google Drive":
             with st.spinner(f"Opening {rec.name}…"):
                 state.view_mem = {**report_history.read_drive_report(client, rec.file_id, rec.name,
-                                                                      state.session_folder),
+                                                                      state.session_folder, rec.mime),
                                   "name": rec.name, "saved": local_time(rec.modified)}
         else:
             state.view_report = str(rec.path)

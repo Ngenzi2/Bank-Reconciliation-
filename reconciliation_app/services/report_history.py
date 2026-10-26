@@ -40,7 +40,9 @@ MIME = {"xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.she
 REPORTS_FOLDER = "Reconciliation Reports"           # the name shown to the user for the root folder
 NAME_RE = re.compile(r"^(?P<code>[A-Z0-9]+)" + re.escape(engine.REPORT_SUFFIX) +
                      r"(?P<a>\d\d-\d\d-\d{4})_to_(?P<b>\d\d-\d\d-\d{4})(?:_v(?P<v>\d+))?"
-                     r"(?: \((?P<copy>\d+)\))?\.(?P<ext>xlsx|pdf)$", re.IGNORECASE)   # ' (1)': a copy saved by hand
+                     r"(?: \((?P<copy>\d+)\))?(?:\.(?P<ext>xlsx|pdf))?$", re.IGNORECASE)
+# ' (1)': a copy saved by hand; the extension itself is optional - Drive drops it from a native Google Sheet (a
+# .xlsx converted on upload, approved 2026-10-26); such a file is always the Excel one, never the PDF.
 
 # ---- the reconciliation notebooks' own naming (CLAUDE.md's reference notebooks), read alongside the app's own:
 #      "<Bank>_report_<Month>_<Year>" (monthly) or "<Bank>_report_<Ordinal>_week_of_<Month>[_<Year>]" (weekly,
@@ -92,7 +94,8 @@ def report_stem(bank, period) -> str:
 
 
 def parse_name(name: str):
-    """'IM_recon_summary_01-09-2026_to_30-09-2026_v2.pdf' -> dict(code, kind, start, label, version, ext), or None."""
+    """'IM_recon_summary_01-09-2026_to_30-09-2026_v2.pdf' -> dict(code, kind, start, label, version, ext), or None.
+    A name with no extension (a native Google Sheet) is read as the Excel one."""
     m = NAME_RE.match(name)
     if not m:
         return None
@@ -100,7 +103,8 @@ def parse_name(name: str):
     days = (b - a).days                   # 0 / 6 = last day in the name; 1 / 7 = older names (the day after)
     kind = "day" if days in (0, 1) else ("week" if days in (6, 7) and a.dayofweek == 0 else "month")
     return {"code": m["code"].upper(), "kind": kind, "start": a, "label": f"{m['a']}_to_{m['b']}",
-            "version": int(m["v"] or 1), "ext": m["ext"].lower(), "stem": name.rsplit(".", 1)[0]}
+            "version": int(m["v"] or 1), "ext": (m["ext"] or "xlsx").lower(),
+            "stem": name.rsplit(".", 1)[0] if m["ext"] else name}
 
 
 def _nth_week_of_month(ordinal: int, month: int, year: int) -> pd.Timestamp | None:
@@ -217,15 +221,19 @@ def save_report(client, root_id: str, bank, period, files: dict, mode: str = "ne
         folder = _report_folder_id(client, root_id, bank, period, layout, create=True)
     except DriveError as err:
         return [SaveResult(name, False, error=str(err)) for _, name in targets]
-    by_name = {f.name: f for f in existing}
+    # by (stem, parsed ext), not the exact name: a Google Sheet (as_sheet=True, below) is stored with no
+    # extension, so an earlier Sheet save must still be recognised by a later one as "the Excel file" of this
+    # report - parse_name already reads a name with no extension as "xlsx", approved 2026-10-26
+    by_stem = {(p["stem"], p["ext"]): f for f in existing if (p := parse_name(f.name))}
 
     def one(ext, name, http):
-        replace = by_name.get(name) if mode == "replace" else None
-        if mode == "new" and name in by_name:          # never overwrite without being asked
+        key = (name.rsplit(".", 1)[0], ext)
+        replace = by_stem.get(key) if mode == "replace" else None
+        if mode == "new" and key in by_stem:            # never overwrite without being asked
             return SaveResult(name, False, error="a file with this name already exists on Drive")
         try:
             stored = client.upload(folder, name, files[ext], MIME[ext], replace_id=replace.id if replace else None,
-                                   http=http)
+                                   http=http, as_sheet=(ext == "xlsx"))
             return SaveResult(name, True, stored, replaced=replace is not None)
         except DriveError as err:
             return SaveResult(name, False, error=str(err))
@@ -368,13 +376,13 @@ def find_previous(client, root_id: str, bank, period, index: DriveIndex | None =
     if not hits:
         return None
     best = max(hits, key=lambda r: (r.version, r.modified if r.modified is not None else pd.Timestamp(0, tz="UTC")))
-    return DriveFile(best.file_id, best.name, size=best.size, folder=best.folder)
+    return DriveFile(best.file_id, best.name, size=best.size, folder=best.folder, mime=best.mime)
 
 
-def read_drive_summary(client, file_id: str, name: str, session) -> dict:
+def read_drive_summary(client, file_id: str, name: str, session, mime: str = "") -> dict:
     """Only engine.read_report(...) of a saved Excel report (for the dashboard: no PDF is made). The file exists in
     the session's temporary folder only while it is read."""
-    data = client.download(file_id)
+    data = client.download(file_id, mime)
     p = parse_name(name)
     if not p or p["ext"] != "xlsx":
         raise DriveError(f"{name}: only an Excel report can be read.")
@@ -434,10 +442,10 @@ def read_local_facts(record) -> list:
     return _report_facts(record.path, record)
 
 
-def read_drive_report(client, file_id: str, name: str, session) -> dict:
+def read_drive_report(client, file_id: str, name: str, session, mime: str = "") -> dict:
     """A saved report read back from Drive (for the viewer): {"report": engine.read_report(...), "xlsx": bytes,
     "pdf": bytes}. The file exists in the session's temporary folder only while it is read."""
-    data = client.download(file_id)
+    data = client.download(file_id, mime)
     p = parse_name(name)
     if not p or p["ext"] != "xlsx":
         raise DriveError(f"{name}: only the Excel report can be opened in the app.")
