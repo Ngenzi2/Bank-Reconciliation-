@@ -11,8 +11,10 @@ The Ecobank statement ("IREMBO PAY" export) is a log of payment REQUESTS, not of
     - TACCT (transit-account) files are a different flow: they are refused
 
 The report follows the old tool
-    - processed = IremboPay payments made through ECOBANK, counted by paid_at
-    - pending and "not found in IremboPay" = invoices Ecobank requested in the period
+    - processed (26/10/2026) = the requests Ecobank answered SUCCESS (Cba Rsp Code 000), by Request Date, each
+      invoice once (a second SUCCESS = debited twice: Exception Resolution)
+    - received = in IremboPay, paid (paid_at) through ECOBANK; another provider = Duplicate Payment
+    - every invoice is looked up on IremboPay's checkout before the reconciliation (CHECKOUT_ALL)
     - "Duplicate Payment" table = paid with another channel (each invoice once)
 
 CONTENTS (same numbers as im.py; section 7 exists only for Ecobank)
@@ -35,13 +37,15 @@ FULL_NAME = "Ecobank"
 PROVIDER = "ECOBANK"                    # payment_provider of Ecobank in the IremboPay payment file
 CURRENCIES = ["RWF", "USD"]
 FILE_TYPES = ["xlsx", "xls", "csv"]
+DRIVE_STATEMENTS = "ecobank_statements_folder_id"   # 26/10/2026: step 2 can read the statements from this Drive
+                                                    # folder (drive_settings.toml), picked by the days inside them
 STATEMENT_SHEET = "Ecobank statement"
 
 # IremboPay statuses
 COMPLETED_STATUSES = {"SETTLED", "PAID", "PAYOUT_INITIATED"}
-# pending = not paid yet: NEW, or EXPIRED (an invoice the IremboPay check of the review found expired: it is in the
-# Pending table and keeps EXPIRED as its status in the report)
-PENDING_STATUSES = {"NEW", "EXPIRED"}
+# pending = not paid yet: payment_status NEW (20/10/2026: "expired" is not a payment status - an expired
+# invoice was never paid, it stays NEW; the expiry is a note in the report)
+PENDING_STATUSES = {"NEW"}
 
 
 # =====================================================================================================================
@@ -76,11 +80,11 @@ ONE_FILE_PER_CURRENCY = False      # one statement holds RWF and USD
 MISSING_DAYS_BLOCK = False         # a day without statement is a warning, Run is allowed
 ACCEPT_EARLIER_DAYS = 31           # statements up to 31 days before: payments of the period may be requested then
 REVERSE_CHECK = True               # step 3: IremboPay ECOBANK payments that are on no statement
+CHECKOUT_ALL = True                # 26/10/2026: every invoice goes through IremboPay's checkout before the run
+SEPARATE_CREDITED_AGAIN = True     # step 5: an invoice debited twice (second SUCCESS) in a table of its own
 PAYMENT_FILE_TYPES = ["csv", "xlsx"]
 PAYMENT_OPTIONAL_COLUMNS = ["created_at"]
 
-# an unresolved invoice that Ecobank retries in two weeks is pending in both: the weeks can add up to more
-TOTALS_CHECK_SKIP = ["Pending notifications"]
 
 # the review recognises an invoice by currency | Request Date | invoice: the Cba Ref No is Ecobank's own number, it is
 # not in the IremboPay files and can be missing, so it must never stop a decision from matching (2026-10-12)
@@ -182,16 +186,30 @@ def channel(rows: pd.DataFrame) -> pd.Series:
 # 5. MATCHING: one row per invoice
 # =====================================================================================================================
 def one_row_per_invoice(rows: pd.DataFrame, payments: pd.DataFrame) -> pd.DataFrame:
-    """The first Ecobank attempt, unless it failed and IremboPay knows the invoice: then the earliest
-    successful attempt (Biller Rsp Code 000). Attempts = how many times Ecobank tried the invoice.
-    A missing Ecobank amount is taken from IremboPay (as in the old tool)."""
+    """26/10/2026: every request Ecobank answered SUCCESS (Cba Rsp Code 000: the customer was debited) is kept - the
+    first one counts, a second one is an extra debit (Exception Resolution); an invoice with no SUCCESS keeps its
+    first attempt (not processed). Attempts = how many times Ecobank tried the invoice. A missing Ecobank amount is
+    taken from IremboPay (as in the old tool).
+    26/10/2026: a SUCCESS with the same invoice AND the same Cba Ref No as an earlier one is the same debit sent
+    again by Ecobank (a resend), not a second debit: only the earliest is kept. Only a different Cba Ref No is an
+    extra debit."""
     rows = rows.assign(Attempts=rows.groupby("invoice_number")["invoice_number"].transform("size"))
     irembo_amount = payments.drop_duplicates("invoice_number").set_index("invoice_number")["amount"]
     rows["Amount"] = rows["Amount"].fillna(rows["invoice_number"].map(irembo_amount))
-    known = rows["invoice_number"].isin(set(payments["invoice_number"]))
-    rows["_rank"] = (known & rows["Biller Rsp Code"].ne(SUCCESS)).astype(int)     # 1 = a failed attempt: kept last
-    rows = rows.sort_values(["_rank", "Request Date"], kind="stable")
-    return rows.drop_duplicates(subset="invoice_number").drop(columns="_rank")
+    ok = rows["Cba Rsp Code"].eq(SUCCESS)
+    has_ok = rows["invoice_number"].map(ok.groupby(rows["invoice_number"]).any())
+    rows = rows.sort_values("Request Date", kind="stable")
+    success = rows[ok[rows.index]]
+    ref = success["Cba Ref No"].fillna("").astype(str).str.strip()
+    resend = ref.ne("") & success.assign(_ref=ref).duplicated(subset=["invoice_number", "_ref"], keep="first")
+    success = success[~resend]
+    first_try = rows[~has_ok[rows.index].astype(bool)].drop_duplicates(subset="invoice_number")
+    return pd.concat([success, first_try]).sort_values("Request Date", kind="stable")
+
+
+def is_success(rows: pd.DataFrame) -> pd.Series:
+    """Ecobank answered SUCCESS for the request: Cba Rsp Code 000 (the customer was debited)."""
+    return rows["Cba Rsp Code"].fillna("").astype(str).eq(SUCCESS)
 
 
 # =====================================================================================================================
@@ -214,65 +232,57 @@ def sla(rows: pd.DataFrame, sla_days: int):
 
 
 def received(rows: pd.DataFrame) -> pd.Series:
-    """Notification received by Irembo: paid through Ecobank and no longer NEW."""
-    return (rows["found_in_irembopay"] & rows["payment_provider"].eq(PROVIDER)
-            & ~rows["payment_status"].isin(PENDING_STATUSES) & _paid_when(rows).notna())
+    """Notification received: in IremboPay, paid (paid_at filled, whatever the status) through Ecobank."""
+    import engine                                 # (here: engine imports the banks)
+    return engine.paid_through(rows, PROVIDER)
 
 
 def pending(rows: pd.DataFrame) -> pd.Series:
-    """Pending notification: the invoice is still NEW in IremboPay."""
-    return rows["payment_status"].isin(PENDING_STATUSES)
+    """Pending notification: in IremboPay but not paid (no paid_at)."""
+    import engine                                 # (here: engine imports the banks)
+    return engine.not_paid(rows, PENDING_STATUSES)
 
 
 def duplicate(rows: pd.DataFrame) -> pd.Series:
-    """Paid with another channel: Ecobank received it, but IremboPay says another provider was used (a row the
-    review placed here without a paid_at is dated by its Request Date, see _paid_when)."""
-    return (rows["found_in_irembopay"] & rows["payment_provider"].notna() & rows["payment_provider"].ne(PROVIDER)
-            & ~rows["payment_status"].isin(PENDING_STATUSES) & _paid_when(rows).notna())
+    """Duplicate Payment: in IremboPay, paid (paid_at), but through another provider."""
+    import engine                                 # (here: engine imports the banks)
+    return engine.paid_elsewhere(rows, PROVIDER)
+
+
+def review_reasons(rows: pd.DataFrame) -> pd.Series:
+    """Why a request FOUND in IremboPay still goes to Exception Resolution ("" = it does not). 26/10/2026: an
+    invoice Ecobank answered SUCCESS more than once (debited twice) - the first SUCCESS counts, the others are
+    checked."""
+    out = pd.Series("", index=rows.index, dtype=object)
+    # 26/10/2026: also an invoice NOT found in IremboPay - its second credit goes to "credited more than once" too
+    found = rows[rows["invoice_number"].notna() & is_success(rows)]
+    for _, group in found.groupby("invoice_number"):
+        if len(group) < 2:
+            continue
+        group = group.sort_values("Request Date", kind="stable")
+        kept = str(group["Cba Ref No"].iloc[0] if pd.notna(group["Cba Ref No"].iloc[0]) else group["Request Date"].iloc[0])
+        out[group.index[1:]] = f"Invoice credited again: debited again by Ecobank; the request counted is {kept}"
+    return out
 
 
 # =====================================================================================================================
 # 7. WHICH ROWS GO IN THE PERIOD AND IN EACH TABLE (I&M uses the engine's default: by payment date)
 # =====================================================================================================================
-def _requested(rows, attempts, a, b):
-    """Invoices Ecobank sent any attempt for in [a, b): a retried, unresolved invoice stays visible."""
-    sent = attempts.loc[(attempts["Request Date"] >= a) & (attempts["Request Date"] < b), "invoice_number"]
-    return rows["invoice_number"].isin(set(sent))
-
-
-FIRST_IN_PERIOD = "_first_request_in_period"     # set by in_period(): the first attempt inside the reconciled period
-
-
-def _paid_when(rows):
-    """paid_at; for an invoice the review placed in 'Notification received' or 'Paid with other channel' without a
-    paid_at (it is not in the IremboPay payment file), the Ecobank Request Date (Kigali time): its first attempt
-    INSIDE the reconciled period when it has one there, otherwise its first attempt. One date per invoice for the
-    whole report, so it is counted once (in one month, and in one week of it)."""
-    review_table = rows["review_table"] if "review_table" in rows else pd.Series("", index=rows.index)
-    use_request = rows["paid_at"].isna() & review_table.isin(["Notification received", "Paid with other channel"])
-    request = rows["Request Date"]
-    if FIRST_IN_PERIOD in rows:
-        request = rows[FIRST_IN_PERIOD].where(rows[FIRST_IN_PERIOD].notna(), request)
-    return rows["paid_at"].where(~use_request, request)
-
-
 def in_period(rows, attempts, start, end) -> pd.Series:
-    """A row belongs to the period when Ecobank requested it then, or IremboPay says it was paid then.
-    Also records on the rows the first attempt of each invoice inside the period (used by _paid_when)."""
-    inside = attempts[(attempts["Request Date"] >= start) & (attempts["Request Date"] < end)]
-    first_in = inside.groupby("invoice_number")["Request Date"].min()
-    rows[FIRST_IN_PERIOD] = rows["invoice_number"].map(first_in)
-    paid = _paid_when(rows)
-    return _requested(rows, attempts, start, end) | ((paid >= start) & (paid < end))
+    """26/10/2026: a request belongs to the period of its Request Date (the bank date, Kigali time)."""
+    return (rows["Request Date"] >= start) & (rows["Request Date"] < end)
 
 
 def tables(rows, attempts, a, b) -> dict:
-    """Rows of the 5 tables for [a, b), as in the old tool: payments by paid_at, pending by request date."""
-    paid = _paid_when(rows)
-    paid_in = (paid >= a) & (paid < b)
-    processed = paid_in & rows["payment_provider"].eq(PROVIDER)
-    return {"processed": processed,
-            "received": processed & ~rows["payment_status"].isin(PENDING_STATUSES),
+    """Rows of the 5 tables for [a, b) (26/10/2026): Processed = the requests Ecobank answered SUCCESS with a Request
+    Date in [a, b), each invoice once; Received / Duplicate / Pending from IremboPay's paid_at and provider."""
+    window = (rows["Request Date"] >= a) & (rows["Request Date"] < b)
+    processed = window & is_success(rows)
+    if "is_extra_credit" in rows:
+        processed &= ~rows["is_extra_credit"]
+    received_ = processed & received(rows)
+    duplicate_ = processed & duplicate(rows) & ~received_
+    pending_ = processed & pending(rows) & ~received_ & ~duplicate_
+    return {"processed": processed, "received": received_,
             "sla": processed & rows["sla_status"].eq("SLA violated"),
-            "pending": _requested(rows, attempts, a, b) & pending(rows),
-            "duplicate": paid_in & duplicate(rows)}
+            "pending": pending_, "duplicate": duplicate_}
