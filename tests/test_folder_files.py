@@ -141,6 +141,30 @@ def test_a_local_gap_is_filled_from_the_shared_drive_statements_folder(tmp_path,
     assert found.reference[0].reference is True
 
 
+def test_drive_is_checked_every_time_not_only_when_local_is_short(tmp_path, monkeypatch):
+    # local already has a September file; the shared Drive folder has another one, for a different day - it is
+    # picked up too, the way the notebooks always check Drive for a new day's statement, approved 2026-10-26
+    monkeypatch.setenv("BANK_RECON_STATEMENTS_FOLDER_ID", "ROOT123")
+    stm_dir = tmp_path / "stm"
+    write(stm_dir, "sept5.xlsx", statement([("05/09/2026", "R1", "ePay irembo 880000000001", None, 1000)]))
+    content = statement([("10/09/2026", "R2", "ePay irembo 880000000002", None, 2000)])
+    drive = FakeDrive({"September 2026": [(drive_file("D2", "sept10.xlsx"), content)]})
+    folders = {"BOA": {"statements": spec(stm_dir), "exports": None}}
+    found = ff.find_files(SEP, "BOA", folders, drive=drive)
+    assert sorted(f.name for f in found.statements) == ["sept10.xlsx", "sept5.xlsx"]
+
+
+def test_a_drive_file_already_found_locally_is_not_duplicated(tmp_path, monkeypatch):
+    monkeypatch.setenv("BANK_RECON_STATEMENTS_FOLDER_ID", "ROOT123")
+    stm_dir = tmp_path / "stm"
+    content = statement([("05/09/2026", "R1", "ePay irembo 880000000001", None, 1000)])
+    write(stm_dir, "sept5.xlsx", content)
+    drive = FakeDrive({"September 2026": [(drive_file("D3", "sept5_copy.xlsx"), content)]})   # same content, on Drive too
+    folders = {"BOA": {"statements": spec(stm_dir), "exports": None}}
+    found = ff.find_files(SEP, "BOA", folders, drive=drive)
+    assert [f.name for f in found.statements] == ["sept5.xlsx"]        # the local copy, not a second one from Drive
+
+
 def test_drive_is_not_asked_when_the_shared_folder_is_not_set(tmp_path):
     # the default (no statements_root_folder_id): behaves exactly as before this fallback existed
     stm_dir = tmp_path / "stm"
