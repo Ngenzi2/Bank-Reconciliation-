@@ -1,11 +1,12 @@
 """
-THE DASHBOARD'S MAIN VIEW (HTML): headline, four key cards, the payments per week, the payments and amount
-overviews, top merchants, exceptions by type, late payments by bank, needs attention.
+THE DASHBOARD'S MAIN VIEW (22/10/2026): four key cards (Amount, Rate, Transactions, SLA), then Payments over time,
+Amount overview, Exceptions by type and Top merchants; each chart interactive on the screen (Altair) and drawn as an
+SVG for its PDF, with its table.
 Every number, curve, slice and line is computed from the facts of the saved reports (services/dashboard.py);
 nothing is typed by hand. IremboPay colours: white / pale teal surfaces, dark teal text and figures, brand green for
 results that are good, red / amber for problems only.
 
-    view(...)   (headline HTML, grid HTML) of the view, for st.html
+    kpi_cards / lines / dual_bars / merchant_bars / table_html / card_page / alt_lines / alt_dual_bars
 """
 from __future__ import annotations
 
@@ -14,9 +15,6 @@ import math
 from html import escape
 
 import pandas as pd
-
-import engine
-from services import dashboard as d
 
 TEAL, ACC, PALE, GREEN, AMBER, AMBER_L, BAD, MUT = ("#123239", "#2B8A99", "#EAF4F5", "#99E378", "#D4A72C", "#E9C46A",
                                                      "#C2413D", "#5E7378")
@@ -30,7 +28,7 @@ SVG_STYLE = (f"text{{font-family:Nunito,'Segoe UI',Helvetica,Arial,sans-serif}} 
 
 def _img(svg: str, style: str = "width:100%;display:block") -> str:
     """An SVG drawing as an <img> (Streamlit removes inline <svg> from its HTML); its text styles go inside it."""
-    svg = svg.replace("<svg ", f'<svg xmlns="http://www.w3.org/2000/svg" ', 1)
+    svg = svg.replace("<svg ", '<svg xmlns="http://www.w3.org/2000/svg" ', 1)
     svg = svg.replace(">", f"><style>{SVG_STYLE}</style>", 1)
     return f'<img alt="" style="{style}" src="data:image/svg+xml;base64,{base64.b64encode(svg.encode()).decode()}"/>'
 
@@ -40,27 +38,6 @@ def short(v: float) -> str:
         if abs(v) >= size:
             return f"{v / size:,.1f}{unit}"
     return f"{v:,.0f}"
-
-
-def pill(text: str, kind: str) -> str:
-    return f'<span class="dv-pill {kind}">{escape(text)}</span>'
-
-
-def change_pill(now, before, good_up=True, points=False):
-    """'21.4% ↓' (red when bad, green when good); None when there is nothing to compare with."""
-    if now is None or before is None:
-        return None
-    if points:
-        diff = (now - before) * 100
-        if abs(diff) < 0.005:
-            return pill("= 0.00 pts", "n")
-        return pill(f"{diff:+.2f} pts {'↑' if diff > 0 else '↓'}", "g" if (diff > 0) == good_up else "r")
-    if not before:
-        return None
-    x = (now - before) / before * 100
-    if abs(x) < 0.05:
-        return pill("= 0.0%", "n")
-    return pill(f"{abs(x):.1f}% {'↑' if x > 0 else '↓'}", "g" if (x > 0) == good_up else "r")
 
 
 # ---- drawings ------------------------------------------------------------------------------------------------------
@@ -107,234 +84,6 @@ def _axis(L, R, T, B, top, step):
     return out
 
 
-def area(series, color, gid, note=None):
-    """series [(label, value, partial)]; note = (index, title, value, sub) for the callout."""
-    W, H, L, R, T, B = 560, 270, 46, 548, 18, 232
-    if len(series) < 2:
-        return '<div class="dv-empty">Not enough periods to draw a curve.</div>'
-    top, step = _nice(max(v for _, v, _ in series))
-    xs = [L + 8 + i * (R - L - 16) / (len(series) - 1) for i in range(len(series))]
-    pts = [(x, B - v / top * (B - T)) for x, (_, v, _) in zip(xs, series)]
-    line = _smooth(pts, B)
-    g = (f'<defs><linearGradient id="{gid}" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="{ACC}" '
-         f'stop-opacity=".22"/><stop offset="1" stop-color="{ACC}" stop-opacity="0"/></linearGradient></defs>'
-         + _axis(L, R, T, B, top, step)
-         + f'<path d="{line} L{pts[-1][0]:.1f},{B} L{pts[0][0]:.1f},{B} Z" fill="url(#{gid})"/>'
-         + f'<path d="{line}" fill="none" stroke="{color}" stroke-width="2.6"/>')
-    g += "".join(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3" fill="{color}"/>' for x, y in pts)
-    every = max(1, math.ceil(len(series) / 12))
-    for i, (x, (lab, _, part)) in enumerate(zip(xs, series)):
-        if i % every == 0 or i == len(series) - 1:
-            g += f'<text x="{x:.1f}" y="{B + 18}" class="dv-ax" text-anchor="middle">{escape(lab)}{"*" if part else ""}</text>'
-    if note is not None:
-        i, title, value, sub = note
-        x, y = pts[i]
-        bx = x + 12 if x < R - 175 else x - 177
-        by = max(min(y - 10, B - 70), T)
-        g += (f'<line x1="{x:.1f}" x2="{x:.1f}" y1="{T}" y2="{B}" stroke="{TEAL}" stroke-dasharray="4 4" opacity=".45"/>'
-              f'<circle cx="{x:.1f}" cy="{y:.1f}" r="6" fill="{color}" stroke="#fff" stroke-width="2"/>'
-              f'<rect x="{bx:.1f}" y="{by:.1f}" width="165" height="62" rx="10" fill="{TEAL}"/>'
-              f'<text x="{bx + 12:.1f}" y="{by + 19:.1f}" class="dv-t1">{escape(title)}</text>'
-              f'<text x="{bx + 12:.1f}" y="{by + 39:.1f}" class="dv-t2">{escape(value)}</text>'
-              f'<text x="{bx + 12:.1f}" y="{by + 54:.1f}" class="dv-t1">{escape(sub)}</text>')
-    return _img(f'<svg viewBox="0 0 {W} {H}">{g}</svg>')
-
-
-def bars(series):
-    W, H, L, R, T, B = 330, 170, 34, 324, 10, 146
-    if not series:
-        return '<div class="dv-empty">No period to show.</div>'
-    top, step = _nice(max(v for _, v, _ in series))
-    bw = (R - L) / len(series)
-    g = (f'<defs><linearGradient id="dvbar" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="{ACC}"/>'
-         f'<stop offset="1" stop-color="{TEAL}"/></linearGradient></defs>' + _axis(L, R, T, B, top, step))
-    for i, (lab, v, part) in enumerate(series):
-        x = L + i * bw + 6
-        h = v / top * (B - T) if top else 0
-        g += (f'<rect x="{x:.1f}" y="{B - h:.1f}" width="{bw - 12:.1f}" height="{h:.1f}" rx="5" '
-              f'fill="{"#B9D3D7" if part else "url(#dvbar)"}"><title>{escape(lab)}: {v:,.0f}</title></rect>'
-              f'<text x="{x + (bw - 12) / 2:.1f}" y="{B + 16}" class="dv-ax" text-anchor="middle">{escape(lab)}</text>')
-    return _img(f'<svg viewBox="0 0 {W} {H}">{g}</svg>')
-
-
-def donut(parts, center, sub, size=210):
-    cx = cy = size / 2
-    r = size / 2 - 20
-    total = sum(v for _, v, _ in parts)
-    if not total:
-        return _img(f'<svg viewBox="0 0 {size} {size}"><circle cx="{cx}" cy="{cy}" r="{r}" '
-                f'fill="none" stroke="{GREEN}" stroke-width="24"/><text x="{cx}" y="{cy + 4}" class="dv-dc" '
-                f'text-anchor="middle">0</text><text x="{cx}" y="{cy + 26}" class="dv-ds" text-anchor="middle">'
-                f'{escape(sub)}</text></svg>', f"width:{size}px;flex:none")
-    a, g = -math.pi / 2, ""
-    for name, v, col in parts:
-        if not v:
-            continue
-        frac = v / total
-        if frac > .999:
-            g += f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="{col}" stroke-width="24"/>'
-            continue
-        b = a + frac * 2 * math.pi
-        gap = .03 if frac > .03 else 0
-        x1, y1 = cx + r * math.cos(a), cy + r * math.sin(a)
-        x2, y2 = cx + r * math.cos(b - gap), cy + r * math.sin(b - gap)
-        g += (f'<path d="M{x1:.1f},{y1:.1f} A{r},{r} 0 {1 if frac > .5 else 0} 1 {x2:.1f},{y2:.1f}" fill="none" '
-              f'stroke="{col}" stroke-width="24"><title>{escape(name)}: {v:,}</title></path>')
-        a = b
-    g += (f'<text x="{cx}" y="{cy + 4}" class="dv-dc" text-anchor="middle">{escape(center)}</text>'
-          f'<text x="{cx}" y="{cy + 26}" class="dv-ds" text-anchor="middle">{escape(sub)}</text>')
-    return _img(f'<svg viewBox="0 0 {size} {size}">{g}</svg>', f"width:{size}px;flex:none")
-
-
-def legend(parts, unit):
-    total = sum(v for _, v, _ in parts) or 1
-    return "".join(f'<div class="dv-lg"><span class="dv-dot" style="background:{c}"></span><div><b>{escape(n)} '
-                   f'({v / total * 100:.1f}%)</b><div class="dv-mut">{v:,} {unit}</div></div></div>'
-                   for n, v, c in parts if v)
-
-
-_ICON = {
-    "rec": f'<svg viewBox="0 0 40 40"><circle cx="20" cy="20" r="18" fill="{GREEN}"/><path d="M12 21l5 5 11-12" '
-           f'stroke="{TEAL}" stroke-width="3.2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>',
-    "ont": f'<svg viewBox="0 0 40 40"><circle cx="20" cy="20" r="18" fill="{PALE}"/><circle cx="20" cy="20" r="10" '
-           f'stroke="{TEAL}" stroke-width="3" fill="none"/><path d="M20 14v7l4 3" stroke="{TEAL}" stroke-width="3" '
-           f'fill="none" stroke-linecap="round"/></svg>',
-    "amt": f'<svg viewBox="0 0 40 40"><rect x="3" y="9" width="34" height="22" rx="5" fill="{PALE}"/>'
-           f'<rect x="3" y="14" width="34" height="5" fill="{ACC}"/><rect x="8" y="23" width="10" height="3" rx="1.5" '
-           f'fill="{TEAL}"/></svg>',
-    "risk": f'<svg viewBox="0 0 40 40"><path d="M20 3l17 30H3z" fill="#FBF0DC"/><path d="M20 14v9" stroke="{TEAL}" '
-            f'stroke-width="3.2" stroke-linecap="round"/><circle cx="20" cy="28" r="2" fill="{TEAL}"/></svg>'}
-ICON = {k: _img(v, "width:38px;height:38px;display:block") for k, v in _ICON.items()}
-
-
-# ---- the view --------------------------------------------------------------------------------------------------------
-def view(facts, sel, bef, now, before, now_by, bef_by, kind, first, last, span, span_before, scope, cur,
-         no_change: str = "first period") -> tuple:
-    """(headline HTML, grid HTML) of the main view for the period and banks chosen (sel = their facts, bef = the period compared)."""
-    base = "month" if kind == "custom" else kind
-    unit = "week" if base in ("month", "week", "day") else "month"
-    end = pd.Timestamp(last if last is not None else first)
-    end = d.period_end(d.period_key(end, base), base)
-    banks = sorted({f.bank for f in sel}, key=lambda c: list(engine.BANKS).index(c) if c in engine.BANKS else 99)
-    r, rb = d.rates(now), (d.rates(before) if before else None)
-    amt_cur = "RWF" if "RWF" in now["currencies"] else (now["currencies"] or ["RWF"])[0]
-    amt = lambda t, c, m="processed": (t or {}).get("amounts", {}).get(c, {}).get(m, 0.0) if t else None
-
-    # ---- headline
-    ch = change_pill(now["processed"], before["processed"] if before else None)
-    head = (f'<div class="dv-hl">Payments processed · {escape(scope.lower() if scope == "All banks" else scope)}</div>'
-            f'<div class="dv-hv">{now["processed"]:,} {ch or ""}</div>'
-            f'<div class="dv-hp">' + (f'Prev. <b>{before["processed"]:,}</b> &nbsp;{escape(span_before)} &nbsp;·&nbsp; '
-                                     if before else f'{escape(span)} &nbsp;·&nbsp; ')
-            + f'{now["received"]:,} received by Irembo · {now["sla"]:,} late · {now["pending"]:,} pending</div>')
-
-    # ---- the four cards
-    risk = {c: a.get("pending", 0.0) + a.get("duplicate", 0.0) for c, a in now["amounts"].items()}
-    risk_txt = " · ".join(f"{c} {v:,.0f}" for c, v in risk.items() if v) or "None"
-    usd = amt(now, "USD") if "USD" in now["currencies"] and amt_cur != "USD" else None
-    cards = [
-        ("rec", "Receipt rate", "N/A" if r["receipt"] is None else f"{r['receipt'] * 100:.2f}%",
-         change_pill(r["receipt"], rb["receipt"] if rb else None, points=True) or pill(no_change, "n"),
-         f"target ≥ {d.pct_target(d.TARGET_RECEIPT)} · {now['processed'] - now['received']:,} not received"),
-        ("ont", "On time (SLA)", "N/A" if r["ontime"] is None else f"{r['ontime'] * 100:.1f}%",
-         change_pill(r["ontime"], rb["ontime"] if rb else None, points=True) or pill(no_change, "n"),
-         f"target ≥ {d.pct_target(d.TARGET_ONTIME)} · {now['sla']:,} late"),
-        ("amt", f"Amount collected · {amt_cur}", short(amt(now, amt_cur)),
-         change_pill(amt(now, amt_cur), amt(before, amt_cur) if before else None) or pill(no_change, "n"),
-         (f'USD {short(usd)} ' + (change_pill(usd, amt(before, "USD") if before else None) or "")) if usd is not None
-         else f"{amt_cur} only · never added to another currency"),
-        ("risk", "Money at risk", risk_txt if len(risk_txt) < 18 else f"{amt_cur} {short(risk.get(amt_cur, 0.0))}",
-         pill("to follow up", "a") if any(risk.values()) else pill("nothing at risk", "g"),
-         f"{now['pending']:,} pending · {now['duplicate']:,} paid twice")]
-    card_html = "".join(f'<div class="dv-card dv-k"><div class="dv-ic">{ICON[i]}</div><div class="dv-kl">{escape(l)}</div>'
-                        f'<div class="dv-kv">{escape(v)}</div><div class="dv-kf">{p}<span class="dv-go">›</span>'
-                        f'</div><div class="dv-ks">{s if "<span" in s else escape(s)}</div></div>'
-                        for i, l, v, p, s in cards)
-
-    # ---- per week (or per month for a quarter / a year), up to the end of the period
-    tr = d.trend(facts, unit, end, 11, cur, banks or None)
-    if len(tr):
-        per = tr.groupby(["period", "label"], as_index=False).agg(p=("processed", "sum"), part=("partial", "any"))
-        tra = d.trend(facts, unit, end, 11, amt_cur, banks or None)
-        amt_per = tra.groupby(["period", "label"], as_index=False)["amount"].sum()
-        series = [(row.label, int(row.p), bool(row.part)) for row in per.itertuples()]
-        aseries = [(row.label, float(row.amount), False) for row in amt_per.itertuples()]
-    else:
-        series, aseries = [], []
-    peak = max(range(len(series)), key=lambda i: series[i][1]) if series else None
-    note = ((peak, f"{'Week of ' if unit == 'week' else ''}{series[peak][0]}", f"{series[peak][1]:,} payments",
-             f"peak of the {len(series)} {unit}s") if series else None)
-    week_bars = bars(series[-7:])
-    unit_t = unit.capitalize()
-
-    # ---- merchants of the period (the reports that have merchant data)
-    mt, missing = d.merchants(sel, bef, amt_cur)
-    with_data = sorted({engine.BANKS[f.bank].NAME for f in sel if f.merchants is not None and f.bank in engine.BANKS})
-    merch_sub = escape(span) + ((" · " + ", ".join(escape(x) for x in with_data)
-                                 + (f" (the only report{'s' if len(with_data) != 1 else ''} with merchant data)"
-                                    if missing else "")) if with_data else "")
-    merch_html = "".join(f'<div class="dv-row"><span class="dv-ri">{escape(str(m.Merchant)[:1])}</span><div>'
-                         f'<div class="dv-rn">{escape(str(m.Merchant))}</div><div class="dv-rs">{m._4:.1f}% of '
-                         f'{amt_cur} notifications · {m.Transactions:,}</div></div>{pill(f"{amt_cur} {short(m.Amount)}", "g")}</div>'
-                         for m in mt.head(3).itertuples()) or \
-        '<div class="dv-empty">No merchant data in the reports of this period (made before 12/10/2026).</div>'
-
-    # ---- exceptions of the period
-    exc = [("Late (SLA)", now["sla"], BAD), ("Paid with another channel", now["duplicate"], AMBER),
-           ("Pending notification", now["pending"], AMBER_L)]
-    exc_total = sum(v for _, v, _ in exc)
-    late = [(engine.BANKS[c].FULL_NAME, t["sla"]) for c, t in now_by.items() if t is not None and t["sla"]]
-    late.sort(key=lambda x: -x[1])
-    palette = [BAD, TEAL, ACC, AMBER]
-    late_parts = [(n, v, palette[i % len(palette)]) for i, (n, v) in enumerate(late)]
-    # one bank in the view: its share of the late payments would always be 100 %, so the card shows its payments
-    # on time vs late instead
-    with_report = [c for c, t in now_by.items() if t is not None]
-    one_bank = engine.BANKS[with_report[0]].FULL_NAME if len(with_report) == 1 and with_report[0] in engine.BANKS else None
-    if one_bank:
-        late_title, late_unit = f"On time vs late · {one_bank}", "payments"
-        late_parts = [("On time", now["processed"] - now["sla"], TEAL), ("Late", now["sla"], BAD)]
-        late_empty = '<div class="dv-empty">No transactions in this period.</div>'
-    else:
-        late_title, late_unit = "Late payments by bank", "late"
-        late_empty = '<div class="dv-empty">No late payment. ✓</div>'
-    weekend = [(engine.BANKS[c].NAME, t["weekend"]) for c, t in now_by.items()
-               if t is not None and t["weekend_known"] and t["weekend"]]
-    weekend_note = "".join(f'<div class="dv-mut dv-wk">{v:,} of {escape(n)}\'s late payments were made Fri–Sun and '
-                           f'booked Monday</div>' for n, v in weekend)
-
-    # ---- needs attention
-    tag = {"bad": ("Off target", "r"), "warn": ("Watch", "a"), "info": ("No report", "n")}
-    att = d.attention(now_by, bef_by, span)
-    att_html = "".join(f'<div class="dv-row"><span class="dv-ri">!</span><div><div class="dv-rn">'
-                       f'{escape(a["title"].split(" · ")[0])}</div><div class="dv-rs">'
-                       f'{escape(a["title"].split(" · ", 1)[1])}</div></div>{pill(*tag[a["kind"]])}</div>'
-                       for a in att[:4]) or '<div class="dv-empty">Every bank is on target. ✓</div>'
-
-    hero = f'{STYLE}<div class="dv"><div class="dv-hero">{head}</div></div>'
-    return hero, f'''{STYLE}<div class="dv">
-<div class="dv-grid">
- {card_html}
- <div class="dv-card"><div class="dv-ct"><h3>Payments per {unit}</h3><span class="dv-go">›</span></div>
-  <div class="dv-sub">Faded: partial {unit} (some days not saved)</div>{week_bars}</div>
- <div class="dv-card dv-s2"><div class="dv-ct"><h3>Payments overview</h3><span class="dv-go">›</span></div>
-  <div class="dv-sub">{unit_t}s up to {escape(span)} · {escape(scope.lower() if scope == "All banks" else scope)}</div>
-  {area(series, TEAL, "dva", note) if series else '<div class="dv-empty">No period to show.</div>'}</div>
- <div class="dv-card dv-s2"><div class="dv-ct"><h3>Amount overview · {amt_cur}</h3><span class="dv-go">›</span></div>
-  <div class="dv-sub">Amount collected per {unit} · {amt_cur} only (never added to another currency)</div>
-  {area(aseries, TEAL, "dvb") if aseries else '<div class="dv-empty">No period to show.</div>'}</div>
- <div class="dv-card"><div class="dv-ct"><h3>Top merchants</h3><span class="dv-go">›</span></div>
-  <div class="dv-sub">{merch_sub}</div>{merch_html}</div>
- <div class="dv-card dv-s2"><div class="dv-ct"><h3>Exceptions by type <small>· {escape(span)}</small></h3><span class="dv-go">›</span></div>
-  <div class="dv-dwrap"><div>{legend(exc, "payments") or '<div class="dv-empty">No exception. ✓</div>'}</div>
-  {donut(exc, f"{exc_total:,}", "exceptions")}</div></div>
- <div class="dv-card dv-s2"><div class="dv-ct"><h3>{escape(late_title)} <small>· {escape(span)}</small></h3><span class="dv-go">›</span></div>
-  <div class="dv-dwrap"><div>{legend(late_parts, late_unit) or late_empty}{weekend_note}</div>
-  {donut(late_parts, f"{now['sla']:,}", "late payments")}</div></div>
- <div class="dv-card"><div class="dv-ct"><h3>Needs attention</h3><span class="dv-go">›</span></div>{att_html}</div>
-</div></div>'''
-
-
 STYLE = f'''<style>
 .dv{{font-family:"Nunito","Segoe UI",system-ui,sans-serif;color:{TEAL}}}
 .dv-hero{{margin:0 0 16px}} .dv-hl{{font-size:14px;font-weight:800;color:{MUT}}}
@@ -342,7 +91,7 @@ STYLE = f'''<style>
 .dv-hp{{font-size:14.5px;color:{MUT};margin-top:4px}} .dv-hp b{{color:{TEAL}}}
 .dv-grid{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr)) minmax(0,1.25fr);gap:16px}}
 .dv-card{{background:#fff;border:1px solid #E1EEF0;border-radius:18px;padding:18px 18px;box-shadow:0 4px 16px rgba(18,50,57,.06);min-width:0}}
-.dv-s2{{grid-column:span 2}}
+.dv-s2{{grid-column:span 2}} .dv-s3{{grid-column:span 3}}
 .dv-k .dv-ic svg{{width:38px;height:38px}} .dv-kl{{font-size:13.5px;font-weight:800;color:{MUT};margin-top:10px}}
 .dv-kv{{font-size:26px;font-weight:800;margin:4px 0 10px;color:{TEAL}}}
 .dv-kf{{display:flex;justify-content:space-between;align-items:center;gap:6px}}
@@ -367,7 +116,7 @@ STYLE = f'''<style>
 .dv-lg{{display:flex;gap:9px;align-items:flex-start;margin:9px 0;font-size:13.5px}}
 .dv-dot{{width:11px;height:11px;border-radius:50%;margin-top:4px;flex:none}} .dv-mut{{color:{MUT};font-size:12px}}
 .dv-wk{{max-width:280px;margin-top:8px}} .dv-empty{{font-size:13px;color:{MUT};padding:16px 0}}
-@media (max-width:1100px){{.dv-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}} .dv-s2{{grid-column:span 2}}}}
+@media (max-width:1100px){{.dv-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}} .dv-s2,.dv-s3{{grid-column:span 2}}}}
 </style>'''
 
 
@@ -440,3 +189,432 @@ def pdf(page_html: str, timeout: int = 60) -> bytes:
         if not out.exists() or out.stat().st_size == 0:
             raise RuntimeError(f"Chrome could not print the PDF ({run.stderr.decode(errors='ignore')[-300:]})")
         return out.read_bytes()
+
+
+# =====================================================================================================================
+# THE DASHBOARD (22/10/2026): four key cards, then two rows of two charts, each chart with a Table view and a PDF
+# =====================================================================================================================
+USD_C, EXC = ("#2E7D4F", {"SLA violated": BAD, "Paid with other channel": AMBER, "Pending notification": "#E58A2C"})
+
+
+def _arrow(now, before, good_up=True, points=False, fmt=lambda v: f"{v:,}"):
+    """'↗ 2.1% from 4,290' (green when good, red when bad), or None when there is nothing to compare with."""
+    if now is None or before is None:
+        return None
+    if points:
+        diff = (now - before) * 100
+        if abs(diff) < 0.005:
+            return f'<span class="dk-n">= no change from {fmt(before)}</span>'
+        txt, up = f"{abs(diff):.2f} pts", diff > 0
+    else:
+        if not before:
+            return None
+        x = (now - before) / before * 100
+        if abs(x) < 0.05:
+            return f'<span class="dk-n">= no change from {fmt(before)}</span>'
+        txt, up = f"{abs(x):.1f}%", x > 0
+    good = up == good_up
+    return f'<span class="{"dk-g" if good else "dk-r"}">{"↗" if up else "↘"} {txt}</span> from {fmt(before)}'
+
+
+def kpi_cards(now: dict, before: dict | None, fu: dict | None = None) -> str:
+    """AMOUNT (received; RWF and USD each in full, never added) · RATE (received notification ÷ processed
+    transaction) · TRANSACTIONS (processed) · SLA (% violated). With a comparison: the change; else what it is."""
+    rec_amt = lambda t: {c: a.get("received", 0.0) for c, a in (t or {}).get("amounts", {}).items()}
+    amt, amt_b = rec_amt(now), (rec_amt(before) if before else None)
+    curs = [c for c in ("RWF", "USD") if c in amt] + [c for c in amt if c not in ("RWF", "USD")]
+    rate = lambda t: t["received"] / t["processed"] if t and t["processed"] else None
+    sla = lambda t: t["sla"] / t["processed"] if t and t["processed"] else None
+    pct = lambda v, n=2: "N/A" if v is None else f"{v * 100:.{n}f}%"
+    amount_big = "<br>".join(f"{c} {short(amt[c])}" for c in curs) or "–"
+    amount_sub = (" · ".join(f"{c} " + (_arrow(amt[c], amt_b.get(c), fmt=lambda v: short(v)) or "no earlier figure")
+                             for c in curs) if amt_b is not None else "Total received (notifications received)")
+    cards = [
+        ("AMOUNT", "money", amount_big, amount_sub),
+        ("RATE", "rate", pct(rate(now)),
+         _arrow(rate(now), rate(before), points=True, fmt=pct) if before else "Received notification ÷ processed transaction"),
+        ("TRANSACTIONS", "tx", f"{now['processed']:,}",
+         _arrow(now["processed"], before["processed"]) if before else "Processed transactions in this period"),
+        ("SLA", "sla", pct(sla(now), 1),
+         _arrow(sla(now), sla(before), good_up=False, points=True, fmt=lambda v: pct(v, 1)) if before
+         else f"Violated: {now['sla']:,} of {now['processed']:,} processed transactions"),
+    ]
+    # the follow-up after the report (services/followup.py): the report's figures are never changed, the follow-up
+    # is shown next to them
+    if fu is not None:
+        if fu.get("followed"):
+            s = fu["summary"]
+            if s["open"]:
+                cards[0] = cards[0][:3] + (cards[0][3] + f'<div class="dk-f">Still to follow up: '
+                                           f'{escape(fu["open_money"])} ({s["by_type"]["Pending"][0]:,} pending, '
+                                           f'{s["by_type"]["Paid twice"][0]:,} paid twice)</div>',)
+            if s["received_later"] and now["processed"]:
+                after = (now["received"] + s["received_later"]) / now["processed"]
+                cards[1] = cards[1][:3] + (cards[1][3] + f'<div class="dk-f"><b>{after * 100:.2f}%</b> after follow-up '
+                                           f'({s["received_later"]:,} received later)</div>',)
+            red = " dk-red" if s["overdue"] else ""
+            if s["total"]:
+                left = s["open"]
+                sub = (f'{left:,} still to check after the report ({s["by_type"]["Pending"][0]:,} pending, '
+                       f'{s["by_type"]["Paid twice"][0]:,} paid twice) · {escape(fu["open_money"])}' if left
+                       else "Nothing left to check after the report")
+                cards.append(("FOLLOW-UP", "fu", f'<span class="{red.strip()}">{s["resolved"]:,} of {s["total"]:,} '
+                                                 f'checked</span>', sub))
+            else:
+                cards.append(("FOLLOW-UP", "fu", '<span class="dk-msg">Nothing to check</span>',
+                              "No pending or paid-twice payment after the report"))
+        else:
+            cards.append(("FOLLOW-UP", "fu", f'<span class="dk-msg">Not tracked for this {escape(fu.get("unit", "period"))}</span>',
+                          "We track what happened to pending and paid-twice payments after the report"))
+    return (f'{STYLE_D}<div class="dk" style="grid-template-columns:repeat({len(cards)},minmax(0,1fr))">' + "".join(
+        f'<div class="dk-c"><div class="dk-h"><span>{label}</span>{KPI_ICON[ic]}</div>'
+        f'<div class="dk-v{" dk-v2" if "<br>" in big else ""}">{big}</div><div class="dk-s">{sub}</div></div>'
+        for label, ic, big, sub in cards) + "</div>")
+
+
+def lines(labels: list, series: list, partial: list | None = None, fill: bool = False) -> str:
+    """A line chart: series [(name, [values], colour)] over the labels (a '*' marks a partial period)."""
+    W, H, L, R, T, B = 600, 270, 46, 588, 30, 232
+    n = len(labels)
+    if not n:
+        return '<div class="dv-empty">No period to show.</div>'
+    top, step = _nice(max([v for _, vals, _ in series for v in vals if v is not None and not pd.isna(v)] + [1]))
+    xs = [L + 18 + (i * (R - L - 36) / (n - 1) if n > 1 else (R - L - 36) / 2) for i in range(n)]
+    g = _axis(L, R, T, B, top, step)
+    for name, vals, col in series:
+        here = [(x, v, lab) for x, v, lab in zip(xs, vals, labels) if v is not None and not pd.isna(v)]
+        xs_s, vals, labs = [h[0] for h in here], [h[1] for h in here], [h[2] for h in here]
+        pts = [(x, B - v / top * (B - T)) for x, v in zip(xs_s, vals)]
+        if len(pts) > 1:
+            path = _smooth(pts, B)
+            if fill:
+                g += (f'<defs><linearGradient id="dlf" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="{col}" '
+                      f'stop-opacity=".18"/><stop offset="1" stop-color="{col}" stop-opacity="0"/></linearGradient></defs>'
+                      f'<path d="{path} L{pts[-1][0]:.1f},{B} L{pts[0][0]:.1f},{B} Z" fill="url(#dlf)"/>')
+            g += f'<path d="{path}" fill="none" stroke="{col}" stroke-width="2.4"/>'
+        g += "".join(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3.2" fill="{col}"><title>{escape(name)} · '
+                     f'{escape(lab)}: {v:,.0f}</title></circle>' for (x, y), v, lab in zip(pts, vals, labs))
+    every = max(1, math.ceil(n / 12))
+    for i, (x, lab) in enumerate(zip(xs, labels)):
+        if i % every == 0 or i == n - 1:
+            star = "*" if partial and partial[i] else ""
+            g += f'<text x="{x:.1f}" y="{B + 18}" class="dv-ax" text-anchor="middle">{escape(lab)}{star}</text>'
+    return _img(f'<svg viewBox="0 0 {W} {H}">{g}</svg>')
+
+
+def dual_bars(labels: list, rwf: list, usd: list, partial: list | None = None) -> str:
+    """RWF and USD side by side per period, each on its own scale (RWF on the left axis, USD on the right):
+    the two currencies are never added or drawn on one scale."""
+    W, H, L, R, T, B = 600, 270, 52, 548, 30, 232
+    n = len(labels)
+    if not n:
+        return '<div class="dv-empty">No period to show.</div>'
+    top_r, step_r = _nice(max(rwf + [1]))
+    top_u, step_u = _nice(max(usd + [1]))
+    g, v = "", 0.0
+    while v <= top_r + 1e-9:
+        y = B - v / top_r * (B - T)
+        g += (f'<line x1="{L}" x2="{R}" y1="{y:.1f}" y2="{y:.1f}" class="dv-gl"/>'
+              f'<text x="{L - 8}" y="{y + 4:.1f}" class="dv-ax" text-anchor="end">{short(v) if v else "0"}</text>')
+        v += step_r
+    v = 0.0
+    while v <= top_u + 1e-9:
+        y = B - v / top_u * (B - T)
+        g += f'<text x="{R + 8}" y="{y + 4:.1f}" class="dv-ax" fill="{USD_C}">{short(v) if v else "0"}</text>'
+        v += step_u
+    g += (f'<text x="{L - 8}" y="12" class="dv-ax" text-anchor="end" font-weight="800" fill="{TEAL}">RWF</text>'
+          f'<text x="{R + 8}" y="12" class="dv-ax" font-weight="800" fill="{USD_C}">USD</text>')
+    slot = (R - L) / n
+    bw = min(22, slot * .32)
+    for i, lab in enumerate(labels):
+        cx = L + slot * (i + .5)
+        for val, top, col, dx, cur in ((rwf[i], top_r, TEAL, -bw - 1.5, "RWF"), (usd[i], top_u, USD_C, 1.5, "USD")):
+            h = val / top * (B - T) if top else 0
+            g += (f'<rect x="{cx + dx:.1f}" y="{B - h:.1f}" width="{bw:.1f}" height="{h:.1f}" rx="3" fill="{col}">'
+                  f'<title>{escape(lab)} · {cur} {val:,.0f}</title></rect>')
+        star = "*" if partial and partial[i] else ""
+        g += f'<text x="{cx:.1f}" y="{B + 18}" class="dv-ax" text-anchor="middle">{escape(lab)}{star}</text>'
+    return _img(f'<svg viewBox="0 0 {W} {H}">{g}</svg>')
+
+
+def chart_legend(items: list) -> str:
+    return '<div class="dl">' + "".join(f'<span><i style="background:{c}"></i>{escape(n)}</span>'
+                                         for n, c in items) + "</div>"
+
+
+def _mchange(m) -> str:
+    """' · ↗ 8%' / ' · new' after a merchant, when a period is compared with (columns Before, Change %, Note)."""
+    note = getattr(m, "Note", "") or ""
+    if note == "new":
+        return ' · <span class="dk-g">new</span>'
+    ch = getattr(m, "_6", None)                       # "Change %"
+    if ch is None or pd.isna(ch):
+        return ""
+    return f' · <span class="{"dk-g" if ch >= 0 else "dk-r"}">{"↗" if ch >= 0 else "↘"} {abs(ch):.0f}%</span>'
+
+
+def merchant_bars(table: pd.DataFrame, cur: str, n: int = 5) -> str:
+    """The top merchants: the bar = share of the received notifications (%), then the number of transactions; the
+    amount on hover."""
+    rows = table.head(n)
+    if rows.empty:
+        return '<div class="dv-empty">No merchant data in the reports of this period (made before 12/10/2026).</div>'
+    palette = [TEAL, ACC, USD_C, AMBER, "#7A8F94"]
+    top = max(rows["Share %"].max(), 1e-9)
+    return STYLE_D + '<div class="dm">' + "".join(
+        f'<div class="dm-r" data-tip="{escape(str(m.Merchant))} · {cur} {m.Amount:,.0f} received · '
+        f'{m.Transactions:,} transactions · {m._4:.1f}%">'
+        f'<span class="dm-n"><i style="background:{palette[i % 5]}"></i>{escape(str(m.Merchant))}</span>'
+        f'<span class="dm-b"><span style="width:{m._4 / top * 100:.1f}%"></span></span>'
+        f'<span class="dm-v"><b>{m._4:.1f}%</b> · {m.Transactions:,}{_mchange(m)}</span></div>'
+        for i, m in enumerate(rows.itertuples())) + (
+        f'<div class="dm-note">Bar: share of the {cur} received notifications; the figure after it: transactions. '
+        f'Hover a merchant for its amount.</div></div>')
+
+
+def table_html(df: pd.DataFrame) -> str:
+    """The numbers behind a chart, as a plain table (numbers right-aligned)."""
+    head = "".join(f"<th>{escape(str(c))}</th>" for c in df.columns)
+    blank = lambda v: v is None or (isinstance(v, float) and pd.isna(v)) or str(v) in ("nan", "None", "<NA>")
+    body = "".join("<tr>" + "".join(
+        '<td class="n">–</td>' if blank(v) else
+        f'<td class="{"n" if isinstance(v, (int, float)) else ""}">'
+        f'{escape(f"{v:,.2f}" if isinstance(v, float) and not float(v).is_integer() else f"{v:,.0f}" if isinstance(v, (int, float)) else str(v))}</td>'
+        for v in row) + "</tr>" for row in df.itertuples(index=False))
+    return f'{STYLE_D}<table class="dt"><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>'
+
+
+def card_page(title: str, sub: str, scope: str, period: str, body: str, made: str) -> str:
+    """One chart (or its table) on an A4 landscape page, with the scope and period, for its PDF."""
+    return f'''<!doctype html><html><head><meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>@page {{size: A4 landscape; margin: 12mm;}} html, body {{margin: 0; background: #fff;
+-webkit-print-color-adjust: exact; print-color-adjust: exact; font-family: Nunito, "Segoe UI", system-ui, sans-serif;
+color: {TEAL};}} .pb {{background: {TEAL}; border-left: 8px solid {GREEN}; border-radius: 10px; color: #fff;
+padding: 14px 22px; margin-bottom: 18px;}} .pk {{color: {GREEN}; font-weight: 800; font-size: 13px;}}
+.pt {{font-size: 24px; font-weight: 800;}} .ps {{font-size: 13px; color: #D6E4E6;}} .sub {{color: {MUT};
+font-size: 13px; margin: -8px 0 12px;}} img {{max-height: 120mm;}}</style></head><body>
+<div class="pb"><div class="pk">{escape(scope.upper())} · {escape(period)}</div><div class="pt">{escape(title)}</div>
+<div class="ps">IremboPay Reports Dashboard · generated on {escape(made)}</div></div>
+<div class="sub">{escape(sub)}</div>{body}</body></html>'''
+
+
+_KPI = {
+    "money": '<path d="M4 7h16v10H4z" fill="none" stroke-width="1.6"/><circle cx="12" cy="12" r="2.4" fill="none" stroke-width="1.6"/>',
+    "rate": '<path d="M5 19L19 5" stroke-width="1.6"/><circle cx="7" cy="7" r="2.2" fill="none" stroke-width="1.6"/><circle cx="17" cy="17" r="2.2" fill="none" stroke-width="1.6"/>',
+    "tx": '<path d="M4 8h13l-3-3M20 16H7l3 3" fill="none" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>',
+    "fu": '<path d="M5 4h14v16H5z" fill="none" stroke-width="1.6"/><path d="M8 12l3 3 5-6" fill="none" stroke-width="1.6" stroke-linecap="round"/>',
+    "sla": '<circle cx="12" cy="13" r="7" fill="none" stroke-width="1.6"/><path d="M12 9v4l3 2M10 3h4" fill="none" stroke-width="1.6" stroke-linecap="round"/>'}
+KPI_ICON = {k: _img(f'<svg viewBox="0 0 24 24" stroke="{MUT}">{v}</svg>', "width:20px;height:20px;display:block")
+            for k, v in _KPI.items()}
+
+STYLE_D = f'''<style>
+.dk{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:13px;font-family:"Nunito","Segoe UI",system-ui,sans-serif;color:{TEAL}}}
+.dk-c{{background:#fff;border:1px solid #E1EEF0;border-radius:12px;padding:15px 17px;box-shadow:0 1px 3px rgba(18,50,57,.06);min-width:0}}
+.dk-h{{display:flex;justify-content:space-between;align-items:center;font-size:11px;font-weight:700;letter-spacing:.06em;color:{MUT}}}
+.dk-v{{font-size:26px;font-weight:800;margin:7px 0 5px;line-height:1.15}} .dk-v2{{font-size:19px}}
+.dk-s{{font-size:11.5px;color:{MUT}}} .dk-f{{font-size:11px;color:#8A5B00;margin-top:5px}} .dk-f b{{color:{TEAL}}}
+.dk-red{{color:{BAD}}} .dk-msg{{font-size:16px;line-height:1.3;display:block}} .dk-g{{color:#2E7D4F;font-weight:800}} .dk-r{{color:{BAD};font-weight:800}} .dk-n{{color:{MUT}}}
+.dl{{display:flex;flex-wrap:wrap;justify-content:center;gap:14px;font-size:11.5px;color:{TEAL};margin-top:4px;font-family:"Nunito",system-ui,sans-serif}}
+.dl i{{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px}}
+.dm{{font-family:"Nunito","Segoe UI",system-ui,sans-serif;color:{TEAL}}}
+.dm-r{{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,2fr) auto;align-items:center;gap:14px;padding:11px 8px;
+  border-radius:10px;position:relative;cursor:default;transition:background .12s}}
+.dm-r:hover{{background:{PALE}}} .dm-r:hover .dm-b span{{background:{ACC}}}
+.dm-r:hover::after{{content:attr(data-tip);position:absolute;right:8px;top:-28px;background:{TEAL};color:#fff;font-size:11px;
+  font-weight:700;padding:5px 10px;border-radius:8px;white-space:nowrap;z-index:5;box-shadow:0 4px 12px rgba(18,50,57,.18)}}
+.dm-n{{font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}} .dm-n i{{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:9px}}
+.dm-b{{height:10px;border-radius:99px;background:#EEF3F4;overflow:hidden}} .dm-b span{{display:block;height:100%;border-radius:99px;background:{TEAL}}}
+.dm-v{{font-size:11.5px;color:{MUT};white-space:nowrap}} .dm-v b{{color:{TEAL};font-size:12.5px}}
+.dm-note{{font-size:12px;color:{MUT};margin-top:10px}}
+.dt{{width:100%;border-collapse:collapse;font-family:"Nunito","Segoe UI",system-ui,sans-serif;font-size:12px;color:{TEAL}}}
+.dt th{{text-align:left;font-weight:800;color:{MUT};border-bottom:1px solid #E1EEF0;padding:7px 8px}}
+.dt td{{border-bottom:1px solid #F0F4F5;padding:7px 8px}} .dt td.n{{text-align:right;font-variant-numeric:tabular-nums}}
+.dt th:not(:first-child){{text-align:right}}
+@media (max-width:1100px){{.dk{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}
+</style>'''
+
+
+# ---- the same charts, interactive on the screen (Altair: the figures follow the cursor); the PDF keeps the drawings
+def _alt_theme(chart, height=250):
+    return (chart.properties(height=height)
+            .configure_view(strokeWidth=0)
+            .configure_axis(labelColor=MUT, titleColor=MUT, gridColor="#E6EEF0", gridDash=[3, 4], domain=False,
+                            tickColor="#E6EEF0", labelFont="Nunito", titleFont="Nunito", labelFontSize=11)
+            .configure_legend(orient="bottom", labelColor=TEAL, labelFont="Nunito", labelFontSize=12, title=None,
+                              symbolType="circle")
+            .configure(font="Nunito"))
+
+
+def alt_lines(table: pd.DataFrame, series: list, fill: bool = False):
+    """Line chart of table columns series [(column, colour)] over table["Period"]; hovering a period shows every
+    figure of that period (a vertical guide follows the cursor)."""
+    import altair as alt
+    names = [c for c, _ in series]
+    order = list(table["Period"])
+    long = table.melt(id_vars="Period", value_vars=names, var_name="Figure", value_name="Value")
+    x = alt.X("Period:N", sort=order, title=None, axis=alt.Axis(labelAngle=0))
+    color = alt.Color("Figure:N", scale=alt.Scale(domain=names, range=[c for _, c in series]),
+                      legend=None)                      # the legend is drawn under the chart (chart_legend)
+    hover = alt.selection_point(fields=["Period"], nearest=True, on="pointerover", clear="pointerout", empty=False)
+    base = alt.Chart(long).encode(x=x, y=alt.Y("Value:Q", title=None, axis=alt.Axis(format=",.0f", tickMinStep=1)),
+                                  color=color)
+    layers = []
+    if fill and len(series) == 1:
+        layers.append(base.mark_area(interpolate="monotone", opacity=.15))
+    layers.append(base.mark_line(interpolate="monotone", strokeWidth=2.6))
+    layers.append(base.mark_circle(size=40).encode(opacity=alt.value(1)))
+    tips = [alt.Tooltip("Period:N")] + [alt.Tooltip(f"{c}:Q", format=",") for c in table.columns if c != "Period"]
+    rule = (alt.Chart(table).mark_rule(color=TEAL, strokeDash=[4, 4], opacity=.5)
+            .encode(x=x, opacity=alt.condition(hover, alt.value(.6), alt.value(0)), tooltip=tips).add_params(hover))
+    points = base.mark_circle(size=110).encode(opacity=alt.condition(hover, alt.value(1), alt.value(0))).transform_filter(hover)
+    return _alt_theme(alt.layer(*layers, rule, points))
+
+
+def alt_dual_bars(table: pd.DataFrame):
+    """RWF and USD received per period side by side, each on its own axis (RWF left, USD right); hovering a bar
+    shows both amounts of that period."""
+    import altair as alt
+    order = list(table["Period"])
+    x = alt.X("Period:N", sort=order, title=None, axis=alt.Axis(labelAngle=0))
+    tips = [alt.Tooltip("Period:N"), alt.Tooltip("RWF received:Q", format=",.0f"),
+            alt.Tooltip("USD received:Q", format=",.2f")]
+    rwf = alt.Chart(table).mark_bar(xOffset=-9, width=16, cornerRadiusTopLeft=3, cornerRadiusTopRight=3, color=TEAL).encode(
+        x=x, y=alt.Y("RWF received:Q", title="RWF", axis=alt.Axis(format="~s", titleColor=TEAL, orient="left")),
+        tooltip=tips)
+    usd = alt.Chart(table).mark_bar(xOffset=9, width=16, cornerRadiusTopLeft=3, cornerRadiusTopRight=3, color=USD_C).encode(
+        x=x, y=alt.Y("USD received:Q", title="USD", axis=alt.Axis(format="~s", titleColor=USD_C, orient="right")),
+        tooltip=tips)
+    return _alt_theme(alt.layer(rwf, usd).resolve_scale(y="independent"))
+
+
+FU_C = {"Resolved": "#2E7D4F", "Still open": AMBER, "Overdue": BAD}
+
+
+def stacked_bars(labels: list, parts: list) -> str:
+    """Stacked bars per period: parts [(name, [values], colour)] (drawn for the PDF)."""
+    W, H, L, R, T, B = 600, 270, 46, 588, 30, 232
+    n = len(labels)
+    if not n:
+        return '<div class="dv-empty">No period to show.</div>'
+    totals = [sum(p[1][i] for p in parts) for i in range(n)]
+    top, step = _nice(max(totals + [1]))
+    g = _axis(L, R, T, B, top, step)
+    slot = (R - L) / n
+    bw = min(34, slot * .5)
+    for i, lab in enumerate(labels):
+        x, y = L + slot * (i + .5) - bw / 2, B
+        for name, vals, col in parts:
+            h = vals[i] / top * (B - T)
+            if h:
+                g += (f'<rect x="{x:.1f}" y="{y - h:.1f}" width="{bw:.1f}" height="{h:.1f}" fill="{col}">'
+                      f'<title>{escape(lab)} · {escape(name)}: {vals[i]:,}</title></rect>')
+                y -= h
+        g += f'<text x="{x + bw / 2:.1f}" y="{B + 18}" class="dv-ax" text-anchor="middle">{escape(lab)}</text>'
+    return _img(f'<svg viewBox="0 0 {W} {H}">{g}</svg>')
+
+
+def alt_stacked(table: pd.DataFrame, parts: list):
+    """The same stacked bars, interactive: hovering a bar shows every figure of its period."""
+    import altair as alt
+    names = [n for n, _ in parts]
+    long = table.melt(id_vars="Period", value_vars=names, var_name="Status", value_name="Items")
+    tips = [alt.Tooltip("Period:N")] + [alt.Tooltip(f"{c}:Q", format=",") for c in table.columns if c != "Period"]
+    chart = (alt.Chart(long).mark_bar(size=34).encode(
+        x=alt.X("Period:N", sort=list(table["Period"]), title=None, axis=alt.Axis(labelAngle=0)),
+        y=alt.Y("Items:Q", stack=True, title=None, axis=alt.Axis(format=",d", tickMinStep=1)),
+        color=alt.Color("Status:N", scale=alt.Scale(domain=names, range=[c for _, c in parts]), legend=None),
+        order=alt.Order("order:Q")).transform_calculate(order=f"indexof({names!r}, datum.Status)"))
+    hover = (alt.Chart(table).mark_bar(size=34, opacity=0).encode(
+        x=alt.X("Period:N", sort=list(table["Period"])), y=alt.Y("Total:Q"), tooltip=tips))
+    return _alt_theme(alt.layer(chart, hover))
+
+
+# ---- comparison mode (23/10/2026): this period against the one compared with, lined up by position -----------------
+PREV = "#9FB3B7"                                         # the period compared with: a lighter colour (dashed line)
+
+
+def position_labels(kind: str, n: int) -> list:
+    """How periods are lined up when two are compared: by their place in the period (Week 1 with Week 1)."""
+    if kind == "week":
+        return ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][:n] + [f"Day {i}" for i in range(8, n + 1)]
+    unit = {"month": "Week", "quarter": "Month", "year": "Q"}[kind]
+    return [f"{unit} {i}" if unit != "Q" else f"Q{i}" for i in range(1, n + 1)]
+
+
+def group_bars(labels: list, series: list) -> str:
+    """Bars side by side per label, one per series [(name, [values], colour)], one scale (drawn for the PDF)."""
+    W, H, L, R, T, B = 600, 270, 52, 588, 30, 232
+    n = len(labels)
+    if not n:
+        return '<div class="dv-empty">No period to show.</div>'
+    top, step = _nice(max([v for _, vals, _ in series for v in vals if v is not None and not pd.isna(v)] + [1]))
+    g = _axis(L, R, T, B, top, step)
+    slot = (R - L) / n
+    bw = min(20, slot * .7 / max(len(series), 1))
+    for i, lab in enumerate(labels):
+        x0 = L + slot * (i + .5) - bw * len(series) / 2
+        for j, (name, vals, col) in enumerate(series):
+            v = vals[i] if i < len(vals) and vals[i] is not None and not pd.isna(vals[i]) else 0
+            h = v / top * (B - T)
+            g += (f'<rect x="{x0 + j * bw:.1f}" y="{B - h:.1f}" width="{bw - 2:.1f}" height="{h:.1f}" rx="2" '
+                  f'fill="{col}"><title>{escape(lab)} · {escape(name)}: {v:,.0f}</title></rect>')
+        g += f'<text x="{L + slot * (i + .5):.1f}" y="{B + 18}" class="dv-ax" text-anchor="middle">{escape(lab)}</text>'
+    return _img(f'<svg viewBox="0 0 {W} {H}">{g}</svg>')
+
+
+def _tips(table: pd.DataFrame, fmt: str) -> list:
+    """Every column of a table in the tooltip: numbers formatted, text as it is."""
+    import altair as alt
+    out = []
+    for c in table.columns:
+        num = pd.api.types.is_numeric_dtype(pd.to_numeric(table[c], errors="coerce")) and \
+            pd.to_numeric(table[c], errors="coerce").notna().any() and c not in ("Position", "Exception")
+        out.append(alt.Tooltip(f"{c}:Q", format=fmt) if num else alt.Tooltip(f"{c}:N"))
+    return out
+
+
+def alt_compare_lines(table: pd.DataFrame, now: str, before: str, color: str):
+    """Two lines over the same positions: this period (solid) and the one compared with (dashed, lighter); hovering
+    a point (or near it) shows both periods' figures, their dates and the change."""
+    import altair as alt
+    table = table.copy()
+    for c in (now, before, "Change %"):                  # numbers (a missing week = NaN, not a mixed column)
+        if c in table:
+            table[c] = pd.to_numeric(table[c], errors="coerce")
+    order = list(table["Position"])
+    long = table.melt(id_vars="Position", value_vars=[now, before], var_name="Period", value_name="Value")
+    long = long.dropna(subset=["Value"]).merge(table, on="Position")
+    x = alt.X("Position:N", sort=order, title=None, axis=alt.Axis(labelAngle=0))
+    col = alt.Color("Period:N", scale=alt.Scale(domain=[now, before], range=[color, PREV]), legend=None)
+    dash = alt.StrokeDash("Period:N", scale=alt.Scale(domain=[now, before], range=[[1, 0], [6, 4]]), legend=None)
+    base = alt.Chart(long).encode(x=x, y=alt.Y("Value:Q", title=None, axis=alt.Axis(format=",.0f")), color=col)
+    tips = _tips(table, ",")
+    hover = alt.selection_point(fields=["Position"], nearest=True, on="pointerover", clear="pointerout", empty=False)
+    points = base.mark_circle(size=60).encode(
+        size=alt.condition(hover, alt.value(140), alt.value(60)), tooltip=tips).add_params(hover)
+    # the whole height above each position answers the cursor (an invisible wide band), not only the small points
+    band = alt.Chart(table).mark_rule(strokeWidth=36, opacity=0.001).encode(x=x, tooltip=tips)
+    return _alt_theme(alt.layer(base.mark_line(interpolate="monotone", strokeWidth=2.6).encode(strokeDash=dash),
+                                points, band))
+
+
+def alt_group_bars(table: pd.DataFrame, cat: str, series: list, horizontal: bool = False):
+    """Bars side by side per category (series [(column, colour)]), one scale; hovering shows every figure."""
+    import altair as alt
+    names = [c for c, _ in series]
+    long = table.melt(id_vars=cat, value_vars=names, var_name="Series", value_name="Value")
+    tips = _tips(table, ",.0f")
+    long = long.merge(table, on=cat)
+    color = alt.Color("Series:N", scale=alt.Scale(domain=names, range=[c for _, c in series]), legend=None)
+    if horizontal:
+        chart = alt.Chart(long).mark_bar(cornerRadiusEnd=3).encode(
+            y=alt.Y(f"{cat}:N", sort=list(table[cat]), title=None, axis=alt.Axis(labelLimit=220)),
+            yOffset=alt.YOffset("Series:N", sort=names),
+            x=alt.X("Value:Q", title=None, axis=alt.Axis(format=",.0f")), color=color, tooltip=tips)
+    else:
+        chart = alt.Chart(long).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
+            x=alt.X(f"{cat}:N", sort=list(table[cat]), title=None, axis=alt.Axis(labelAngle=0)),
+            xOffset=alt.XOffset("Series:N", sort=names),
+            y=alt.Y("Value:Q", title=None, axis=alt.Axis(format="~s")), color=color, tooltip=tips)
+    return _alt_theme(chart)
