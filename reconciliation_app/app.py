@@ -1320,6 +1320,9 @@ def _folder_field(label: str, key: str, default: str, kind: str):
     folder it picked for this bank at once (config.save_one_folder: the other folder, if already set, is never
     touched) - a short "Saved" note confirms it. The box can still be typed or pasted into directly; that still
     needs "Save folder settings" below, same as before."""
+    pending_key = f"{key}_pending"
+    if pending_key in state:
+        state[key] = state.pop(pending_key)
     st.text_input(label, value=default, key=key)
     if state.pop(f"{key}_just_saved", False):
         st.markdown('<div class="prev-found save-note"><b>Saved</b></div>', unsafe_allow_html=True)
@@ -1329,7 +1332,9 @@ def _folder_field(label: str, key: str, default: str, kind: str):
         with st.spinner("Waiting for the folder window…"):
             path, error = folder_picker.browse_folder(f"Choose the {label}", state.get(key, default))
         if path:
-            state[key] = path
+            # the text_input above already owns this key for the current run, so the new value is staged here
+            # and only applied next run, just before that widget is (re)created
+            state[pending_key] = path
             config.save_one_folder(bank.CODE, kind, path)
             state[f"{key}_just_saved"] = True
             st.rerun()
