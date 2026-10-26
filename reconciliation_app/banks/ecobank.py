@@ -246,9 +246,13 @@ def duplicate(rows: pd.DataFrame) -> pd.Series:
 #    or not IremboPay ever matched it.
 # =====================================================================================================================
 def _requested(rows, attempts, a, b):
-    """Invoices Ecobank sent any attempt for in [a, b): a retried, unresolved invoice stays visible."""
-    sent = attempts.loc[(attempts["Request Date"] >= a) & (attempts["Request Date"] < b), "invoice_number"]
-    return rows["invoice_number"].isin(set(sent))
+    """Rows Ecobank itself requested in [a, b), by their own Request Date - one_row_per_invoice has already
+    picked which attempt counts (the earliest one, or the earliest successful one after a failure IremboPay
+    knows about), so that attempt's own date decides its week, never another date the invoice happens to be
+    re-listed on elsewhere (a credit already counted in an earlier week must not be pulled into a later one just
+    because the statement re-lists it there too - approved 2026-10-26, closes the remaining gap against the
+    reconciliation notebooks). attempts is kept for a consistent signature with other banks' hooks; unused here."""
+    return rows["Request Date"].between(a, b, inclusive="left")
 
 
 def in_period(rows, attempts, start, end) -> pd.Series:

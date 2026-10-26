@@ -69,6 +69,52 @@ def test_a_bank_success_row_irembopay_never_matched_is_still_processed_and_pendi
     assert processed == notified + pending + duplicate
 
 
+def statement_with_biller_code(rows):
+    """rows: [(request_date, invoice, cba_rsp_msg, biller_rsp_code, cba_ref, amount)] - like statement(), but the
+    Biller Rsp Code (IremboPay's own acknowledgement to Ecobank, read by one_row_per_invoice) is given explicitly
+    instead of always "000", so a genuinely failed attempt can be told apart from a successful one."""
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Source Channel", "Biller Code", "Bill Ref No", "Ccy", "Amount", "Request Date", "Cba Rsp Code",
+              "Cba Rsp Msg", "Biller Rsp Code", "Biller Rsp Msg", "Cba Ref No", "Customer Ref No"])
+    for request, invoice, cba_msg, biller_code, cba_ref, amount in rows:
+        code = "000" if cba_msg == "SUCCESS" else "400"
+        ws.append(["AGENCYBANKING", "", invoice, "RWF", amount, request, code, cba_msg, biller_code, "", cba_ref, ""])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_a_credit_already_counted_in_an_earlier_week_is_not_pulled_into_a_later_one(tmp_path):
+    # Ecobank re-lists an already-successful credit on later days with the SAME reference (observed in real data,
+    # e.g. an invoice shown SUCCESS on a dozen different dates, same Cba Ref No, weeks apart, IremboPay recording
+    # paid_at long after all of them): it belongs to its own week (14 August, outside this one), never to a week
+    # it is merely re-listed in - approved 2026-10-26
+    rows = [("2026-08-14 09:00:00", "886300000001", "SUCCESS", "000", "R1", 1000),   # the real credit: its own week
+           ("2026-09-10 09:00:00", "886300000001", "SUCCESS", "000", "R1", 1000)]   # re-listed, same ref, this week
+    files = [e.read_bank_file("s.xlsx", statement_with_biller_code(rows), "ECO"),
+            e.read_payment_file("p.csv", payments([
+                dict(invoice="886300000001", amount=1000, paid_at="2026-09-20 09:05:00", ref="R1")]), "ECO")]
+    with pytest.raises(e.NoTransactionsError):
+        e.run(tmp_path / "base", WEEK, files, require_review=False, bank="ECO", report_dir=tmp_path / "r")
+
+
+def test_a_genuine_retry_that_succeeds_in_a_later_week_is_counted_there(tmp_path):
+    # the first attempt failed at the biller too (IremboPay never acknowledged it), then a real retry succeeded:
+    # the invoice is rightly processed in the week its SUCCESS actually falls in, not pulled back by the earlier
+    # failed attempt's own week
+    rows = [("2026-08-14 09:00:00", "886300000002", "FAILED", "400", "R2", 1000),
+           ("2026-09-10 09:00:00", "886300000002", "SUCCESS", "000", "R3", 1000)]
+    files = [e.read_bank_file("s.xlsx", statement_with_biller_code(rows), "ECO"),
+            e.read_payment_file("p.csv", payments([
+                dict(invoice="886300000002", amount=1000, paid_at="2026-09-10 09:05:00", ref="R3")]), "ECO")]
+    res = e.run(tmp_path / "base", WEEK, files, require_review=False, bank="ECO", report_dir=tmp_path / "r")
+    assert res.bank_rows == 1
+    t = e.counts_of(res.blocks[-1][2])
+    assert t["Overall processed payments"]["Total"] == 1
+    assert t["Overall notifications received by Irembo"]["Total"] == 1
+
+
 def test_a_request_outside_the_week_is_not_processed_even_if_irembopay_paid_at_falls_inside_it(tmp_path):
     # the bank requested this one in August; IremboPay's own paid_at happens to be in the chosen week - it must
     # NOT be counted this week (the bank statement is the source of truth, never IremboPay's own date)
