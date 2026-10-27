@@ -56,6 +56,16 @@ def test_picked_by_the_days_inside_not_the_name(tmp_path, monkeypatch):
     assert [n for n, _ in again.files] == [n for n, _ in got.files] and again.downloaded == 3
 
 
+def test_a_bank_with_no_name_prefix_considers_every_file(tmp_path, monkeypatch):
+    # BPR has no DRIVE_STATEMENTS_PREFIX (unlike Ecobank's "IREMBO PAY"): every file of its own file types is a
+    # candidate, whatever its name - its statements have no fixed naming convention
+    monkeypatch.setattr(engine, "read_bank_file", fake_read)
+    drive = FakeDrive({"Statement 01-07 August 2026.xlsx": "2026-08-03", "random_export.xlsx": "2026-08-05"})
+    got = ds.pick(drive, "folder", "BPR", "2026-08-01", "2026-08-10", tmp_path / "c.pkl")
+    assert got.considered == 2 and {n for n, _ in got.files} == {"Statement 01-07 August 2026.xlsx",
+                                                                 "random_export.xlsx"}
+
+
 def test_at_most_ten_downloads_start_per_second(tmp_path, monkeypatch):
     monkeypatch.setattr(engine, "read_bank_file", fake_read)
     drive = FakeDrive({f"IREMBO PAY2026-08-{d:02d}.xlsx": f"2026-08-{d:02d}" for d in range(1, 26)})

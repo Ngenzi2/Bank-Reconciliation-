@@ -7,6 +7,11 @@ them again; it uses integrations/google_drive.py for every Drive call and engine
     On Drive:   <Reconciliation Reports>/<bank full name>/<YYYY-MM>/<CODE>_recon_summary_<first>_to_<last>[_vN].xlsx|pdf
                 YYYY-MM = the month the period starts in; _vN = a new version saved next to an earlier one
 
+    A report the reconciliation notebooks made (not this app) is recognised too, wherever it is: their own folders
+    (<bank name>/Weekly or Monthly) and their own naming (parse_notebook_name), including a native Google Sheet
+    with no file extension. It is read for the Reports Dashboard (engine.read_notebook_report); "Compare with
+    previous period" (find_previous) does not offer one yet - it needs a report in this app's own layout.
+
     existing_reports()   the files already saved for a report (duplicate check before saving)
     save_report()        upload Excel + PDF (at the same time): as new files, replacing the existing ones, or as a
                          new version
@@ -18,6 +23,7 @@ them again; it uses integrations/google_drive.py for every Drive call and engine
 """
 from __future__ import annotations
 
+import calendar
 import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -34,6 +40,16 @@ REPORTS_FOLDER = "Reconciliation Reports"           # the name shown to the user
 NAME_RE = re.compile(r"^(?P<code>[A-Z0-9]+)" + re.escape(engine.REPORT_SUFFIX) +
                      r"(?P<a>\d\d-\d\d-\d{4})_to_(?P<b>\d\d-\d\d-\d{4})(?: \(week (?P<w>\d+)\))?(?:_v(?P<v>\d+))?"
                      r"(?: \((?P<copy>\d+)\))?\.(?P<ext>xlsx|pdf)$", re.IGNORECASE)   # ' (1)': a copy saved by hand
+
+# ---- the reconciliation notebooks' own naming (CLAUDE.md's reference notebooks), read alongside the app's own:
+#      "<Bank>_report_<Month>_<Year>" (monthly) or "<Bank>_report_<Ordinal>_week_of_<Month>[_<Year>]" (weekly,
+#      the year sometimes left out); the bank is matched by its Drive folder, not by this (sometimes inconsistent)
+#      text. A native Google Sheet (no file extension) is as valid a name as a real .xlsx.
+_NB_ORDINALS = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5}
+_NB_MONTHS = {name.lower(): i for i, name in enumerate(calendar.month_name) if name}
+_NB_WEEK_RE = re.compile(r"^(?P<ord>first|second|third|fourth|fifth)_week_of_(?P<month>[a-z]+)"
+                         r"(?:_(?P<year>\d{4}))?$", re.IGNORECASE)
+_NB_MONTH_RE = re.compile(r"^(?P<month>[a-z]+)_(?P<year>\d{4})$", re.IGNORECASE)
 
 
 # ---- where a report goes ---------------------------------------------------------------------------------------------
@@ -69,6 +85,66 @@ def parse_name(name: str):
     kind = "day" if days in (0, 1) else ("week" if days in (6, 7) and a.dayofweek == 0 else "month")
     return {"code": m["code"].upper(), "kind": kind, "start": a, "label": f"{m['a']}_to_{m['b']}",
             "version": int(m["v"] or 1), "ext": m["ext"].lower(), "stem": name.rsplit(".", 1)[0]}
+
+
+def _nth_week_of_month(ordinal: int, month: int, year: int) -> pd.Timestamp | None:
+    """The Monday of the Nth week that belongs to <month> <year> (a week belongs to the month of its Thursday) -
+    the inverse of the notebooks' own week naming, e.g. 'First week of August 2026'."""
+    probe = pd.Timestamp(year=year, month=month, day=1) - pd.Timedelta(days=13)   # a week before, well clear
+    monday = probe - pd.Timedelta(days=probe.weekday())
+    weeks = []
+    for _ in range(10):                                   # a month touches at most 6 weeks
+        if engine.month_of("week", monday) == f"{year}-{month:02d}":
+            weeks.append(monday)
+        monday += pd.Timedelta(days=7)
+    return weeks[ordinal - 1] if 0 < ordinal <= len(weeks) else None
+
+
+def _notebook_year(modified, month: int) -> int:
+    """A notebook file name with no year ('...of September.xlsx'): the year of the month nearest the file's own
+    modified date (the notebooks only ever name the current or a recent past period)."""
+    when = pd.to_datetime(modified, errors="coerce", utc=True)
+    if pd.isna(when):
+        return pd.Timestamp.now().year
+    return when.year - 1 if month > when.month + 1 else when.year
+
+
+def parse_notebook_name(name: str, folder: str, modified=None):
+    """'BPR_report_First_week_of_August_2026' in folder 'BPR / Weekly' -> the same shape as parse_name(), plus
+    "notebook": True - the reconciliation notebooks' own naming, not the app's own."""
+    parts = [p.strip() for p in folder.split("/")]
+    if len(parts) < 2 or parts[-1] not in ("Weekly", "Monthly"):
+        return None
+    bank_name, kind_folder = parts[-2], parts[-1]
+    code = next((b.CODE for b in engine.BANKS.values() if b.NAME.lower() == bank_name.lower()), None)
+    if code is None:
+        return None
+    stem = Path(name).stem if Path(name).suffix.lower() in (".xlsx", ".xls") else name
+    stem = re.sub(r"\s*\(\d+\)$", "", stem)                        # a Drive copy: "... (1)"
+    m = re.match(rf"^{re.escape(bank_name)}_report_(?P<rest>.+)$", stem, re.IGNORECASE)
+    if not m:
+        return None
+    rest = m["rest"]
+    if kind_folder == "Monthly":
+        mm = _NB_MONTH_RE.match(rest)
+        if not mm or mm["month"].lower() not in _NB_MONTHS:
+            return None
+        start = pd.Timestamp(year=int(mm["year"]), month=_NB_MONTHS[mm["month"].lower()], day=1)
+        kind = "month"
+    else:
+        wm = _NB_WEEK_RE.match(rest)
+        if not wm or wm["month"].lower() not in _NB_MONTHS:
+            return None
+        month = _NB_MONTHS[wm["month"].lower()]
+        year = int(wm["year"]) if wm["year"] else _notebook_year(modified, month)
+        start = _nth_week_of_month(_NB_ORDINALS[wm["ord"].lower()], month, year)
+        if start is None:
+            return None
+        kind = "week"
+    period = engine.make_period(kind, start)
+    label = f"{period.start:%d-%m-%Y}_to_{period.last_day:%d-%m-%Y}"
+    return {"code": code, "kind": kind, "start": period.start, "label": label, "version": 1, "ext": "xlsx",
+           "stem": stem, "notebook": True}
 
 
 # ---- saving ----------------------------------------------------------------------------------------------------------
@@ -166,6 +242,8 @@ class Record:
     path: Path | None = None         # this computer
     folder: str = ""                 # where it is: 'I&M Bank / 2026-09' ('' = the top of Reconciliation Reports)
     stem: str = ""                   # name without extension: the Excel and the PDF of one report share it
+    mime: str = ""                   # Drive's own mimeType ('': this computer, or the app's own .xlsx/.pdf upload)
+    notebook: bool = False           # made by the reconciliation notebooks, not this app (engine.read_notebook_report)
 
     @property
     def month(self) -> str:
@@ -184,11 +262,12 @@ class DriveIndex:
 def drive_index(client, root_id: str, depth: int = 3) -> DriveIndex:
     """List Reconciliation Reports once: the files at the top and in its folders (up to `depth` levels). A report is
     recognised by its name (<CODE>_recon_summary_<first>_to_<last>[_vN].xlsx|pdf), wherever it is: in the app's
-    <bank>/<YYYY-MM> folders or put anywhere by hand. Nothing is moved or downloaded."""
+    <bank>/<YYYY-MM> folders or put anywhere by hand - or by the reconciliation notebooks' own naming
+    (parse_notebook_name), in their <bank name>/Weekly|Monthly folders. Nothing is moved or downloaded."""
     records, others = [], []
     files, folders = client.list_tree(root_id, depth)              # one request per level, folders included
     for f in sorted(files, key=lambda f: f.modified, reverse=True):
-        p = parse_name(f.name)
+        p = parse_name(f.name) or parse_notebook_name(f.name, f.folder, f.modified)
         if p:
             records.append(_record(f, p))
         else:
@@ -197,10 +276,10 @@ def drive_index(client, root_id: str, depth: int = 3) -> DriveIndex:
 
 
 def _record(f: DriveFile, p: dict) -> Record:
-    """A report file on Drive as a Record (p = parse_name of its name)."""
+    """A report file on Drive as a Record (p = parse_name or parse_notebook_name of its name)."""
     return Record("Google Drive", p["code"], p["kind"], p["start"], engine.period_title(p["kind"], p["label"]), f.name,
                   p["ext"], p["version"], f.size, pd.to_datetime(f.modified, errors="coerce", utc=True), file_id=f.id,
-                  folder=f.folder, stem=p["stem"])
+                  folder=f.folder, stem=p["stem"], mime=f.mime, notebook=bool(p.get("notebook")))
 
 
 def remember_saved(index: DriveIndex, results: list, bank, period) -> DriveIndex:
@@ -256,16 +335,19 @@ def _filtered(records: list, query: str) -> list:
 
 
 def find_previous(client, root_id: str, bank, period, index: DriveIndex | None = None) -> DriveFile | None:
-    """The Excel of the report of `period` on Drive, wherever it is inside Reconciliation Reports (the newest
-    version; at equal version the last saved), or None. `index`: a listing already made (Drive is not listed again)."""
+    """The Excel of the report of `period` on Drive, wherever it is inside Reconciliation Reports: this app's own
+    report when there is one, else the reconciliation notebooks' own (engine.read_report_counts reads either) -
+    the newest version; at equal standing the newest saved. `index`: a listing already made (Drive is not listed
+    again). Matched by kind and start date, not the re-parsed name: a notebook record's name is not this app's own
+    (parse_name)."""
     code = engine.get_bank(bank).CODE
-    label = period.label                                  # the dates, also for a file named '… (week 1)'
     hits = [r for r in (index or drive_index(client, root_id)).records
-            if r.bank == code and r.ext == "xlsx" and parse_name(r.name)["label"] == label]
+            if r.bank == code and r.ext == "xlsx" and r.kind == period.report_type and r.start == period.start]
     if not hits:
         return None
-    best = max(hits, key=lambda r: (r.version, r.modified if r.modified is not None else pd.Timestamp(0, tz="UTC")))
-    return DriveFile(best.file_id, best.name, size=best.size, folder=best.folder)
+    best = max(hits, key=lambda r: (not r.notebook, r.version,
+                                    r.modified if r.modified is not None else pd.Timestamp(0, tz="UTC")))
+    return DriveFile(best.file_id, best.name, size=best.size, folder=best.folder, mime=best.mime)
 
 
 def read_drive_summary(client, file_id: str, name: str, session) -> dict:
@@ -285,33 +367,37 @@ def read_drive_summary(client, file_id: str, name: str, session) -> dict:
 
 def read_drive_facts(client, record, session, data: bytes | None = None) -> list:
     """The dashboard's facts of one saved Excel report (services/dashboard.py): its summary blocks and the late
-    payments made over the weekend and booked Monday (from its Payment details). The file exists in the session's
-    temporary folder only while it is read. data: the file already downloaded (download_many), else it is."""
+    payments made over the weekend and booked Monday (from its Payment details). Works for a report this app made
+    or one the reconciliation notebooks made (record.notebook), read by engine.read_notebook_report instead - its
+    own name is not re-parsed, so a notebook report (which parse_name cannot read) still works. The file exists in
+    the session's temporary folder only while it is read. data: the file already downloaded (download_many), else
+    it is."""
     from services import dashboard
-    data = client.download(record.file_id) if data is None else data
-    p = parse_name(record.name)
-    if not p or p["ext"] != "xlsx":
+    data = client.download(record.file_id, record.mime, as_xlsx=True) if data is None else data
+    if record.ext != "xlsx":
         raise DriveError(f"{record.name}: only an Excel report can be read.")
-    path = session.file(p["kind"], f"{p['code']}{engine.REPORT_SUFFIX}{p['label']}.xlsx")
+    period = engine.make_period(record.kind, record.start)
+    path = session.file(record.kind, f"{record.bank}{engine.REPORT_SUFFIX}{period.label}.xlsx")
     try:
         path.write_bytes(data)
         no_tx = dashboard.no_transaction_fact(path, record)          # a No-Transaction Report: every count 0
         if no_tx is not None:
             return [no_tx]
-        rep = engine.read_report(path, count_reviewed=False)       # the dashboard does not use that count
+        rep = (engine.read_notebook_report(path, record.bank, period) if record.notebook
+              else engine.read_report(path, count_reviewed=False))  # the dashboard does not use that count
         try:
             sheets = pd.read_excel(path, sheet_name=["Payment details", "Pending notification",
                                                      "Duplicate payment other channel"], engine=engine.EXCEL_ENGINE)
             details = sheets["Payment details"]
-            weekend = dashboard.weekend_late(details, p["code"])
+            weekend = dashboard.weekend_late(details, record.bank)
         except Exception:                                  # an older report without these sheets: no days
             sheets, weekend = None, None
         facts = dashboard.facts_from_report(rep, record, weekend)
-        if sheets is not None:                             # the days, from its rows (checked against it): of a
-            whole = "month" if p["kind"] == "month" else "week"   # monthly report, or of a weekly report (27/10/2026)
-            for month in [f for f in facts if f.kind == whole]:
+        if sheets is not None and not record.notebook:      # the days, from its rows (checked against it): of a
+            whole = "month" if record.kind == "month" else "week"   # monthly report, or of a weekly one (27/10/2026)
+            for month in [f for f in facts if f.kind == whole]:     # not known for the notebooks' own reports
                 facts += dashboard.daily_facts(month, sheets["Payment details"], sheets["Pending notification"],
-                                               sheets["Duplicate payment other channel"], p["code"], weekend)
+                                               sheets["Duplicate payment other channel"], record.bank, weekend)
         return facts
     finally:
         session.remove(path)
@@ -324,7 +410,7 @@ def download_many(client, records: list, workers: int = 4, done=None) -> dict:
 
     def one(rec):
         try:
-            return rec.file_id, client.download(rec.file_id, http=client.thread_http())
+            return rec.file_id, client.download(rec.file_id, rec.mime, http=client.thread_http(), as_xlsx=True)
         except DriveError as err:
             return rec.file_id, err
 
@@ -336,7 +422,7 @@ def download_many(client, records: list, workers: int = 4, done=None) -> dict:
     if not parallel:
         for i, rec in enumerate(records, 1):
             try:
-                out[rec.file_id] = client.download(rec.file_id)
+                out[rec.file_id] = client.download(rec.file_id, rec.mime, as_xlsx=True)
             except DriveError as err:
                 out[rec.file_id] = err
             if done:
@@ -351,10 +437,10 @@ def download_many(client, records: list, workers: int = 4, done=None) -> dict:
     return out
 
 
-def read_drive_report(client, file_id: str, name: str, session) -> dict:
+def read_drive_report(client, file_id: str, name: str, session, mime: str = "") -> dict:
     """A saved report read back from Drive (for the viewer): {"report": engine.read_report(...), "xlsx": bytes,
     "pdf": bytes}. The file exists in the session's temporary folder only while it is read."""
-    data = client.download(file_id)
+    data = client.download(file_id, mime, as_xlsx=True)
     p = parse_name(name)
     if not p or p["ext"] != "xlsx":
         raise DriveError(f"{name}: only the Excel report can be opened in the app.")

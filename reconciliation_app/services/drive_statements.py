@@ -1,12 +1,5 @@
 """
 BANK STATEMENTS READ FROM GOOGLE DRIVE (Ecobank, 26/10/2026)
-============================================================
-The Ecobank "IREMBO PAY" exports are kept on Drive (Ecobank Recorn → Statements → <month> folders). In step 2 the
-app reads them itself: no list to choose from. Each file's days come from INSIDE the file (its Request Dates, as for
-an uploaded file), never from its name; the files that cover a day of the period are added.
-
-    - only the files whose name starts with "IREMBO PAY" are considered (TACCT, IREMBO_MONTHLY_TRAN, ... are not)
-    - at most 10 files are downloaded per second (RATE); a file not come after 3 s is asked again
     - the days of each file are remembered on this computer (output/.drive_statements.pkl, by file ID and last
       change on Drive): the next time only the new or changed files, and the files of the period, are downloaded
     - nothing is written on Drive; the content is kept in memory only
@@ -27,7 +20,6 @@ import pandas as pd
 import engine
 from integrations.google_drive import DriveError
 
-PREFIX = "IREMBO PAY"
 RATE = 10                      # files downloaded per second, at most
 TIMEOUT, TRIES, HEDGE = 20, 3, 3   # a request's time limit, requests per file at most, seconds before asking again
 CACHE_VERSION = 1
@@ -36,15 +28,18 @@ CACHE_VERSION = 1
 @dataclass
 class Picked:
     files: list = field(default_factory=list)        # [(name, content)] of the files that cover the period
-    considered: int = 0                              # "IREMBO PAY" files on Drive
+    considered: int = 0                              # candidate files on Drive (the bank's own file types/prefix)
     downloaded: int = 0
     unreadable: list = field(default_factory=list)   # names of the files that are not a statement
     errors: list = field(default_factory=list)       # downloads that failed (plain words)
 
 
-def candidates(files: list) -> list:
-    """The Drive files to consider: the "IREMBO PAY" exports (any case), not the folders' other files."""
-    return [f for f in files if f.name.strip().upper().startswith(PREFIX)]
+def candidates(files: list, prefix: str = "") -> list:
+    """The Drive files to consider: every one, or only those named like `prefix` (any case) when the bank has one -
+    Ecobank's folder also holds IREMBO_TACCT_TRANS_..., other exports, that are never statements."""
+    if not prefix:
+        return list(files)
+    return [f for f in files if f.name.strip().upper().startswith(prefix.upper())]
 
 
 def _load(path: Path) -> dict:
@@ -90,7 +85,7 @@ def pick(client, folder_id: str, bank, start, end, cache_path: Path, done=None) 
     done(n, total): called after each download."""
     bank = engine.get_bank(bank)
     start, end = pd.Timestamp(start).normalize(), pd.Timestamp(end).normalize()
-    files = candidates(client.list_files(folder_id, bank.FILE_TYPES))
+    files = candidates(client.list_files(folder_id, bank.FILE_TYPES), engine.option(bank, "DRIVE_STATEMENTS_PREFIX", ""))
     known = _load(cache_path)
     out = Picked(considered=len(files))
     # a file not seen yet (or changed on Drive) must be opened to learn its days; a known one only if it covers

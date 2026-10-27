@@ -92,8 +92,8 @@ import config                                  # Google Drive settings (no secre
 from integrations import google_drive
 from integrations.google_drive import DriveClient, DriveError
 from integrations import irembopay_checkout, slack
-from services import (app_settings, dashboard, dashboard_view, drive_statements, facts_cache, followup, pay_files,
-                      report_history, slack_message)
+from services import (app_settings, dashboard, dashboard_view, drive_statements, facts_cache, folder_picker,
+                      followup, pay_files, report_history, slack_message)
 from services.session_files import SessionFolder
 
 
@@ -889,7 +889,7 @@ def find_previous(prev):
                 f = report_history.find_previous(client, root, bank, prev,
                                                  index=drive_index_cached(client, root, fresh=True))
             if f is not None:
-                state.prev_reports[key] = {"where": "on Google Drive", "name": f.name, "file_id": f.id}
+                state.prev_reports[key] = {"where": "on Google Drive", "name": f.name, "file_id": f.id, "mime": f.mime}
                 return state.prev_reports[key], ""
             missing[key] = pd.Timestamp.now()
         except DriveError as err:
@@ -909,7 +909,7 @@ def previous_file(prev, prev_info, session) -> Path:
         if client is None:
             raise engine.ReconError(f"Google Drive: {problem}")
         try:
-            data = client.download(prev_info["file_id"])
+            data = client.download(prev_info["file_id"], prev_info.get("mime", ""), as_xlsx=True)
         except DriveError as err:
             raise engine.ReconError(f"The previous report could not be downloaded: {err}") from None
     else:
@@ -936,6 +936,18 @@ def previous_counts():
         return None, "", str(err)
     finally:
         session.remove(path)
+
+
+def build_no_tx_mem():
+    """The memory bundle of a No-Transaction Report for the current bank and period (the Excel bytes, and the
+    previous period's counts for its comparison column) - what the preview, Drive save and Slack message use
+    (approved 2026-10-27: shown automatically when a run finds no transactions, instead of being a manual choice)."""
+    made_at = pd.Timestamp.now()                # made once: the file downloaded is the one saved on Drive
+    with st.spinner(f"Looking for the {bank.NAME} {period.previous().name} report…"):
+        previous, compared_with, problem = previous_counts()
+    return {"name": engine.report_path(Path("."), period, bank).name, "made_at": made_at,
+            "xlsx": engine.no_transaction_excel(period, bank, made_at, previous),
+            "previous": previous, "compared_with": compared_with, "problem": problem}
 
 
 def checkout_all(invoices: list) -> dict:
@@ -1033,7 +1045,7 @@ def _open_history_report(rec, client):
         if rec.source == "Google Drive":
             with irembo_loading(f"Opening {rec.name}…"):
                 state.view_mem = {**report_history.read_drive_report(client, rec.file_id, rec.name,
-                                                                      state.session_folder),
+                                                                      state.session_folder, rec.mime),
                                   "name": rec.name, "saved": local_time(rec.modified)}
         else:
             state.view_report = str(rec.path)
@@ -1478,10 +1490,10 @@ def irembopay_from_drive(pay_types):
 
 
 def statements_from_drive(end):
-    """Step 2, bank statements from Google Drive (Ecobank, 26/10/2026): no list - the app reads the IREMBO PAY files
-    of the bank's Drive folder itself and adds those whose days (read inside each file) fall from the period's first
-    day to `end`. Done once per period; "Read again" does it again. Returns [(name, content, "bank")] of the files not
-    added yet; they are then read and checked exactly like uploaded ones (in memory only)."""
+    """Step 2, bank statements from Google Drive (a bank with its own DRIVE_STATEMENTS folder, 26/10/2026): no list -
+    the app reads the files of the bank's Drive folder itself and adds those whose days (read inside each file) fall
+    from the period's first day to `end`. Done once per period; "Read again" does it again. Returns [(name, content,
+    "bank")] of the files not added yet; they are then read and checked exactly like uploaded ones (in memory only)."""
     client, problem = drive_client()
     folder = getattr(config.load(), engine.option(bank, "DRIVE_STATEMENTS", ""), "")
 
@@ -1518,7 +1530,7 @@ def statements_from_drive(end):
         panel("Some files could not be downloaded", _esc("; ".join(got.errors[:3])))
     elif not got.files:
         panel("No statement for this period",
-              f"None of the {got.considered} IREMBO PAY files of the folder has a day from {period.start:%d/%m} to "
+              f"None of the {got.considered} files of the folder has a day from {period.start:%d/%m} to "
               f"{end:%d/%m/%Y}.")
     return new
 
@@ -1542,6 +1554,36 @@ def accepted_files():
         else:
             acc.append(f)
     return acc, rej
+
+
+def folder_field(label: str, key: str, extensions) -> list:
+    """A folder path (typed, or chosen with Browse) + everything in it matching `extensions` - "This computer",
+    picked once for this run, nothing kept on disk, nothing saved as a setting (approved 2026-10-27). Reads the
+    folder again only when the path itself changes, so removing a file added from it (the ✕ button) stays
+    removed. Returns [(name, content bytes), ...]."""
+    scanned_key, pending_key = f"{key}_scanned", f"{key}_pending"
+    if pending_key in state:          # a widget's session-state key cannot be set after it is created this run
+        state[key] = state.pop(pending_key)       # (Browse stages its result here; applied just before, next run)
+    st.text_input(label, key=key, label_visibility="collapsed", placeholder="Paste the folder path, or Browse…")
+    if st.button("📂 Browse…", key=f"{key}_browse"):
+        with st.spinner("Waiting for the folder window…"):
+            path, error = folder_picker.browse_folder(f"Choose the {label}", state.get(key, ""))
+        if path:
+            state[pending_key] = path
+            st.rerun()
+        elif error:
+            st.error(error + " Type or paste the path above instead.", icon="⚠️")
+    folder = state.get(key, "").strip()
+    if not folder or state.get(scanned_key) == folder:
+        return []
+    state[scanned_key] = folder
+    path = Path(folder).expanduser()
+    if not path.is_dir():
+        st.error(f"{folder}: this folder was not found.", icon="⚠️")
+        return []
+    exts = {e.lower().lstrip(".") for e in extensions}
+    return [(p.name, p.read_bytes()) for p in sorted(path.iterdir())
+            if p.is_file() and not p.name.startswith(("~$", ".")) and p.suffix.lower().lstrip(".") in exts]
 
 
 # ---- key figures + summary tables (step 5 and a saved report)
@@ -1829,7 +1871,7 @@ with st.sidebar:
                         if (state.result is not None and state.result.bank == code_r
                                 and state.result.period.store_key == key_r):
                             state.result = None
-                            state.step = min(state.step, 3)
+                            state.step = min(state.step, 2)
                         st.toast(f"Exception decisions deleted: {title_r}", icon="🗑️")
                     except engine.ReconError as err:
                         st.toast(str(err), icon="⚠️")
@@ -2020,7 +2062,7 @@ def dashboard_facts(client, root):
                     raise data[r.file_id]
                 cache[key(r)] = fresh[key(r)] = report_history.read_drive_facts(client, r, state.session_folder,
                                                                                 data.get(r.file_id))
-            except (DriveError, engine.ReconError, KeyError, ValueError) as err:
+            except Exception as err:      # a report that cannot be read (too large to export, broken, ...)
                 cache[key(r)] = f"{r.name}: {err}"      # not kept on this computer: tried again next time
             ld.update(f"Reading · {i} of {n}")
         ld.__exit__(None, None, None)
@@ -2074,7 +2116,7 @@ def dashboard_page():
         return
     try:
         facts, errors = dashboard_facts(client, root)
-    except DriveError as err:
+    except Exception as err:          # the Dashboard is best-effort: never crash the page over one bad report
         st.markdown(f'<div class="rh-empty">☁️ {_esc(str(err))}</div>', unsafe_allow_html=True)
         return
     for e in errors:
@@ -2506,7 +2548,10 @@ def followup_data(client, root, refresh: bool = False):
         with irembo_loading("Reading the reports on Google Drive…", "Reconciliation Reports"):
             state.history_index = (root, report_history.drive_index(client, root))
             state.history_index_at = pd.Timestamp.now()
-    reports = followup.latest_reports(state.history_index[1].records, start)
+    # a notebook-made report is left out: its Pending notification / Duplicate payment sheets do not have this
+    # app's own column names (no invoice_number, name, payment_provider; Ccy not Currency) - its items cannot be
+    # read correctly here (found 2026-10-27, the same day notebook reports started being recognised at all)
+    reports = followup.latest_reports([r for r in state.history_index[1].records if not r.notebook], start)
     cache = state.setdefault("fu_items", {})
     key = facts_cache.key
     todo = [r for r in reports if key(r) not in cache]
@@ -3438,8 +3483,8 @@ elif state.step == 2:
                         unsafe_allow_html=True)
         elif bank_src == "This computer":
             # the upload area on its own: it grows so this card has no empty space under its text (section 3 CSS)
-            st.markdown(f'<div class="up-drop up-drop-fill">{UP_SVG["file"]}<div class="up-drop-title">Upload bank file'
-                        f'</div><div class="up-drop-sub">{"Excel" if set(bank.FILE_TYPES) <= {"xls", "xlsx"} else "Bank"}'
+            st.markdown(f'<div class="up-drop up-drop-fill">{UP_SVG["file"]}<div class="up-drop-title">Choose bank '
+                        f'statements folder</div><div class="up-drop-sub">{"Excel" if set(bank.FILE_TYPES) <= {"xls", "xlsx"} else "Bank"}'
                         f' format · {types}</div></div>', unsafe_allow_html=True)
         help_lines = [f"Upload the {' and '.join(bank.CURRENCIES) + ' ' if per_currency else ''}statements "
                       f"covering <b>{period.start:%d/%m} to {need_to:%d/%m/%Y}</b>."]
@@ -3463,7 +3508,7 @@ elif state.step == 2:
                                     accept_multiple_files=True, key=f"bank_{state.uploader_round}",
                                     label_visibility="collapsed") if bank_src == "This computer" else None)
 
-    pay_up, from_drive = None, None
+    pay_folder_files, from_drive = [], None
     with u2.container(border=True, key="up_pay_card"):         # 2. IremboPay file: Google Drive or this computer
         st.markdown(f'<div class="up-head"><div class="up-tile">{UP_SVG["cloud"]}</div><div>'
                     f'<div class="up-title">2. IremboPay file</div><div class="up-sub">Choose a source</div>'
@@ -3496,8 +3541,8 @@ elif state.step == 2:
                 st.markdown(f'<div class="upf-foot">{len(pay_files)} file{"s" if len(pay_files) != 1 else ""}'
                             " · ✕ removes one</div>", unsafe_allow_html=True)
             else:
-                st.markdown(f'<div class="up-drop up-drop-fill">{UP_SVG["file"]}<div class="up-drop-title">Upload '
-                            f'IremboPay file</div><div class="up-drop-sub">{pay_label.replace(".", "").upper()} format'
+                st.markdown(f'<div class="up-drop up-drop-fill">{UP_SVG["file"]}<div class="up-drop-title">Choose '
+                            f'IremboPay files folder</div><div class="up-drop-sub">{pay_label.replace(".", "").upper()} format'
                             f' · {pay_label}</div></div>', unsafe_allow_html=True)
             st.markdown(f'<div class="up-help">{"" if pay_files else f"The IremboPay payment file for <b>{period.name}</b>."}'
                         '</div>', unsafe_allow_html=True)
@@ -3508,9 +3553,9 @@ elif state.step == 2:
             from_drive = irembopay_from_drive(pay_types)
 
     with st.container(border=bool(acc or rej or state.read_errors)):   # what was added, and what was refused
-        new = ([(u.name, u.getvalue(), "bank") for u in bank_up or []]
-               + [(u.name, u.getvalue(), "payments") for u in pay_up or []] + ([from_drive] if from_drive else [])
-               + from_drive_bank)
+        new = ([(name, content, "bank") for name, content in bank_folder_files]
+               + [(name, content, "payments") for name, content in pay_folder_files]
+               + ([from_drive] if from_drive else []) + from_drive_bank)
         if new:
             with irembo_loading("Reading the files…"):
                 for name, content, kind in new:
@@ -3588,18 +3633,22 @@ elif state.step == 2:
                     st.rerun()
     has_bank = any(f.kind == "bank" for f in acc)
     has_pay = any(f.kind == "payments" for f in acc)
-    c1, _, c3 = st.columns([1, 2, 1.3])
-    if c1.button("← Back", width="stretch"):
-        go(1)
-    if c3.button("Next: check →", type="primary", width="stretch", disabled=not (has_bank and has_pay),
-                 help=None if has_bank and has_pay else "Add at least one bank file and the payment file"):
+    if not ready:
+        next_help = "This period has not ended yet" if not_ended else "Add the previous report first, or untick the comparison"
+    elif not (has_bank and has_pay):
+        next_help = "Add at least one bank file and the payment file"
+    else:
+        next_help = None
+    _, _, c3 = st.columns([1, 2, 1.3])
+    if c3.button("Next: check →", type="primary", width="stretch", disabled=not (ready and has_bank and has_pay),
+                 help=next_help):
         state.run_error = None
-        go(3)
+        go(2)
 
 # =====================================================================================================================
-# 11. STEP 3 - CHECK: the checklist (engine.check_period), then "Run reconciliation"
+# 11. STEP 2 - CHECK: the checklist (engine.check_period), then "Run reconciliation"
 # =====================================================================================================================
-elif state.step == 3:
+elif state.step == 2:
     acc, _ = accepted_files()
     chk = engine.check_period(period, acc, bank)
     with st.container(border=True):
@@ -3622,20 +3671,29 @@ elif state.step == 3:
         for w in boxes:
             st.warning(w, icon="⚠️")
         if chk.blocking:
-            st.error("Run is blocked until the missing bank files are added. Go back to Upload.", icon="⛔")
+            st.error("Run is blocked until the missing bank files are added. Go back to Choose.", icon="⛔")
         if compare:
             st.caption(f"The report will be compared with {period.previous().name}.")
         if state.run_error:
             st.error(state.run_error, icon="⚠️")
     c1, _, c3 = st.columns([1, 1.5, 1.8])
     if c1.button("← Back", width="stretch"):
-        go(2)
+        go(1)
     if c3.button("▶  Run reconciliation", type="primary", width="stretch", disabled=bool(chk.blocking)):
         try:
             with irembo_loading(f"Reconciling {period.name}…"):
                 state.result = run_reconciliation(acc)
             state.run_error = None
-            go(4)
+            go(3)
+        except engine.NoTransactionsError:
+            # the files cover the period, but none of their rows fall in it: every category would be 0 anyway,
+            # so show the No-Transaction Report directly instead of an error (approved 2026-10-27)
+            state.no_tx_mem = build_no_tx_mem()
+            state.no_tx_drive = None
+            state.run_error = None
+            state.step = 1
+            state.no_tx_preview = True
+            st.rerun()
         except engine.ReconError as err:
             state.run_error = str(err)
             st.rerun()
@@ -3647,10 +3705,10 @@ elif state.step == 3:
 # 12. STEP 4 - RECONCILE & EXCEPTION RESOLUTION (one page since 27/10/2026): the result of the matching (bank rows,
 #     matched, not found, amounts), then under it the exceptions to resolve
 # =====================================================================================================================
-elif state.step == 4:
+elif state.step == 3:
     res = state.result
     if res is None:
-        go(3)
+        go(2)
     with st.container(border=True):
         st.markdown(f'<div class="card-title">✅ Reconciliation completed · {bank.NAME.replace("&", "&amp;")} · '
                     f'{period.name[0].upper() + period.name[1:]}</div>', unsafe_allow_html=True)
@@ -3906,7 +3964,7 @@ elif state.step == 5:
     mem = state.get("report_mem")
     if (res is None or res.stopped_for_review or res.report_file is None
             or not mem or mem["name"] != res.report_file.name):           # the report is kept in memory only
-        go(3)
+        go(2)
     main = next((b for b in res.blocks if b[0] in ("Summary-Monthly", "Summary-Daily")), res.blocks[0])
 
     # ---- ① the summary of the run
@@ -4049,7 +4107,7 @@ elif state.step == 5:
 
     c1, _, c3 = st.columns([1, 1.5, 1.8])
     if c1.button("← Back", width="stretch"):
-        go(5 if getattr(res, "to_review", res.not_found) else 4)   # Exception Resolution skipped when nothing to resolve
+        go(4 if getattr(res, "to_review", res.not_found) else 3)   # Exception Resolution skipped when nothing to resolve
     if c3.button("🔄  New report", width="stretch"):
         state.files, state.read_errors, state.result = {}, [], None
         state.customize = state.cr_preview = False

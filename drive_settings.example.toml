@@ -24,6 +24,7 @@ reports_root_folder_id = ""
 # My Drive: Bank Reconciliation/IremboPay File (files in it and in its subfolders, up to 3 levels, are listed)
 irembopay_folder_id = ""
 ecobank_statements_folder_id = ""   # the Ecobank "Statements" folder: step 2 reads the IREMBO PAY files from it
+bpr_statements_folder_id = ""       # the BPR "Statements" folder: step 2 reads the statements from it
 
 [access]
 # The administrators of the app's settings (Settings page, Bank Management page): the Google accounts signed in to
