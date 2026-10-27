@@ -740,7 +740,30 @@ def children(facts: list, kind: str, first, last=None, currency: str = "All", ba
                  else period_label(key, child, short=True))
         out.append({"key": key, "label": label, "partial": key < first or period_end(key, child) > end,
                     **{m: t[m] for m in METRICS},
-                    "amounts": {c: a.get("received", 0.0) for c, a in t["amounts"].items()}})
+                    "amounts": {c: a.get("received", 0.0) for c, a in t["amounts"].items()},
+                    "money": {c: dict(a) for c, a in t["amounts"].items()}})    # every figure's amount (27/10/2026)
+    return out
+
+
+def missing_children(facts: list, kind: str, first, last=None, banks=None, today=None) -> list:
+    """27/10/2026: the periods one level below the one chosen that have ended but have no saved report (e.g. the
+    weeks of a month not reconciled yet), as labels like children() - so a partial total is never read as complete."""
+    base = "month" if kind == "custom" else kind
+    child = CHILD.get(base)
+    if child is None:
+        return []
+    first = pd.Timestamp(first)
+    end = period_end(period_key(pd.Timestamp(last if last is not None else first), base), base)
+    today = pd.Timestamp.now().normalize() if today is None else pd.Timestamp(today).normalize()
+    have = {period_key(f.start, child) for f in _facts_for(facts, child)
+            if first <= f.start <= end and (banks is None or f.bank in banks)}
+    keys = sorted({period_key(d, child) for d in pd.date_range(first, end)})
+    out = []
+    for key in keys:
+        if key in have or period_end(key, child) >= today:
+            continue
+        out.append(f"{key:%a %d/%m}" if child == "day" else f"Week {engine.week_number(key, month=first)[1]}"
+                   if child == "week" else period_label(key, child, short=True))
     return out
 
 
