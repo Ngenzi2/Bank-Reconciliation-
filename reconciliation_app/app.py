@@ -3578,7 +3578,8 @@ elif state.step == 4:
                 stmt = {}
                 for f in state.files.values():
                     if f.kind == "bank" and ref_col in f.data:
-                        for r, d, v in zip(f.data[ref_col].astype(str), f.data.get(desc_col, ""), f.data.get(paid_col, "")):
+                        for r, d, v in zip(f.data[ref_col].fillna("").astype(str), f.data.get(desc_col, ""),
+                                           f.data.get(paid_col, "")):
                             stmt.setdefault(r.strip(), (str(d or ""), v))
                 counted = reason.str.extract(r"the (?:credit|request) counted is (\S+)", expand=False).fillna("")
                 table["_c_ref"] = counted
