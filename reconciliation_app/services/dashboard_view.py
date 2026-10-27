@@ -225,19 +225,28 @@ def kpi_cards(now: dict, before: dict | None, fu: dict | None = None) -> str:
     curs = [c for c in ("RWF", "USD") if c in amt] + [c for c in amt if c not in ("RWF", "USD")]
     rate = lambda t: t["received"] / t["processed"] if t and t["processed"] else None
     sla = lambda t: t["sla"] / t["processed"] if t and t["processed"] else None
+    pend = lambda t: t.get("pending", 0) / t["processed"] if t and t["processed"] else None
     pct = lambda v, n=2: "N/A" if v is None else f"{v * 100:.{n}f}%"
     amount_big = "<br>".join(f"{c} {short(amt[c])}" for c in curs) or "–"
     amount_sub = (" · ".join(f"{c} " + (_arrow(amt[c], amt_b.get(c), fmt=lambda v: short(v)) or "no earlier figure")
                              for c in curs) if amt_b is not None else "Total received (notifications received)")
     cards = [
         ("AMOUNT", "money", amount_big, amount_sub),
-        ("RATE", "rate", pct(rate(now)),
-         _arrow(rate(now), rate(before), points=True, fmt=pct) if before else "Received notification ÷ processed transaction"),
+        # 27/10/2026: TRANSACTIONS before RATE
         ("TRANSACTIONS", "tx", f"{now['processed']:,}",
          _arrow(now["processed"], before["processed"]) if before else "Processed transactions in this period"),
+        ("RATE", "rate", pct(rate(now)),
+         _arrow(rate(now), rate(before), points=True, fmt=pct) if before else "Received notification ÷ processed transaction"),
         ("SLA", "sla", pct(sla(now), 1),
          _arrow(sla(now), sla(before), good_up=False, points=True, fmt=lambda v: pct(v, 1)) if before
          else f"Violated: {now['sla']:,} of {now['processed']:,} processed transactions"),
+        # 27/10/2026: pending notifications ÷ processed (debited at the bank, never notified to IremboPay)
+        ("PENDING", "pending", pct(pend(now), 1),
+         _arrow(pend(now), pend(before), good_up=False, points=True, fmt=lambda v: pct(v, 1)) if before
+         else f"Not notified: {now.get('pending', 0):,} of {now['processed']:,} processed transactions"
+              + (" · " + " · ".join(f"{c} {short(v)}" for c in curs
+                                    if (v := (now.get('amounts', {}).get(c, {}) or {}).get('pending', 0.0)))
+                 if any((now.get('amounts', {}).get(c, {}) or {}).get('pending') for c in curs) else "")),
     ]
     # the follow-up after the report (services/followup.py): the report's figures are never changed, the follow-up
     # is shown next to them
@@ -250,7 +259,7 @@ def kpi_cards(now: dict, before: dict | None, fu: dict | None = None) -> str:
                                            f'{s["by_type"]["Paid twice"][0]:,} paid twice)</div>',)
             if s["received_later"] and now["processed"]:
                 after = (now["received"] + s["received_later"]) / now["processed"]
-                cards[1] = cards[1][:3] + (cards[1][3] + f'<div class="dk-f"><b>{after * 100:.2f}%</b> after follow-up '
+                cards[2] = cards[2][:3] + (cards[2][3] + f'<div class="dk-f"><b>{after * 100:.2f}%</b> after follow-up '
                                            f'({s["received_later"]:,} received later)</div>',)
             red = " dk-red" if s["overdue"] else ""
             if s["total"]:
@@ -404,7 +413,8 @@ _KPI = {
     "rate": '<path d="M5 19L19 5" stroke-width="1.6"/><circle cx="7" cy="7" r="2.2" fill="none" stroke-width="1.6"/><circle cx="17" cy="17" r="2.2" fill="none" stroke-width="1.6"/>',
     "tx": '<path d="M4 8h13l-3-3M20 16H7l3 3" fill="none" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>',
     "fu": '<path d="M5 4h14v16H5z" fill="none" stroke-width="1.6"/><path d="M8 12l3 3 5-6" fill="none" stroke-width="1.6" stroke-linecap="round"/>',
-    "sla": '<circle cx="12" cy="13" r="7" fill="none" stroke-width="1.6"/><path d="M12 9v4l3 2M10 3h4" fill="none" stroke-width="1.6" stroke-linecap="round"/>'}
+    "sla": '<circle cx="12" cy="13" r="7" fill="none" stroke-width="1.6"/><path d="M12 9v4l3 2M10 3h4" fill="none" stroke-width="1.6" stroke-linecap="round"/>',
+    "pending": '<path d="M7 3h10M7 21h10M8 3c0 5 8 5 8 9s-8 4-8 9M16 3c0 5-8 5-8 9s8 4 8 9" fill="none" stroke-width="1.6" stroke-linecap="round"/>'}
 KPI_ICON = {k: _img(f'<svg viewBox="0 0 24 24" stroke="{MUT}">{v}</svg>', "width:20px;height:20px;display:block")
             for k, v in _KPI.items()}
 
@@ -618,3 +628,37 @@ def alt_group_bars(table: pd.DataFrame, cat: str, series: list, horizontal: bool
             xOffset=alt.XOffset("Series:N", sort=names),
             y=alt.Y("Value:Q", title=None, axis=alt.Axis(format="~s")), color=color, tooltip=tips)
     return _alt_theme(chart)
+
+
+# =====================================================================================================================
+# PENDING & DELAYED NOTIFICATIONS (27/10/2026): per period, against the processed transactions
+#     Pending = debited at the bank, never notified to IremboPay (at report time) · Delayed = SLA violated
+# =====================================================================================================================
+NOTIF = [("Delayed % (after SLA)", AMBER), ("Pending % (never notified)", BAD)]
+
+
+def _money(money: dict, metric: str) -> str:
+    parts = [f"{c} {short(a.get(metric, 0.0))}" for c, a in money.items() if a.get(metric)]
+    return " · ".join(parts) or "–"
+
+
+def notif_table(child: list, labels: list) -> pd.DataFrame:
+    """One row per period + a Total row: processed (count, amount), pending and delayed (count, % of processed,
+    amount), received rate - all from the reports' figures."""
+    pct = lambda n, d: round(n / d * 100, 2) if d else None
+    rows, tot, money = [], {"processed": 0, "pending": 0, "sla": 0, "received": 0}, {}
+    for c, lab in zip(child, labels):
+        m = c.get("money", {})
+        for cur, a in m.items():
+            for k, val in a.items():
+                money.setdefault(cur, {}).setdefault(k, 0.0)
+                money[cur][k] += val
+        for k in tot:
+            tot[k] += c[k]
+        rows.append((lab, c, m))
+    rows.append(("Total", tot, money))
+    return pd.DataFrame([{"Period": lab, "Processed": int(t["processed"]), "Processed amount": _money(m, "processed"),
+                          "Pending (never notified)": int(t["pending"]), "Pending %": pct(t["pending"], t["processed"]),
+                          "Pending amount": _money(m, "pending"), "Delayed (after SLA)": int(t["sla"]),
+                          "Delayed %": pct(t["sla"], t["processed"]),
+                          "Received rate %": pct(t["received"], t["processed"])} for lab, t, m in rows])

@@ -1,14 +1,5 @@
 """
-BANK STATEMENTS READ FROM GOOGLE DRIVE (Ecobank, 26/10/2026; any bank with its own DRIVE_STATEMENTS, 27/10/2026)
-==================================================================================================================
-A bank's own statements folder (drive_settings.toml: see <bank>.DRIVE_STATEMENTS) is read by the app itself: no list
-to choose from. Each file's days come from INSIDE the file (its Request Dates, as for an uploaded file), never from
-its name; the files that cover a day of the period are added.
-
-    - only files of the bank's own FILE_TYPES are considered; if the bank sets DRIVE_STATEMENTS_PREFIX (Ecobank:
-      "IREMBO PAY" - the folder also has IREMBO_TACCT_TRANS_..., other exports), only files whose name starts with
-      it (any case) are kept
-    - at most 10 files are downloaded per second (RATE)
+BANK STATEMENTS READ FROM GOOGLE DRIVE (Ecobank, 26/10/2026)
     - the days of each file are remembered on this computer (output/.drive_statements.pkl, by file ID and last
       change on Drive): the next time only the new or changed files, and the files of the period, are downloaded
     - nothing is written on Drive; the content is kept in memory only
@@ -20,7 +11,7 @@ from __future__ import annotations
 import pickle
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -30,6 +21,7 @@ import engine
 from integrations.google_drive import DriveError
 
 RATE = 10                      # files downloaded per second, at most
+TIMEOUT, TRIES, HEDGE = 20, 3, 3   # a request's time limit, requests per file at most, seconds before asking again
 CACHE_VERSION = 1
 
 
@@ -107,16 +99,42 @@ def pick(client, folder_id: str, bank, start, end, cache_path: Path, done=None) 
             todo.append(f)
     limiter = _Limiter(RATE)
     takes_http = client.thread_http() is not None
-    local = threading.local()                    # one connection per thread, kept for its next downloads
+    def fresh():
+        try:
+            return client.thread_http(timeout=TIMEOUT)
+        except TypeError:                         # a client without the timeout (older running app / test double)
+            return client.thread_http()
+
+    def attempt(f):
+        limiter.wait()                            # every request counts in the 10 per second
+        return client.download(f.id, f.mime, http=fresh() if takes_http else None)
 
     def one(f):
-        limiter.wait()
-        if takes_http and getattr(local, "http", None) is None:
-            local.http = client.thread_http()
+        """27/10/2026: now and then Google is slow to answer one file (20-40 s). If it has not come after HEDGE
+        seconds, the same file is asked again on a new connection (up to TRIES requests); the first answer is
+        used, the slow one is left to end on its own."""
+        if not takes_http:                        # one shared connection: one request at a time
+            try:
+                return f, attempt(f), None
+            except DriveError as e:
+                return f, None, str(e)
+        pool = ThreadPoolExecutor(max_workers=TRIES)
+        futs, started, err = [pool.submit(attempt, f)], 1, None
         try:
-            return f, client.download(f.id, f.mime, http=local.http if takes_http else None), None
-        except DriveError as err:
-            return f, None, str(err)
+            while True:
+                fin, _ = wait(futs, timeout=HEDGE, return_when=FIRST_COMPLETED)
+                for fut in fin:
+                    futs.remove(fut)
+                    if fut.exception() is None:
+                        return f, fut.result(), None
+                    err = str(fut.exception())
+                if started < TRIES:                # slow or failed: the same file asked again
+                    futs.append(pool.submit(attempt, f))
+                    started += 1
+                elif not futs:                     # every request failed
+                    return f, None, err
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
     # a download takes ~1.5 s: 2 x RATE at the same time, so that RATE can start every second
     with ThreadPoolExecutor(max_workers=2 * RATE if takes_http else 1) as pool:

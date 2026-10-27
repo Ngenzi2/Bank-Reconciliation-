@@ -189,3 +189,32 @@ def test_complete_periods_and_the_reports_to_make():
     assert ("ECO", pd.Timestamp("2026-08-01")) in todo and ("IM", pd.Timestamp("2026-09-01")) not in todo
     assert d.last_ended_month("2026-10-14") == pd.Timestamp("2026-09-01")
     assert "Aug 2026 – Sep 2026 saved" in d.coverage_line(facts, today="2026-10-14")
+
+
+def test_pending_card_is_pending_over_processed():
+    """27/10/2026: PENDING card = pending notifications ÷ processed transactions, with the count and the amount."""
+    from services import dashboard_view as dv
+    now = {"processed": 647, "received": 581, "sla": 12, "pending": 22, "duplicate": 43,
+           "amounts": {"RWF": {"received": 1_000_000.0, "pending": 392_140.0}}}
+    html = dv.kpi_cards(now, None)
+    assert "PENDING" in html and "3.4%" in html
+    assert "Not notified: 22 of 647 processed transactions" in html and "RWF 392" in html
+    before = dict(now, pending=11)
+    assert "PENDING" in dv.kpi_cards(now, before) and "1.7%" in dv.kpi_cards(now, before)   # the change, in points
+
+
+def test_pending_and_delayed_per_period_and_the_weeks_without_report():
+    """27/10/2026: the card "Pending & delayed notifications": per child period (here the weeks of a month) + Total,
+    % of processed; an ended week with no report is named (the month is not complete)."""
+    from services import dashboard_view as dv
+    rep, rec = month_report(month="2026-08", weeks=((1, 2), (3, 9)), proc=(1000, 0), pending=(2, 0), sla=(50, 0),
+                            received=(990, 0))
+    facts = d.combine(d.facts_from_report(rep, rec))
+    child = d.children(facts, "month", pd.Timestamp("2026-08-01"))
+    tab = dv.notif_table(child, [c["label"] for c in child])
+    assert list(tab["Period"]) == ["Week 1", "Week 2", "Total"]
+    assert tab.iloc[0]["Pending %"] == 0.2 and tab.iloc[0]["Delayed %"] == 5.0
+    assert tab.iloc[-1]["Processed"] == 2000 and tab.iloc[-1]["Pending (never notified)"] == 4
+    assert tab.iloc[-1]["Pending amount"] == "RWF 4.0K"                       # 2 x RWF 2,000 (2 x 1000.0)
+    missing = d.missing_children(facts, "month", pd.Timestamp("2026-08-01"), today="2026-10-27")
+    assert missing == ["Week 3", "Week 4", "Week 5", "Week 6"]                # 10/08 - 31/08: no report

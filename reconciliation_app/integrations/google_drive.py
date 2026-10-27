@@ -225,7 +225,15 @@ def _build(creds):
     except ImportError:
         raise DriveError("The Google Drive libraries are not installed. Run 'Setup (run once)' again.") from None
     try:
-        return build("drive", "v3", credentials=creds, cache_discovery=False)
+        # 27/10/2026: a request may hang 30 s at most (Google's default is 60 s, x3 with the retries): now and then
+        # Google is slow to answer, and the app waited minutes for one folder listing
+        try:
+            import google_auth_httplib2
+            import httplib2
+            return build("drive", "v3", http=google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=30)),
+                         cache_discovery=False)
+        except ImportError:
+            return build("drive", "v3", credentials=creds, cache_discovery=False)
     except Exception as err:
         raise DriveError(f"Google Drive could not be reached ({type(err).__name__}).") from None
 
@@ -465,9 +473,10 @@ class DriveClient:
         return made["id"]
 
     # ---- writing --------------------------------------------------------------------------------------------------
-    def thread_http(self):
+    def thread_http(self, timeout: int = 120):
         """A connection of its own, signed in like the client, for a request made at the same time as another (one
-        connection cannot carry two requests at once); None when there is none to copy (a test double)."""
+        connection cannot carry two requests at once); None when there is none to copy (a test double).
+        timeout: seconds a request may hang before it fails (short for small files: a stuck one is tried again)."""
         creds = getattr(getattr(self.service, "_http", None), "credentials", None)
         if creds is None:
             return None
@@ -476,7 +485,7 @@ class DriveClient:
             import httplib2
         except ImportError:
             return None
-        return google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=120))
+        return google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=timeout))
 
     def upload(self, parent_id: str, name: str, data: bytes, mime: str, replace_id: str | None = None,
                http=None) -> DriveFile:
