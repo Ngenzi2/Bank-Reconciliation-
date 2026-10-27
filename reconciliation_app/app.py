@@ -2365,7 +2365,10 @@ def followup_data(client, root, refresh: bool = False):
         with st.spinner("Reading Reconciliation Reports on Google Drive…"):
             state.history_index = (root, report_history.drive_index(client, root))
             state.history_index_at = pd.Timestamp.now()
-    reports = followup.latest_reports(state.history_index[1].records, start)
+    # a notebook-made report is left out: its Pending notification / Duplicate payment sheets do not have this
+    # app's own column names (no invoice_number, name, payment_provider; Ccy not Currency) - its items cannot be
+    # read correctly here (found 2026-10-27, the same day notebook reports started being recognised at all)
+    reports = followup.latest_reports([r for r in state.history_index[1].records if not r.notebook], start)
     cache = state.setdefault("fu_items", {})
     key = facts_cache.key
     todo = [r for r in reports if key(r) not in cache]
