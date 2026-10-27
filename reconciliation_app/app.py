@@ -119,7 +119,8 @@ SIDE_BG = "url(data:image/svg+xml;base64," + base64.b64encode(b"""<svg xmlns="ht
 SIDE_MENU = "url(data:image/svg+xml;base64," + base64.b64encode(b"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 30">
 <g stroke="#99E378" stroke-width="3.4" stroke-linecap="round"><path d="M4 5h32"/><path d="M4 15h22"/><path d="M4 25h32"/></g>
 </svg>""").decode() + ")"
-STEPS = ["Period", "Upload", "Check", "Reconcile & Exception Resolution", "Report & Export"]   # 27/10/2026: 4 + 5 on one page
+STEPS = ["Choose & Upload", "Check", "Reconcile & Exception Resolution", "Report & Export"]   # period+upload, and
+                                                                                               # reconcile+exceptions, on one page each
 PREVIEW_TEAL = "#2B8A99"   # charts of the custom report preview: 4.0:1 on the light theme, 4.7:1 on the dark one
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 # 27/10/2026: the loader - the two curves of the Irembo mark in IremboPay green, turning (one turn = 1.1 s)
@@ -3355,39 +3356,9 @@ elif state.step == 1:
                 if state.run_error:
                     st.error(state.run_error, icon="⚠️")
 
-        # ---- how the report is made: the normal reconciliation, or a report saying the bank had no transactions
-        #      (design only for now: the No-Transaction Report cannot be generated yet)
-        st.divider()
-        st.markdown('<div class="card-title">② Choose report generation method</div>', unsafe_allow_html=True)
-        st.radio("Report generation method", ["Standard reconciliation", "No-Transaction Report"], key="gen_method",
-                 label_visibility="collapsed",
-                 captions=["Continue to upload files and generate the normal report.",
-                           "Generate the existing Excel report format with a “No Transactions Recorded” status, "
-                           "without uploading transaction files."])
-    no_tx = state.get("gen_method") == "No-Transaction Report"
-    c1, _, c3 = st.columns([1, 2, 1.3])
-    if no_tx:                                   # the report is seen first, on its own page (below)
-        if c3.button("Generate No-Transaction Report →", type="primary", width="stretch", disabled=bool(not_ended),
-                     help="This period has not ended yet" if not_ended else None):
-            state.no_tx_preview = True
-            made_at = pd.Timestamp.now()            # made once: the file downloaded is the one saved on Drive
-            with irembo_loading(f"Looking for the {bank.NAME} {period.previous().name} report…"):
-                previous, compared_with, problem = previous_counts()
-            state.no_tx_mem = {"name": engine.report_path(Path("."), period, bank).name, "made_at": made_at,
-                               "xlsx": engine.no_transaction_excel(period, bank, made_at, previous),
-                               "previous": previous, "compared_with": compared_with, "problem": problem}
-            state.no_tx_drive = None
-            st.rerun()
-    elif c3.button("Next: upload files →", type="primary", width="stretch", disabled=not ready,
-                   help=None if ready else "This period has not ended yet" if not_ended
-                   else "Add the previous report first, or untick the comparison"):
-        state.run_error = None
-        go(2)
-
-# =====================================================================================================================
-# 10. STEP 2 - UPLOAD: the bank statements + the IremboPay payment file (read in memory, never saved)
-# =====================================================================================================================
-elif state.step == 2:
+    # ---- ② upload: the bank statements + the IremboPay payment file (read in memory, never saved) - the same
+    #      screen as the period, no separate step; a run with no transactions is answered with the No-Transaction
+    #      Report automatically (in Check), never a choice made here (approved 2026-10-27)
     acc, rej = accepted_files()
     # ---- what to upload (depends on the bank)
     monday = engine.extra_monday(period, bank)
@@ -3603,21 +3574,26 @@ elif state.step == 2:
                     st.rerun()
     has_bank = any(f.kind == "bank" for f in acc)
     has_pay = any(f.kind == "payments" for f in acc)
-    next_help = None if has_bank and has_pay else "Add at least one bank file and the payment file"
+    if not ready:
+        next_help = "This period has not ended yet" if not_ended else "Add the previous report first, or untick the comparison"
+    elif not (has_bank and has_pay):
+        next_help = "Add at least one bank file and the payment file"
+    else:
+        next_help = None
     _, _, c3 = st.columns([1, 2, 1.3])
-    if c3.button("Next: check →", type="primary", width="stretch", disabled=not (has_bank and has_pay),
+    if c3.button("Next: check →", type="primary", width="stretch", disabled=not (ready and has_bank and has_pay),
                  help=next_help):
         state.run_error = None
-        go(3)
+        go(2)
 
 # =====================================================================================================================
-# 11. STEP 3 - CHECK: the checklist (engine.check_period), then "Run reconciliation"
+# 11. STEP 2 - CHECK: the checklist (engine.check_period), then "Run reconciliation"
 # =====================================================================================================================
-elif state.step == 3:
+elif state.step == 2:
     acc, _ = accepted_files()
     chk = engine.check_period(period, acc, bank)
     with st.container(border=True):
-        st.markdown(f'<div class="card-title">③ Check: {period.name}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="card-title">② Check: {period.name}</div>', unsafe_allow_html=True)
         # one compact list (26/10/2026: no empty space between the lines). 27/10/2026: a warning about a line (same
         # label, e.g. "Ecobank statements: …") is not repeated in a yellow box - it is that line's ⓘ explanation
         tips, boxes = {}, []
@@ -3643,13 +3619,13 @@ elif state.step == 3:
             st.error(state.run_error, icon="⚠️")
     c1, _, c3 = st.columns([1, 1.5, 1.8])
     if c1.button("← Back", width="stretch"):
-        go(2)
+        go(1)
     if c3.button("▶  Run reconciliation", type="primary", width="stretch", disabled=bool(chk.blocking)):
         try:
             with irembo_loading(f"Reconciling {period.name}…"):
                 state.result = run_reconciliation(acc)
             state.run_error = None
-            go(4)
+            go(3)
         except engine.NoTransactionsError:
             # the files cover the period, but none of their rows fall in it: every category would be 0 anyway,
             # so show the No-Transaction Report directly instead of an error (approved 2026-10-27)
@@ -3667,13 +3643,13 @@ elif state.step == 3:
             st.rerun()
 
 # =====================================================================================================================
-# 12. STEP 4 - RECONCILE & EXCEPTION RESOLUTION (one page since 27/10/2026): the result of the matching (bank rows,
+# 12. STEP 3 - RECONCILE & EXCEPTION RESOLUTION (one page since 27/10/2026): the result of the matching (bank rows,
 #     matched, not found, amounts), then under it the exceptions to resolve
 # =====================================================================================================================
-elif state.step == 4:
+elif state.step == 3:
     res = state.result
     if res is None:
-        go(3)
+        go(2)
     with st.container(border=True):
         st.markdown(f'<div class="card-title">✅ Reconciliation completed · {bank.NAME.replace("&", "&amp;")} · '
                     f'{period.name[0].upper() + period.name[1:]}</div>', unsafe_allow_html=True)
@@ -3894,7 +3870,7 @@ elif state.step == 4:
                 st.markdown(f"**Result:** {result_line(now)}")
     c1, c2, c3 = st.columns([1, 1.5, 1.8])
     if c1.button("← Back", width="stretch"):
-        go(3)
+        go(2)
     if getattr(res, "to_review", res.not_found) and c3.button("💾  Save decisions", type="primary", width="stretch"):
         full = res.review.copy()
         for c in engine.EDIT_COLS:
@@ -3906,12 +3882,12 @@ elif state.step == 4:
             with irembo_loading("Saving and making the report…"):
                 state.result = run_reconciliation(acc)
             st.toast("Decisions saved", icon="💾")
-            go(4 if state.result.stopped_for_review else 5)
+            go(3 if state.result.stopped_for_review else 4)
         except engine.ReconError as err:
             st.error(str(err), icon="⚠️")
     if not res.stopped_for_review and (c3 if not to_review else c2).button(
             "Next: download →", type="secondary" if to_review else "primary", width="stretch"):
-        go(5)
+        go(4)
     if getattr(res, "currency_to_choose", 0):         # BPR: the only thing left on these rows is their currency
         st.warning(f"**{res.currency_to_choose} credit(s) still need a currency.** They are not in IremboPay (no DOC ID), "
                    "so the statement does not say RWF or USD: choose it in the **Choose currency** column of the "
@@ -3920,16 +3896,16 @@ elif state.step == 4:
         st.info("The report is made as soon as every exception is resolved (Reviewed = Yes) and saved.", icon="⏸️")
 
 # =====================================================================================================================
-# 14. STEP 5 - REPORT & EXPORT
+# 14. STEP 4 - REPORT & EXPORT
 #     ① summary of the run   ② Quick Export: the standard report as it is (Excel / PDF), no configuration
 #     ③ Custom Report (closed until "Customize Report"): type, sections, views, layout, preview, export
 # =====================================================================================================================
-elif state.step == 5:
+elif state.step == 4:
     res = state.result
     mem = state.get("report_mem")
     if (res is None or res.stopped_for_review or res.report_file is None
             or not mem or mem["name"] != res.report_file.name):           # the report is kept in memory only
-        go(4)
+        go(3)
     main = next((b for b in res.blocks if b[0] in ("Summary-Monthly", "Summary-Daily")), res.blocks[0])
 
     # ---- ① the summary of the run
@@ -4072,7 +4048,7 @@ elif state.step == 5:
 
     c1, _, c3 = st.columns([1, 1.5, 1.8])
     if c1.button("← Back", width="stretch"):
-        go(4 if getattr(res, "to_review", res.not_found) else 3)   # Exception Resolution skipped when nothing to resolve
+        go(3 if getattr(res, "to_review", res.not_found) else 2)   # Exception Resolution skipped when nothing to resolve
     if c3.button("🔄  New report", width="stretch"):
         state.files, state.read_errors, state.result = {}, [], None
         state.customize = state.cr_preview = False

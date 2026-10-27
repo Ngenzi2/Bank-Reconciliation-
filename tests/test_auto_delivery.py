@@ -55,7 +55,7 @@ def report_step(tmp_path):
     at.session_state["bank_code"] = "BOA"
     at.session_state["report_label"] = "Month"
     at.session_state["picked"] = SEP.start.date()
-    at.session_state["step"] = 5        # Report & Export (27/10/2026: 5 steps)
+    at.session_state["step"] = 4        # Report & Export (Choose&Upload, Check, Reconcile&ExcRes, Report&Export)
     at.session_state["result"] = res
     at.session_state["report_mem"] = {"name": res.report_file.name, "xlsx": res.report_file.read_bytes(),
                                       "pdf": e.report_pdf(res.report_file)}
