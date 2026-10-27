@@ -43,7 +43,8 @@ from pathlib import Path
 OAUTH_SCOPES = ["https://www.googleapis.com/auth/drive.readonly", "https://www.googleapis.com/auth/drive.file"]
 SERVICE_ACCOUNT_SCOPES = ["https://www.googleapis.com/auth/drive"]   # limited in practice to the folders shared
 FOLDER_MIME = "application/vnd.google-apps.folder"
-SHEET_MIME = "application/vnd.google-apps.spreadsheet"     # a Google Sheet: downloaded as CSV
+SHEET_MIME = "application/vnd.google-apps.spreadsheet"     # a Google Sheet: downloaded as CSV (or as_xlsx=True)
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 # a file is of a type by its name (.csv) or, when the name has no extension, by its kind on Drive
 TYPE_MIMES = {"csv": {"text/csv", SHEET_MIME},
               "xlsx": {"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
@@ -421,12 +422,15 @@ class DriveClient:
         return sorted(found, key=lambda f: f.modified, reverse=True)
 
     # ---- reading --------------------------------------------------------------------------------------------------
-    def download(self, file_id: str, mime: str = "", http=None) -> bytes:
+    def download(self, file_id: str, mime: str = "", http=None, as_xlsx: bool = False) -> bytes:
         """The content of a file, in memory (nothing is written on the computer). A Google Sheet (mime) is
-        downloaded as CSV (its first sheet). http: a connection of its own (thread_http), to download several files
-        at the same time."""
+        downloaded as CSV (its first sheet) by default - a payments or statement file only ever needs the one
+        table. as_xlsx: export it as a proper .xlsx instead, every sheet kept - a saved report (several sheets:
+        Summary, Payment details, ...) needs this, never CSV. http: a connection of its own (thread_http), to
+        download several files at the same time."""
         if mime == SHEET_MIME:
-            data = self._run(self.service.files().export_media(fileId=file_id, mimeType="text/csv"),
+            export_mime = XLSX_MIME if as_xlsx else "text/csv"
+            data = self._run(self.service.files().export_media(fileId=file_id, mimeType=export_mime),
                              "download the Google Sheet", http=http)
             return data if isinstance(data, bytes) else bytes(data)
         data = self._run(self.service.files().get_media(fileId=file_id, **SHARED), "download the file", http=http)
