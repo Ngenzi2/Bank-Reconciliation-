@@ -1927,8 +1927,11 @@ def dashboard_facts(client, root):
     if todo:                                             # 2. the others: downloaded together, then read
         n = len(todo)
         bar = st.progress(0.0, text=f"Downloading {n} report{'s' if n > 1 else ''} from Google Drive…")
-        data = report_history.download_many(
-            client, todo, done=lambda i: bar.progress(i / n * 0.6, text=f"Downloading reports… {i} of {n}"))
+        try:
+            data = report_history.download_many(
+                client, todo, done=lambda i: bar.progress(i / n * 0.6, text=f"Downloading reports… {i} of {n}"))
+        except Exception as err:          # one download that escaped download_many's own per-file handling
+            data = {r.file_id: err for r in todo}
         fresh = {}
         for i, r in enumerate(todo, 1):
             try:
@@ -1936,7 +1939,7 @@ def dashboard_facts(client, root):
                     raise data[r.file_id]
                 cache[key(r)] = fresh[key(r)] = report_history.read_drive_facts(client, r, state.session_folder,
                                                                                 data.get(r.file_id))
-            except (DriveError, engine.ReconError, KeyError, ValueError) as err:
+            except Exception as err:      # a report that cannot be read (too large to export, broken, ...)
                 cache[key(r)] = f"{r.name}: {err}"      # not kept on this computer: tried again next time
             bar.progress(0.6 + i / n * 0.4, text=f"Reading reports… {i} of {n}")
         bar.empty()
@@ -1990,7 +1993,7 @@ def dashboard_page():
         return
     try:
         facts, errors = dashboard_facts(client, root)
-    except DriveError as err:
+    except Exception as err:          # the Dashboard is best-effort: never crash the page over one bad report
         st.markdown(f'<div class="rh-empty">☁️ {_esc(str(err))}</div>', unsafe_allow_html=True)
         return
     for e in errors:
