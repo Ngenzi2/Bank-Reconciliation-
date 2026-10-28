@@ -65,15 +65,18 @@ class Fact:
 # READING
 # =====================================================================================================================
 def report_records(records: list) -> list:
-    """The Excel reports the dashboard uses: monthly and weekly reports, one per bank and period - the first version
-    (at the same version, the first saved). Daily reports are left out (their days are in the weeks)."""
+    """The Excel reports the dashboard uses: monthly and weekly reports, one per bank and period - the lowest
+    version (a deliberate new version does not retroactively change the dashboard's trend); at the same version,
+    the latest saved, not the first - two files of the same version are an accidental duplicate, not a correction
+    to preserve, and the first one saved is not always the good one (e.g. too large to export - 2026-10-28). Daily
+    reports are left out (their days are in the weeks)."""
     best = {}
     for r in records:
         if r.ext != "xlsx" or r.kind not in ("month", "week"):
             continue
         key = (r.bank, r.kind, pd.Timestamp(r.start).normalize())
-        saved = r.modified if r.modified is not None and pd.notna(r.modified) else pd.Timestamp.max.tz_localize("UTC")
-        rank = (r.version, saved)
+        saved = r.modified if r.modified is not None and pd.notna(r.modified) else pd.Timestamp(0, tz="UTC")
+        rank = (r.version, -saved.value)
         if key not in best or rank < best[key][0]:
             best[key] = (rank, r)
     return sorted((r for _, r in best.values()), key=lambda r: (r.start, r.bank), reverse=True)

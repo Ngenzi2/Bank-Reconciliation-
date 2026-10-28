@@ -21,9 +21,9 @@ def tables(proc=(1000, 10), amt=(5_000_000.0, 900.0), received=(990, 10), sla=(5
             d.TITLES["duplicate"]: table(dup, a(dup))}
 
 
-def record(bank="IM", kind="month", start="2026-08-01", version=1):
-    return SimpleNamespace(bank=bank, kind=kind, start=pd.Timestamp(start), version=version, name=f"{bank}-{start}",
-                           ext="xlsx", modified=pd.Timestamp("2026-10-01", tz="UTC"))
+def record(bank="IM", kind="month", start="2026-08-01", version=1, modified="2026-10-01", name=None):
+    return SimpleNamespace(bank=bank, kind=kind, start=pd.Timestamp(start), version=version,
+                           name=name or f"{bank}-{start}", ext="xlsx", modified=pd.Timestamp(modified, tz="UTC"))
 
 
 def month_report(bank="IM", month="2026-08", weeks=((1, 2), (3, 9)), **kw):
@@ -41,6 +41,15 @@ def test_records_keep_the_first_version_of_monthly_and_weekly_reports_only():
             record("IM", "week", "2026-08-03"), record("IM", "day", "2026-08-03")]
     kept = d.report_records(recs)
     assert [(r.kind, r.version) for r in kept] == [("week", 1), ("month", 1)]
+
+
+def test_a_duplicate_of_the_same_version_keeps_the_one_saved_last():
+    # two accidental saves of the same period, same version (not a deliberate new version): the first one saved
+    # is not always the good one (e.g. a native Google Sheet too large to export) - approved 2026-10-28
+    recs = [record("ECO", "month", "2026-07-01", 1, modified="2026-10-27 13:43", name="Ecobank_report_July_2026(1)"),
+           record("ECO", "month", "2026-07-01", 1, modified="2026-10-27 14:14", name="Ecobank_report_July_2026")]
+    kept = d.report_records(recs)
+    assert [r.name for r in kept] == ["Ecobank_report_July_2026"]
 
 
 def test_a_monthly_report_gives_its_month_and_its_weeks():
