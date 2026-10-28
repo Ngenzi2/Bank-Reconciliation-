@@ -2055,7 +2055,10 @@ def dashboard_facts(client, root):
     if todo:                                             # 2. the others: downloaded together, then read
         n = len(todo)
         ld = irembo_loading(f"Reading {n} report{'s' if n > 1 else ''} from Google Drive…").__enter__()
-        data = report_history.download_many(client, todo, done=lambda i: ld.update(f"Downloading · {i} of {n}"))
+        try:
+            data = report_history.download_many(client, todo, done=lambda i: ld.update(f"Downloading · {i} of {n}"))
+        except Exception as err:          # one download that escaped download_many's own per-file handling
+            data = {r.file_id: err for r in todo}
         fresh = {}
         for i, r in enumerate(todo, 1):
             try:
