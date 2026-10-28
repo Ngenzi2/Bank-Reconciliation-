@@ -136,6 +136,42 @@ def test_read_notebook_report_derives_notified_from_processed_minus_pending_and_
     assert notified["Total Amount"].iloc[0] == 73000                    # 100000 - 5000 - 20000
 
 
+def test_read_notebook_report_also_reads_the_weeks_of_a_monthly_report(tmp_path):
+    """27/10/2026 -> 2026-10-28: a monthly notebook report's Summary-Weekly sheet has one block per week (its own
+    Pending notifications table too, found at whatever column it is in, not just the Pending notification sheet
+    which only has the whole month)."""
+    import openpyxl
+    path = tmp_path / "BOA_report_August_2026.xlsx"
+    _notebook_workbook(path)
+    wb = openpyxl.load_workbook(path)
+    ws = wb.create_sheet("Summary-Weekly")
+    for base, (a, b), proc, sla, dup, pend in ((1, ("2026-08-01", "2026-08-07"), 6, 1, 1, 1),
+                                               (26, ("2026-08-08", "2026-08-14"), 4, 0, 1, 1)):
+        ws.cell(base, 2, f"Week ({a} to {b})")
+        ws.cell(base + 2, 2, "Overall processed payments")
+        ws.cell(base + 2 + e.GS_STEP, 2, "SLA Violated")
+        ws.cell(base + 2 + 2 * e.GS_STEP, 2, "Duplicate Payment")
+        ws.cell(base + 2 + e.GS_STEP, 8, "Pending notifications")           # the notebooks' own column, not derived
+        for top, col, n, amount in ((base + 2, 2, proc, proc * 1000), (base + 2 + e.GS_STEP, 2, sla, sla * 1000),
+                                    (base + 2 + 2 * e.GS_STEP, 2, dup, dup * 1000),
+                                    (base + 2 + e.GS_STEP, 8, pend, pend * 1000)):
+            ws.cell(top + 1, col, "Currency")
+            ws.cell(top + 1, col + 1, "Number of Transactions")
+            ws.cell(top + 1, col + 2, "Total Amount")
+            ws.cell(top + 2, col, "RWF"); ws.cell(top + 2, col + 1, n); ws.cell(top + 2, col + 2, amount)
+            ws.cell(top + 3, col + 1, n); ws.cell(top + 3, col + 2, amount)
+    wb.save(path)
+    period = e.make_period("month", "2026-08-01")
+    rep = e.read_notebook_report(path, "BOA", period)
+    assert [(sheet, heading) for sheet, heading, _ in rep["blocks"]] == [
+        ("Summary-Monthly", "Month: August 2026 (01/08/2026 - 31/08/2026)"),
+        ("Summary-Weekly", "Week: 01/08/2026 - 07/08/2026"), ("Summary-Weekly", "Week: 08/08/2026 - 14/08/2026")]
+    w1 = rep["blocks"][1][2]
+    assert w1["Overall processed payments"]["Number of Transactions"].iloc[0] == 6
+    assert w1["Pending notifications"]["Number of Transactions"].iloc[0] == 1         # read directly, not derived
+    assert w1["Overall notifications received by Irembo"]["Number of Transactions"].iloc[0] == 4   # 6 - 1 - 1
+
+
 def test_read_report_counts_derives_the_two_tables_the_notebooks_never_write(tmp_path):
     path = tmp_path / "BOA_report_August_2026.xlsx"
     _notebook_workbook(path)
