@@ -1243,6 +1243,14 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
 
     # ---- C. match: every statement row with its IremboPay payment (by invoice number) ----
     t = time.perf_counter()
+    # a payment file sometimes carries the bank's own columns too (e.g. someone re-uploads a report's own Payment
+    # details sheet by mistake, which already has Request Date next to invoice_number): kept as-is, such a column
+    # would collide with the statement's own in the merge below and silently become "<name>_x" / "<name>_y",
+    # breaking a bank's own column-by-name rules (KeyError, e.g. "Request Date" - found 2026-10-28). The statement
+    # always wins; this never drops a column the payments side is actually read by name for (present(...)).
+    clash = (set(payments.columns) & set(statement.columns)) - {"invoice_number"}
+    if clash:
+        payments = payments.drop(columns=list(clash))
     merged = statement.merge(payments, on="invoice_number", how="left", indicator=True)
     merged["found_in_irembopay"] = merged["_merge"].eq("both")
     merged = merged.drop(columns="_merge")
