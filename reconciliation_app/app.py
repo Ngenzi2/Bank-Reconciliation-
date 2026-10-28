@@ -92,7 +92,7 @@ import config                                  # Google Drive settings (no secre
 from integrations import google_drive
 from integrations.google_drive import DriveClient, DriveError
 from integrations import irembopay_checkout, slack
-from services import (app_settings, dashboard, dashboard_view, drive_statements, facts_cache,
+from services import (app_settings, dashboard, dashboard_view, drive_statements, facts_cache, folder_picker,
                       followup, pay_files, report_history, slack_message)
 from services.session_files import SessionFolder
 
@@ -1555,6 +1555,36 @@ def accepted_files():
         else:
             acc.append(f)
     return acc, rej
+
+
+def folder_field(label: str, key: str, extensions) -> list:
+    """A folder path (typed, or chosen with Browse) + everything in it matching `extensions` - "This computer",
+    picked once for this run, nothing kept on disk, nothing saved as a setting. Reads the folder again only when
+    the path itself changes, so removing a file added from it (the ✕ button) stays removed. Returns
+    [(name, content bytes), ...]."""
+    scanned_key, pending_key = f"{key}_scanned", f"{key}_pending"
+    if pending_key in state:          # a widget's session-state key cannot be set after it is created this run
+        state[key] = state.pop(pending_key)       # (Browse stages its result here; applied just before, next run)
+    st.text_input(label, key=key, label_visibility="collapsed", placeholder="Paste the folder path, or Browse…")
+    if st.button("📂 Browse…", key=f"{key}_browse"):
+        with st.spinner("Waiting for the folder window…"):
+            path, error = folder_picker.browse_folder(f"Choose the {label}", state.get(key, ""))
+        if path:
+            state[pending_key] = path
+            st.rerun()
+        elif error:
+            st.error(error + " Type or paste the path above instead.", icon="⚠️")
+    folder = state.get(key, "").strip()
+    if not folder or state.get(scanned_key) == folder:
+        return []
+    state[scanned_key] = folder
+    path = Path(folder).expanduser()
+    if not path.is_dir():
+        st.error(f"{folder}: this folder was not found.", icon="⚠️")
+        return []
+    exts = {e.lower().lstrip(".") for e in extensions}
+    return [(p.name, p.read_bytes()) for p in sorted(path.iterdir())
+            if p.is_file() and not p.name.startswith(("~$", ".")) and p.suffix.lower().lstrip(".") in exts]
 
 
 # ---- key figures + summary tables (step 5 and a saved report)
@@ -3445,11 +3475,10 @@ elif state.step == 1:
         # 27/10/2026: the note ABOVE the button, so "Choose bank file" ends the card, level with "Add selected file"
         st.markdown(f'<div class="up-help">{"<br>".join(help_lines) if not bank_files and bank_src == "This computer" else ""}</div>',
                     unsafe_allow_html=True)
-        bank_up = (st.file_uploader(f"{bank.NAME} bank files ({types})", type=bank.FILE_TYPES,
-                                    accept_multiple_files=True, key=f"bank_{state.uploader_round}",
-                                    label_visibility="collapsed") if bank_src == "This computer" else None)
+        bank_folder_files = (folder_field(f"{bank.NAME} bank files folder ({types})", f"bank_folder_{bank.CODE}",
+                                          bank.FILE_TYPES) if bank_src == "This computer" else [])
 
-    pay_up, from_drive = None, None
+    pay_folder_files, from_drive = [], None
     with u2.container(border=True, key="up_pay_card"):         # 2. IremboPay file: Google Drive or this computer
         st.markdown(f'<div class="up-head"><div class="up-tile">{UP_SVG["cloud"]}</div><div>'
                     f'<div class="up-title">2. IremboPay file</div><div class="up-sub">Choose a source</div>'
@@ -3487,15 +3516,14 @@ elif state.step == 1:
                             f' · {pay_label}</div></div>', unsafe_allow_html=True)
             st.markdown(f'<div class="up-help">{"" if pay_files else f"The IremboPay payment file for <b>{period.name}</b>."}'
                         '</div>', unsafe_allow_html=True)
-            pay_up = st.file_uploader(f"IremboPay payment file ({pay_label})", type=pay_types,
-                                      accept_multiple_files=True, key=f"pay_{state.uploader_round}",
-                                      label_visibility="collapsed")
+            pay_folder_files = folder_field(f"IremboPay payment files folder ({pay_label})", f"pay_folder_{bank.CODE}",
+                                            pay_types)
         else:
             from_drive = irembopay_from_drive(pay_types)
 
     with st.container(border=bool(acc or rej or state.read_errors)):   # what was added, and what was refused
-        new = ([(f.name, f.getvalue(), "bank") for f in (bank_up or [])]
-               + [(f.name, f.getvalue(), "payments") for f in (pay_up or [])]
+        new = ([(name, content, "bank") for name, content in bank_folder_files]
+               + [(name, content, "payments") for name, content in pay_folder_files]
                + ([from_drive] if from_drive else []) + from_drive_bank)
         if new:
             with irembo_loading("Reading the files…"):
