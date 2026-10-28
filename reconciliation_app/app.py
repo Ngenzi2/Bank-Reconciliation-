@@ -944,7 +944,7 @@ def build_no_tx_mem():
     previous period's counts for its comparison column) - what the preview, Drive save and Slack message use
     (approved 2026-10-27: shown automatically when a run finds no transactions, instead of being a manual choice)."""
     made_at = pd.Timestamp.now()                # made once: the file downloaded is the one saved on Drive
-    with st.spinner(f"Looking for the {bank.NAME} {period.previous().name} report…"):
+    with irembo_loading(f"Looking for the {bank.NAME} {period.previous().name} report…"):
         previous, compared_with, problem = previous_counts()
     return {"name": engine.report_path(Path("."), period, bank).name, "made_at": made_at,
             "xlsx": engine.no_transaction_excel(period, bank, made_at, previous),
@@ -1567,7 +1567,7 @@ def folder_field(label: str, key: str, extensions) -> list:
         state[key] = state.pop(pending_key)       # (Browse stages its result here; applied just before, next run)
     st.text_input(label, key=key, label_visibility="collapsed", placeholder="Paste the folder path, or Browse…")
     if st.button("📂 Browse…", key=f"{key}_browse"):
-        with st.spinner("Waiting for the folder window…"):
+        with irembo_loading("Waiting for the folder window…"):
             path, error = folder_picker.browse_folder(f"Choose the {label}", state.get(key, ""))
         if path:
             state[pending_key] = path
