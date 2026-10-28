@@ -2284,6 +2284,8 @@ def dashboard_page():
     mcur = cur if cur != "All" else ("RWF" if "RWF" in now["currencies"] else (now["currencies"] or ["RWF"])[0])
     mt, _ = dashboard.merchants(sel, bef, mcur)
     with_data = sorted({engine.BANKS[f.bank].NAME for f in sel if f.merchants is not None and f.bank in engine.BANKS})
+    # the reconciliation notebooks never keep a merchant table at all (not a question of when the report was made)
+    all_notebook = bool(sel) and all(getattr(f.record, "notebook", False) for f in sel)
     charts = [
         ("payments", "Payments over time", over + " · processed transactions",
          dashboard_view.lines(labels, [("Processed transaction", [c["processed"] for c in child], BRAND)], part,
@@ -2307,7 +2309,7 @@ def dashboard_page():
                        "Paid with other channel": [c["duplicate"] for c in child],
                        "Pending notification": [c["pending"] for c in child]})),
         ("merchants", "Top merchants", f"{span} · {mcur} · " + (", ".join(with_data) if with_data else "no data"),
-         dashboard_view.merchant_bars(mt, mcur),
+         dashboard_view.merchant_bars(mt, mcur, all_notebook),
          mt.head(5)[["Merchant", "Share %", "Transactions", "Amount"]].rename(
              columns={"Share %": "Share of received notifications %", "Amount": f"Amount ({mcur})"}).round(
              {"Share of received notifications %": 1, f"Amount ({mcur})": 0})),

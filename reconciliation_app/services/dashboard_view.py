@@ -362,11 +362,15 @@ def _mchange(m) -> str:
     return f' · <span class="{"dk-g" if ch >= 0 else "dk-r"}">{"↗" if ch >= 0 else "↘"} {abs(ch):.0f}%</span>'
 
 
-def merchant_bars(table: pd.DataFrame, cur: str, n: int = 5) -> str:
+def merchant_bars(table: pd.DataFrame, cur: str, all_notebook: bool = False, n: int = 5) -> str:
     """The top merchants: the bar = share of the received notifications (%), then the number of transactions; the
-    amount on hover."""
+    amount on hover. all_notebook: every report of the period is one the reconciliation notebooks made - they
+    never keep a merchant table at all, unlike an old report of this app's own (made before 12/10/2026)."""
     rows = table.head(n)
     if rows.empty:
+        if all_notebook:
+            return ('<div class="dv-empty">The reconciliation notebooks\' own reports do not keep merchant data.'
+                    '</div>')
         return '<div class="dv-empty">No merchant data in the reports of this period (made before 12/10/2026).</div>'
     palette = [TEAL, ACC, USD_C, AMBER, "#7A8F94"]
     top = max(rows["Share %"].max(), 1e-9)
