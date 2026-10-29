@@ -98,3 +98,13 @@ def test_an_invoice_counts_once_per_table_and_the_report_says_where_each_credit_
     notes = engine.table_notes(rows, out, "ECO")
     assert "D838 of 21/10 19:03 -> Duplicate payment" in notes[0]
     assert notes[1].startswith("In Duplicate payment: second credit") and "D412 of 20/10 19:47 -> Pending" in notes[1]
+
+
+def test_pending_but_paid_in_irembopay_since_gets_a_note_and_stays_pending():
+    """28/10/2026: NEW in the payment file (Pending) but the checkout now says Paid: a note, still in Pending."""
+    import engine
+    rows = pd.DataFrame({"IremboPay check": ["Paid", "Expired", "Paid"], "Report note": ["", "", "earlier note"]})
+    whole = {"pending": pd.Series([True, True, False]), "received": pd.Series([False, False, True])}
+    notes = engine.checkout_notes(rows, whole)
+    assert notes[0] == engine.PAID_SINCE and notes[1] == "" and notes[2] == "earlier note"   # row 2: not in Pending
+    assert whole["pending"].tolist() == [True, True, False]                                    # nothing moved

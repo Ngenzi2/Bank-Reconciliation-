@@ -39,8 +39,6 @@ CURRENCIES = ["RWF", "USD"]
 FILE_TYPES = ["xlsx", "xls", "csv"]
 DRIVE_STATEMENTS = "ecobank_statements_folder_id"   # 26/10/2026: step 2 can read the statements from this Drive
                                                     # folder (drive_settings.toml), picked by the days inside them
-DRIVE_STATEMENTS_PREFIX = "IREMBO PAY"              # only files named like this are considered (the folder also
-                                                    # has IREMBO_TACCT_TRANS_... and other exports: not statements)
 STATEMENT_SHEET = "Ecobank statement"
 
 # IremboPay statuses
