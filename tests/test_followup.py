@@ -71,6 +71,9 @@ def test_latest_version_of_each_report_since_the_start():
             R("IM_w1", 3, "2026-10-05", "pdf")]
     got = followup.latest_reports(recs, "2026-10-01")
     assert [(r.stem, r.version) for r in got] == [("IM_w1", 2)]
+    # 28/10/2026: no start date (the period is chosen on the Follow-up page): every report, latest version
+    every = followup.latest_reports(recs, None)
+    assert sorted((r.stem, r.version) for r in every) == [("IM_sep", 1), ("IM_w1", 2)]
 
 
 def test_items_in_the_period_of_some_banks():
