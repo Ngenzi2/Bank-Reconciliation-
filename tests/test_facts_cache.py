@@ -6,9 +6,8 @@ from services import dashboard, facts_cache, report_history
 
 
 class Rec:
-    def __init__(self, fid, modified="2026-10-01T10:00:00Z", name="IM_recon_summary_01-09-2026_to_30-09-2026.xlsx",
-                mime=""):
-        self.file_id, self.modified, self.name, self.mime = fid, modified, name, mime
+    def __init__(self, fid, modified="2026-10-01T10:00:00Z", name="IM_recon_summary_01-09-2026_to_30-09-2026.xlsx"):
+        self.file_id, self.modified, self.name = fid, modified, name
 
 
 def fact():
@@ -43,7 +42,7 @@ def test_download_many_without_parallel_connections():
         def thread_http(self):
             return None
 
-        def download(self, fid, mime="", http=None, as_xlsx=False):
+        def download(self, fid, http=None):
             if fid == "bad":
                 raise report_history.DriveError("not found")
             return fid.encode()
@@ -57,7 +56,7 @@ def test_download_many_with_an_older_client_goes_one_by_one():
         def thread_http(self):
             return object()
 
-        def download(self, fid, mime="", as_xlsx=False):
+        def download(self, fid):
             return fid.encode()
     out = report_history.download_many(OldClient(), [Rec("x"), Rec("y")])
     assert out == {"x": b"x", "y": b"y"}
