@@ -226,7 +226,9 @@ def kpi_cards(now: dict, before: dict | None, fu: dict | None = None) -> str:
     rate = lambda t: t["received"] / t["processed"] if t and t["processed"] else None
     sla = lambda t: t["sla"] / t["processed"] if t and t["processed"] else None
     pend = lambda t: t.get("pending", 0) / t["processed"] if t and t["processed"] else None
-    pct = lambda v, n=2: "N/A" if v is None else f"{v * 100:.{n}f}%"
+    # a share above 0 that would round to 0 (e.g. 1 of 50,000) is shown as "<0.01%", never as "0.00%"
+    pct = lambda v, n=2: ("N/A" if v is None else f"<{10 ** -n:.{n}f}%" if 0 < v * 100 < 0.5 * 10 ** -n
+                          else f"{v * 100:.{n}f}%")
     amount_big = "<br>".join(f"{c} {short(amt[c])}" for c in curs) or "–"
     amount_sub = (" · ".join(f"{c} " + (_arrow(amt[c], amt_b.get(c), fmt=lambda v: short(v)) or "no earlier figure")
                              for c in curs) if amt_b is not None else "Total received (notifications received)")
@@ -241,8 +243,8 @@ def kpi_cards(now: dict, before: dict | None, fu: dict | None = None) -> str:
          _arrow(sla(now), sla(before), good_up=False, points=True, fmt=lambda v: pct(v, 1)) if before
          else f"Violated: {now['sla']:,} of {now['processed']:,} processed transactions"),
         # 27/10/2026: pending notifications ÷ processed (debited at the bank, never notified to IremboPay)
-        ("PENDING", "pending", pct(pend(now), 1),
-         _arrow(pend(now), pend(before), good_up=False, points=True, fmt=lambda v: pct(v, 1)) if before
+        ("PENDING", "pending", pct(pend(now)),             # 27/10/2026: 2 decimals (4 of 10,506 = 0.04%, not 0.0%)
+         _arrow(pend(now), pend(before), good_up=False, points=True, fmt=pct) if before
          else f"Not notified: {now.get('pending', 0):,} of {now['processed']:,} processed transactions"
               + (" · " + " · ".join(f"{c} {short(v)}" for c in curs
                                     if (v := (now.get('amounts', {}).get(c, {}) or {}).get('pending', 0.0)))
@@ -375,10 +377,101 @@ def merchant_bars(table: pd.DataFrame, cur: str, n: int = 5) -> str:
         f'{m.Transactions:,} transactions · {m._4:.1f}%">'
         f'<span class="dm-n"><i style="background:{palette[i % 5]}"></i>{escape(str(m.Merchant))}</span>'
         f'<span class="dm-b"><span style="width:{m._4 / top * 100:.1f}%"></span></span>'
-        f'<span class="dm-v"><b>{m._4:.1f}%</b> · {m.Transactions:,}{_mchange(m)}</span></div>'
+        f'<span class="dm-v"><b>{m._4:.1f}%</b><span>{m.Transactions:,}{_mchange(m)}</span></span></div>'
         for i, m in enumerate(rows.itertuples())) + (
         f'<div class="dm-note">Bar: share of the {cur} received notifications; the figure after it: transactions. '
         f'Hover a merchant for its amount.</div></div>')
+
+
+def _fmt_share(v: float, unit: str) -> str:
+    return f"{v:,.0f}" if unit == "processed" else f"{unit} {short(v)}"
+
+
+def bank_list(table: pd.DataFrame, colors: dict, unit: str) -> str:
+    """28/10/2026: next to the banks' ring: each bank (its colour), its figure and its share, the biggest first,
+    then the most used bank. unit: "processed" (transactions) or a currency (amount processed)."""
+    if table.empty:
+        return ""
+    head = "Processed" if unit == "processed" else f"Amount ({unit})"
+    cell = "padding:7px 0;border-bottom:1px solid #E6EEF0"
+    rows = "".join(
+        f'<tr><td style="{cell};padding-left:19px;text-indent:-19px"><i style="display:inline-block;width:11px;'
+        f'height:11px;border-radius:3px;'
+        f'background:{colors.get(r.Code, MUT)};margin-right:8px;vertical-align:-1px"></i>{escape(r.Bank)}</td>'
+        f'<td style="{cell};text-align:right;white-space:nowrap;padding-left:14px">{_fmt_share(r.Value, unit)}'
+        f'{_bchange(r)}</td>'
+        f'<td style="{cell};text-align:right;font-weight:800;white-space:nowrap;padding-left:18px">{r._4:.1f}%</td></tr>'
+        for r in table.itertuples())
+    top = table.iloc[0]
+    return (f'<div style="font-family:Nunito,\'Segoe UI\',sans-serif;font-size:13px;color:{TEAL}">'
+            f'<table style="width:100%;border-collapse:collapse"><thead><tr style="color:{MUT};font-size:11.5px">'
+            f'<th style="text-align:left;font-weight:600">Bank</th><th style="text-align:right;font-weight:600;'
+            f'white-space:nowrap;padding-left:14px">'
+            f'{head}</th><th style="text-align:right;font-weight:600;padding-left:18px">Share</th></tr></thead><tbody>{rows}</tbody>'
+            f'</table><div style="margin-top:12px;font-weight:800">Most used: {escape(top["Bank"])} '
+            f'({top["Share %"]:.1f}%)</div></div>')
+
+
+def _bchange(r) -> str:
+    """' ↗ 8%' after a bank's figure when a period is compared with."""
+    ch = getattr(r, "_6", None)                         # "Change %"
+    if ch is None or pd.isna(ch):
+        return ""
+    if abs(ch) < 0.5:
+        return f' <span style="color:{MUT};font-size:11.5px">= 0%</span>'
+    return (f' <span style="color:{"#2E7D4F" if ch >= 0 else BAD};font-size:11.5px">'
+            f'{"↗" if ch >= 0 else "↘"} {abs(ch):.0f}%</span>')
+
+
+def bank_ring(table: pd.DataFrame, colors: dict, unit: str) -> str:
+    """28/10/2026: the banks' share as a ring (pie with a hole, the total inside) + the list next to it - the drawing
+    used in the PDFs (the screen uses alt_bank_ring)."""
+    if table.empty:
+        return '<div class="dv-empty">No processed transaction in this period.</div>'
+    total, cx, cy, ro, ri = float(table["Value"].sum()), 110, 110, 100, 62
+    parts, a0 = [], -math.pi / 2
+    for r in table.itertuples():
+        a1 = a0 + 2 * math.pi * r.Value / total
+        col = colors.get(r.Code, MUT)
+        if r.Value >= total:                            # one bank only: a full ring
+            parts.append(f'<circle cx="{cx}" cy="{cy}" r="{(ro + ri) / 2}" fill="none" stroke="{col}" '
+                         f'stroke-width="{ro - ri}"/>')
+        else:
+            p = lambda a, rad: f"{cx + rad * math.cos(a):.2f} {cy + rad * math.sin(a):.2f}"
+            big = 1 if a1 - a0 > math.pi else 0
+            parts.append(f'<path d="M {p(a0, ro)} A {ro} {ro} 0 {big} 1 {p(a1, ro)} L {p(a1, ri)} '
+                         f'A {ri} {ri} 0 {big} 0 {p(a0, ri)} Z" fill="{col}" stroke="#fff" stroke-width="2"/>')
+        a0 = a1
+    centre = f"{total:,.0f}" if unit == "processed" else short(total)
+    sub = "processed" if unit == "processed" else f"{unit} processed"
+    svg = (f'<svg viewBox="0 0 220 220">{"".join(parts)}<text x="{cx}" y="{cy + 2}" text-anchor="middle" '
+           f'class="dv-dc">{centre}</text><text x="{cx}" y="{cy + 22}" text-anchor="middle" class="dv-ds">{sub}'
+           f'</text></svg>')
+    return (f'<div style="display:flex;gap:22px;align-items:center;flex-wrap:wrap">'
+            f'<div style="flex:0 0 200px">{_img(svg, "width:200px;display:block")}</div>'
+            f'<div style="flex:1 1 220px">{bank_list(table, colors, unit)}</div></div>')
+
+
+def alt_bank_ring(table: pd.DataFrame, colors: dict, unit: str):
+    """The same ring on the screen: hovering a bank shows its figure, its share (and the change when compared)."""
+    import altair as alt
+    names = list(table["Bank"])
+    t = table.assign(Shown=[_fmt_share(v, unit) for v in table["Value"]])
+    tips = [alt.Tooltip("Bank:N"), alt.Tooltip("Shown:N", title="Processed" if unit == "processed" else f"Amount ({unit})"),
+            alt.Tooltip("Share %:Q", format=".1f")]
+    if "Change %" in t.columns:
+        tips.append(alt.Tooltip("Change %:Q", format="+.1f", title="Change % vs compared"))
+    ring = alt.Chart(t).mark_arc(innerRadius=62, outerRadius=100, stroke="#fff", strokeWidth=2).encode(
+        theta=alt.Theta("Value:Q", stack=True),
+        color=alt.Color("Bank:N", scale=alt.Scale(domain=names, range=[colors.get(c, MUT) for c in t["Code"]]),
+                        legend=None),
+        order=alt.Order("Value:Q", sort="descending"), tooltip=tips)
+    total = float(table["Value"].sum())
+    centre = pd.DataFrame({"t": [f"{total:,.0f}" if unit == "processed" else short(total)],
+                           "s": ["processed" if unit == "processed" else f"{unit} processed"]})
+    big = alt.Chart(centre).mark_text(fontSize=22, fontWeight=800, color=TEAL, dy=-6).encode(text="t:N")
+    small = alt.Chart(centre).mark_text(fontSize=11.5, color=MUT, dy=14).encode(text="s:N")
+    return _alt_theme(alt.layer(ring, big, small), height=230)
 
 
 def table_html(df: pd.DataFrame) -> str:
@@ -428,14 +521,15 @@ STYLE_D = f'''<style>
 .dl{{display:flex;flex-wrap:wrap;justify-content:center;gap:14px;font-size:11.5px;color:{TEAL};margin-top:4px;font-family:"Nunito",system-ui,sans-serif}}
 .dl i{{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px}}
 .dm{{font-family:"Nunito","Segoe UI",system-ui,sans-serif;color:{TEAL}}}
-.dm-r{{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,2fr) auto;align-items:center;gap:14px;padding:11px 8px;
+.dm-r{{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,2fr) 170px;align-items:center;gap:14px;padding:11px 8px;
   border-radius:10px;position:relative;cursor:default;transition:background .12s}}
 .dm-r:hover{{background:{PALE}}} .dm-r:hover .dm-b span{{background:{ACC}}}
 .dm-r:hover::after{{content:attr(data-tip);position:absolute;right:8px;top:-28px;background:{TEAL};color:#fff;font-size:11px;
   font-weight:700;padding:5px 10px;border-radius:8px;white-space:nowrap;z-index:5;box-shadow:0 4px 12px rgba(18,50,57,.18)}}
 .dm-n{{font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}} .dm-n i{{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:9px}}
 .dm-b{{height:10px;border-radius:99px;background:#EEF3F4;overflow:hidden}} .dm-b span{{display:block;height:100%;border-radius:99px;background:{TEAL}}}
-.dm-v{{font-size:11.5px;color:{MUT};white-space:nowrap}} .dm-v b{{color:{TEAL};font-size:12.5px}}
+.dm-v{{font-size:11.5px;color:{MUT};white-space:nowrap;display:flex;justify-content:flex-start;gap:18px}}
+.dm-v b{{color:{TEAL};font-size:12.5px;min-width:46px;text-align:right}}   /* 28/10/2026: % | transactions, apart */
 .dm-note{{font-size:12px;color:{MUT};margin-top:10px}}
 .dt{{width:100%;border-collapse:collapse;font-family:"Nunito","Segoe UI",system-ui,sans-serif;font-size:12px;color:{TEAL}}}
 .dt th{{text-align:left;font-weight:800;color:{MUT};border-bottom:1px solid #E1EEF0;padding:7px 8px}}

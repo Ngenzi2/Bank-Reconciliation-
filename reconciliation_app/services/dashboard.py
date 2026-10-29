@@ -385,6 +385,29 @@ def by_bank(facts: list, currency: str = "All", banks=None) -> dict:
                    if any(f.bank == code for f in facts) else None) for code in codes}
 
 
+def bank_shares(now_by: dict, before_by: dict | None = None, measure: str = "processed",
+                currency: str = "RWF") -> pd.DataFrame:
+    """28/10/2026: each bank's share of the processed transactions (measure "processed") or of the amount processed
+    in `currency` (measure "amount"), the biggest first; a bank with nothing is left out. Columns: Code, Bank, Value,
+    Share %, and Before / Change % when a period is compared with."""
+    def value(t):
+        if not t:
+            return 0.0
+        return t["processed"] if measure == "processed" else t["amounts"].get(currency, {}).get("processed", 0.0)
+    rows = [{"Code": c, "Bank": engine.BANKS[c].FULL_NAME if c in engine.BANKS else c, "Value": value(t)}
+            for c, t in now_by.items()]
+    rows = [r for r in rows if r["Value"]]
+    total = sum(r["Value"] for r in rows)
+    for r in rows:
+        r["Share %"] = round(r["Value"] / total * 100, 1)
+        if before_by:
+            b = value(before_by.get(r["Code"]))
+            r["Before"] = b
+            r["Change %"] = round((r["Value"] - b) / b * 100, 1) if b else None
+    cols = ["Code", "Bank", "Value", "Share %"] + (["Before", "Change %"] if before_by else [])
+    return pd.DataFrame(rows, columns=cols).sort_values("Value", ascending=False, kind="stable").reset_index(drop=True)
+
+
 def change(now, before):
     """Relative change (0.25 = +25 %), or None when there is nothing before to compare with."""
     if now is None or before in (None, 0):
