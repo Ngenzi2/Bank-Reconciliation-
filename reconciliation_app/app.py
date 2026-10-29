@@ -92,7 +92,7 @@ import config                                  # Google Drive settings (no secre
 from integrations import google_drive
 from integrations.google_drive import DriveClient, DriveError
 from integrations import irembopay_checkout, slack
-from services import (app_settings, dashboard, dashboard_view, drive_statements, facts_cache,
+from services import (app_settings, dashboard, dashboard_view, drive_statements, facts_cache, folder_picker,
                       followup, pay_files, report_history, slack_message)
 from services.session_files import SessionFolder
 
@@ -119,8 +119,8 @@ SIDE_BG = "url(data:image/svg+xml;base64," + base64.b64encode(b"""<svg xmlns="ht
 SIDE_MENU = "url(data:image/svg+xml;base64," + base64.b64encode(b"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 30">
 <g stroke="#99E378" stroke-width="3.4" stroke-linecap="round"><path d="M4 5h32"/><path d="M4 15h22"/><path d="M4 25h32"/></g>
 </svg>""").decode() + ")"
-STEPS = ["Choose & Upload", "Check", "Reconcile & Exception Resolution", "Report & Export"]   # period+upload, and
-                                                                                               # reconcile+exceptions, on one page each
+STEPS = ["Period & Upload", "Check", "Reconcile & Exception Resolution", "Report & Export"]   # 27/10/2026: 1 + 2 on one
+# page (the period, then the files under it), 4 + 5 on one page
 PREVIEW_TEAL = "#2B8A99"   # charts of the custom report preview: 4.0:1 on the light theme, 4.7:1 on the dark one
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 # 27/10/2026: the loader - the two curves of the Irembo mark in IremboPay green, turning (one turn = 1.1 s)
@@ -159,14 +159,24 @@ class irembo_loading:
     def __init__(self, title: str, sub: str = ""):
         self.title, self.sub, self.outer = title, sub, None
 
+    def _big(self) -> bool:                    # the page loader is showing (a page or a step is loading)
+        return bool(globals().get("PAGE_LOADER", {}).get("on"))
+
     def update(self, sub: str):
         self.sub = sub
-        self.ph.html(loader_html(self.title, sub))
+        if self.on_big:
+            show_page_loader(self.title, sub)
+        else:
+            self.ph.html(loader_html(self.title, sub))
 
     def __enter__(self):
         self.outer = irembo_loading.current
+        self.on_big = self._big()
         self.ph = st.empty()
-        self.ph.html(loader_html(self.title, self.sub))
+        if self.on_big:                          # its text goes on the big loader in the middle
+            show_page_loader(self.title, self.sub)
+        else:
+            self.ph.html(loader_html(self.title, self.sub))
         irembo_loading.current = self
         return self
 
@@ -366,6 +376,11 @@ st.markdown(f"""
   .rc-page .rc-load-mark {{width: 6.5rem !important; height: 6.5rem !important; max-width: none !important;}}
   .rc-page-t {{color: {BRAND}; font-weight: 800; font-size: 1.2rem; margin-top: 1rem;}}
   .rc-page-s {{color: #5B6B70; font-size: .92rem;}}
+  [data-testid="stMain"]:has(.rc-page) [data-stale="true"] {{display: none !important;}}
+  /* 27/10/2026: while one part of the page is working (e.g. reading the statements on Drive), the rest of the page
+     stays as it is - not faded: only the part that works shows its loader */
+  [data-stale="true"], [data-stale="true"] *, [data-testid="stExpander"] details, [data-testid="stExpander"] summary,
+  [data-testid="stExpander"] summary * {{opacity: 1 !important; filter: none !important; transition: none !important;}}
   [data-testid="stMain"]:has(.rc-page) [data-stale="true"] {{display: none !important;}}
   [data-testid="stElementContainer"]:has(.rc-page) ~ * {{display: none !important;}}   /* the new page, until drawn */
   /* the IremboPay loader (27/10/2026) */
@@ -639,6 +654,18 @@ st.markdown(f"""
   .st-key-dash_kind_tabs [data-testid="stButtonGroup"] button[aria-checked="true"], .st-key-dash_bank_tabs [data-testid="stButtonGroup"] button[aria-checked="true"] {{background: #fff !important;
       color: #123239 !important; box-shadow: 0 1px 3px rgba(18,50,57,.14);}}
   .st-key-dash_kind_tabs [data-testid="stButtonGroup"] button[aria-checked="true"] p, .st-key-dash_bank_tabs [data-testid="stButtonGroup"] button[aria-checked="true"] p {{color: #123239;}}
+  /* 28/10/2026: the banks are ticked (several at once): the same grey track and white raised tabs; a tick box
+     before each bank, filled with the bank's colour when ticked (--tick, set next to the tabs) */
+  .st-key-dash_bank_tabs [data-testid="stButtonGroup"] [role="toolbar"] {{background: #F1F5F6; border-radius: 10px;
+      padding: 4px; gap: 2px; width: fit-content; flex-wrap: nowrap;}}
+  .st-key-dash_bank_tabs [data-testid="stButtonGroup"] button[aria-pressed="true"] {{background: #fff !important;
+      color: #123239 !important; box-shadow: 0 1px 3px rgba(18,50,57,.14);}}
+  .st-key-dash_bank_tabs [data-testid="stButtonGroup"] button[aria-pressed="true"] p {{color: #123239;}}
+  .st-key-dash_bank_tabs [data-testid="stButtonGroup"] button:not(:first-of-type) p::before {{content: "";
+      display: inline-block; width: 13px; height: 13px; border-radius: 3px; border: 1.5px solid #9FB3B7;
+      box-sizing: border-box; margin-right: 7px; vertical-align: -2px;}}
+  .st-key-dash_bank_tabs [data-testid="stButtonGroup"] button[aria-pressed="true"]:not(:first-of-type) p::before {{
+      border-color: var(--tick); background: var(--tick) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 6.2l2.4 2.4 4.6-5' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 10px no-repeat;}}
   .st-key-dash_tools button[data-testid="stPopoverButton"] {{border-radius: 9px; border: 1px solid #DCE3E5;
       background: #fff; color: #123239; min-height: 2.5rem; width: 100%; padding: 0 .5rem; box-shadow: none;}}
   .st-key-dash_tools button[data-testid="stPopoverButton"]:hover {{border-color: #2B8A99;}}
@@ -765,7 +792,7 @@ if "pending" in state:                     # changes asked by a button (applied 
     for _k, _v in state.pop("pending").items():
         state[_k] = _v
 state.setdefault("step", 1)
-if state.step > len(STEPS):            # 27/10/2026: steps 4 + 5 became one (a session still on old step 6 = Report)
+if state.step > len(STEPS):            # 27/10/2026: steps were combined (a session still on an old later step)
     state.step = len(STEPS)
 state.setdefault("files", {})            # digest -> engine.UploadedFile (in memory only)
 state.setdefault("read_errors", [])      # files that could not be read
@@ -794,6 +821,7 @@ def go(step):
     """Show another step."""
     state.step = step
     state.no_tx_preview = False                 # the No-Transaction preview page closes when the step changes
+    state._step_changed = True                  # 27/10/2026: the page loader shows until the new step is drawn
     st.rerun()
 
 
@@ -890,7 +918,7 @@ def find_previous(prev):
                 f = report_history.find_previous(client, root, bank, prev,
                                                  index=drive_index_cached(client, root, fresh=True))
             if f is not None:
-                state.prev_reports[key] = {"where": "on Google Drive", "name": f.name, "file_id": f.id, "mime": f.mime}
+                state.prev_reports[key] = {"where": "on Google Drive", "name": f.name, "file_id": f.id}
                 return state.prev_reports[key], ""
             missing[key] = pd.Timestamp.now()
         except DriveError as err:
@@ -910,7 +938,7 @@ def previous_file(prev, prev_info, session) -> Path:
         if client is None:
             raise engine.ReconError(f"Google Drive: {problem}")
         try:
-            data = client.download(prev_info["file_id"], prev_info.get("mime", ""), as_xlsx=True)
+            data = client.download(prev_info["file_id"])
         except DriveError as err:
             raise engine.ReconError(f"The previous report could not be downloaded: {err}") from None
     else:
@@ -937,18 +965,6 @@ def previous_counts():
         return None, "", str(err)
     finally:
         session.remove(path)
-
-
-def build_no_tx_mem():
-    """The memory bundle of a No-Transaction Report for the current bank and period (the Excel bytes, and the
-    previous period's counts for its comparison column) - what the preview, Drive save and Slack message use
-    (approved 2026-10-27: shown automatically when a run finds no transactions, instead of being a manual choice)."""
-    made_at = pd.Timestamp.now()                # made once: the file downloaded is the one saved on Drive
-    with st.spinner(f"Looking for the {bank.NAME} {period.previous().name} report…"):
-        previous, compared_with, problem = previous_counts()
-    return {"name": engine.report_path(Path("."), period, bank).name, "made_at": made_at,
-            "xlsx": engine.no_transaction_excel(period, bank, made_at, previous),
-            "previous": previous, "compared_with": compared_with, "problem": problem}
 
 
 def checkout_all(invoices: list) -> dict:
@@ -1046,7 +1062,7 @@ def _open_history_report(rec, client):
         if rec.source == "Google Drive":
             with irembo_loading(f"Opening {rec.name}…"):
                 state.view_mem = {**report_history.read_drive_report(client, rec.file_id, rec.name,
-                                                                      state.session_folder, rec.mime),
+                                                                      state.session_folder),
                                   "name": rec.name, "saved": local_time(rec.modified)}
         else:
             state.view_report = str(rec.path)
@@ -1226,7 +1242,7 @@ def auto_delivery(res, mem):
     elif done.get("error"):
         st.error(f"Not sent: {done['error']}", icon="⚠️")
     if done.get("payload"):
-        with st.expander("👁 See the message", expanded=True):
+        with st.expander("👁 See the message", expanded=False):     # 27/10/2026: closed (click to open)
             st.code(slack_message.preview_text(done["payload"]), language=None, wrap_lines=True)
     label = "💬 Send again to Slack" if done.get("sent_at") is not None else "↻ Retry sending"
     if st.button(label, key="auto_send_again", help="Posts the message to the Slack channel again"):
@@ -1491,10 +1507,10 @@ def irembopay_from_drive(pay_types):
 
 
 def statements_from_drive(end):
-    """Step 2, bank statements from Google Drive (a bank with its own DRIVE_STATEMENTS folder, 26/10/2026): no list -
-    the app reads the files of the bank's Drive folder itself and adds those whose days (read inside each file) fall
-    from the period's first day to `end`. Done once per period; "Read again" does it again. Returns [(name, content,
-    "bank")] of the files not added yet; they are then read and checked exactly like uploaded ones (in memory only)."""
+    """Step 2, bank statements from Google Drive (Ecobank, 26/10/2026): no list - the app reads the IREMBO PAY files
+    of the bank's Drive folder itself and adds those whose days (read inside each file) fall from the period's first
+    day to `end`. Done once per period; "Read again" does it again. Returns [(name, content, "bank")] of the files not
+    added yet; they are then read and checked exactly like uploaded ones (in memory only)."""
     client, problem = drive_client()
     folder = getattr(config.load(), engine.option(bank, "DRIVE_STATEMENTS", ""), "")
 
@@ -1510,18 +1526,26 @@ def statements_from_drive(end):
     key = (bank.CODE, period.label, f"{end:%Y-%m-%d}", folder)
     new = []
     if state.get("drive_stmt_key") != key:
-        bar = st.empty()                                  # 27/10/2026: the IremboPay loader, not a grey bar
-        bar.html(loader_html(f"Reading the {bank.NAME} statements on Google Drive…", "Looking in the folder"))
-        try:
-            got = drive_statements.pick(client, folder, bank, period.start, end, BASE_DIR / "output" / ".drive_statements.pkl",
-                                        done=lambda i, n: bar.html(loader_html(
-                                            f"Reading the {bank.NAME} statements on Google Drive…",
-                                            f"{i} of {n} files read")))
-        except DriveError as err:
-            bar.empty()
-            panel("Could not read the folder", _esc(str(err)))
+        # 27/10/2026: read in the background - the page is drawn at once and stays usable (e.g. another bank can be
+        # chosen straight away); this card shows the loader, the files come when the reading is done
+        job = drive_statements.start_job(key, lambda: DriveClient.connect(config.load()), folder, bank, period.start,
+                                         end, BASE_DIR / "output" / ".drive_statements.pkl",
+                                         fresh=bool(state.pop("drive_stmt_fresh", False)))
+        if not job["done"]:
+            title = f"Reading the {bank.NAME} statements on Google Drive…"
+
+            @st.fragment(run_every=0.5)
+            def reading():                                # only this part of the page is redrawn meanwhile
+                if job["done"]:
+                    st.rerun()                            # done: the whole page again, with the files
+                st.html(loader_html(title, f"{job['i']} of {job['n']} files read" if job["n"] else "Looking in the folder"))
+            reading()
             return []
-        bar.empty()
+        drive_statements.JOBS.pop(key, None)
+        if job["error"]:
+            panel("Could not read the folder", _esc(job["error"]))
+            return []
+        got = job["result"]
         state.drive_stmt_key, state.drive_stmt_info = key, got
         new = [(name, content, "bank") for name, content in got.files
                if engine.file_digest(content) not in state.files]
@@ -1531,7 +1555,7 @@ def statements_from_drive(end):
         panel("Some files could not be downloaded", _esc("; ".join(got.errors[:3])))
     elif not got.files:
         panel("No statement for this period",
-              f"None of the {got.considered} files of the folder has a day from {period.start:%d/%m} to "
+              f"None of the {got.considered} IREMBO PAY files of the folder has a day from {period.start:%d/%m} to "
               f"{end:%d/%m/%Y}.")
     return new
 
@@ -1555,6 +1579,36 @@ def accepted_files():
         else:
             acc.append(f)
     return acc, rej
+
+
+def folder_field(label: str, key: str, extensions) -> list:
+    """A folder path (typed, or chosen with Browse) + everything in it matching `extensions` - "This computer",
+    picked once for this run, nothing kept on disk, nothing saved as a setting. Reads the folder again only when
+    the path itself changes, so removing a file added from it (the ✕ button) stays removed. Returns
+    [(name, content bytes), ...]."""
+    scanned_key, pending_key = f"{key}_scanned", f"{key}_pending"
+    if pending_key in state:          # a widget's session-state key cannot be set after it is created this run
+        state[key] = state.pop(pending_key)       # (Browse stages its result here; applied just before, next run)
+    st.text_input(label, key=key, label_visibility="collapsed", placeholder="Paste the folder path, or Browse…")
+    if st.button("📂 Browse…", key=f"{key}_browse"):
+        with st.spinner("Waiting for the folder window…"):
+            path, error = folder_picker.browse_folder(f"Choose the {label}", state.get(key, ""))
+        if path:
+            state[pending_key] = path
+            st.rerun()
+        elif error:
+            st.error(error + " Type or paste the path above instead.", icon="⚠️")
+    folder = state.get(key, "").strip()
+    if not folder or state.get(scanned_key) == folder:
+        return []
+    state[scanned_key] = folder
+    path = Path(folder).expanduser()
+    if not path.is_dir():
+        st.error(f"{folder}: this folder was not found.", icon="⚠️")
+        return []
+    exts = {e.lower().lstrip(".") for e in extensions}
+    return [(p.name, p.read_bytes()) for p in sorted(path.iterdir())
+            if p.is_file() and not p.name.startswith(("~$", ".")) and p.suffix.lower().lstrip(".") in exts]
 
 
 # ---- key figures + summary tables (step 5 and a saved report)
@@ -1842,7 +1896,7 @@ with st.sidebar:
                         if (state.result is not None and state.result.bank == code_r
                                 and state.result.period.store_key == key_r):
                             state.result = None
-                            state.step = min(state.step, 2)
+                            state.step = min(state.step, 2)     # Check
                         st.toast(f"Exception decisions deleted: {title_r}", icon="🗑️")
                     except engine.ReconError as err:
                         st.toast(str(err), icon="⚠️")
@@ -1895,11 +1949,22 @@ PAGE_LOADING = {"dashboard": ("Loading the dashboard…", "Reading the saved rep
                 "followup": ("Loading the follow-up…", "Reading the reports and the decisions")}   # the other
 # pages are drawn at once (no Drive to read)
 page_loader = st.empty()
-if PAGE_CHANGED and not viewing and PAGE in PAGE_LOADING:
+PAGE_LOADER = {"on": False}
+
+
+def show_page_loader(title: str, sub: str = ""):
+    """The big loader in the middle of the page (the darker green mark); while it shows, the old page is hidden."""
+    PAGE_LOADER["on"] = True
     page_loader.html(f'<div class="rc-page-wrap"><div class="rc-page">{IREMBO_MARK_DARK}'
-                     f'<div class="rc-page-t">{_esc(PAGE_LOADING[PAGE][0])}</div>'
-                     + (f'<div class="rc-page-s">{_esc(PAGE_LOADING[PAGE][1])}</div>' if PAGE_LOADING[PAGE][1] else "")
-                     + "</div></div>")
+                     f'<div class="rc-page-t">{_esc(title)}</div>'
+                     + (f'<div class="rc-page-s">{_esc(sub)}</div>' if sub else "") + "</div></div>")
+
+
+STEP_CHANGED = bool(state.pop("_step_changed", False))
+if PAGE_CHANGED and not viewing and PAGE in PAGE_LOADING:
+    show_page_loader(*PAGE_LOADING[PAGE])
+elif STEP_CHANGED and not viewing and PAGE == "reconciliation":     # 27/10/2026: from one step to another too
+    show_page_loader(f"Loading {STEPS[min(state.step, len(STEPS)) - 1]}…")
 
 # the period chosen in step 1 (used by every step)
 period = engine.make_period((state.report_label or "Month").lower(), state.picked)
@@ -1964,7 +2029,8 @@ if viewing:
 #     reports are downloaded once per session (then "Refresh"); the "Compare" option of step 1 is not changed.
 # =====================================================================================================================
 
-BANK_COLORS = {"IM": BRAND, "ECO": "#5FAF3C", "BOA": "#2B8A99"}       # I&M dark teal, Ecobank green, BOA light teal
+BANK_COLORS = {"IM": BRAND, "ECO": "#5FAF3C", "BOA": "#2B8A99",       # I&M dark teal, Ecobank green, BOA light teal,
+               "BPR": "#C77D2E"}                                       # BPR orange (28/10/2026)
 
 
 def bank_color(code):
@@ -2033,7 +2099,7 @@ def dashboard_facts(client, root):
                     raise data[r.file_id]
                 cache[key(r)] = fresh[key(r)] = report_history.read_drive_facts(client, r, state.session_folder,
                                                                                 data.get(r.file_id))
-            except Exception as err:      # a report that cannot be read (too large to export, broken, ...)
+            except (DriveError, engine.ReconError, KeyError, ValueError) as err:
                 cache[key(r)] = f"{r.name}: {err}"      # not kept on this computer: tried again next time
             ld.update(f"Reading · {i} of {n}")
         ld.__exit__(None, None, None)
@@ -2056,6 +2122,18 @@ def _seg(label, options, key, default=None, fmt=None, help=None, wrap=False, hid
         return st.pills(label, options, key=key, format_func=fmt, help=help) or default
     return st.segmented_control(label, options, key=key, format_func=fmt, help=help,
                                 label_visibility="collapsed" if hide_label else "visible") or default
+
+
+def _bank_ticks(all_codes):
+    """28/10/2026: the Dashboard's bank tick boxes. "All" ticks every bank (it cannot be unticked by itself);
+    unticking a bank unticks "All"; ticking every bank ticks "All"; the last bank cannot be unticked."""
+    new, old = list(state.get("dash_banks") or []), list(state.get("_dash_banks_last") or ["All"] + all_codes)
+    codes = [c for c in all_codes if c in new]
+    if ("All" in new and "All" not in old) or ("All" in old and "All" not in new and codes == all_codes):
+        codes = all_codes
+    elif not codes:
+        codes = [c for c in all_codes if c in old]
+    state.dash_banks = state._dash_banks_last = (["All"] if codes == all_codes else []) + codes
 
 
 def tile_groups(tiles) -> str:
@@ -2087,7 +2165,7 @@ def dashboard_page():
         return
     try:
         facts, errors = dashboard_facts(client, root)
-    except Exception as err:          # the Dashboard is best-effort: never crash the page over one bad report
+    except DriveError as err:
         st.markdown(f'<div class="rh-empty">☁️ {_esc(str(err))}</div>', unsafe_allow_html=True)
         return
     for e in errors:
@@ -2099,21 +2177,25 @@ def dashboard_page():
 
     # ---- the filters (pills at the top right): they apply to every figure, chart and table of the page.
     # Their labels show the current choice, so the choice is read from the session before the widgets are drawn.
+    all_codes = list(engine.BANKS)
     if "dash_pick" in state:                       # a bar clicked in "by bank": the bank filter follows it
-        state.dash_bank = state.pop("dash_pick")
+        state.dash_banks = state._dash_banks_last = [state.pop("dash_pick")]
     if "dash_goto" in state:                       # a level chosen in the breakdown or the path: (level, period)
         level, key = state.pop("dash_goto")
         state.dash_kind, state[f"dash_period_{level}"] = level, key
-    all_codes = list(engine.BANKS)
     # the hierarchy, all from the monthly reports: a year = its quarters = its months; a month holds its weeks and days
     kinds = {"year": "Year", "quarter": "Quarter", "month": "Month", "week": "Week"}   # no day view (22/10/2026)
-    if state.get("dash_bank") not in ["All"] + all_codes:
-        state.dash_bank = "All"
+    # 28/10/2026: the banks are ticked (any of them, "All" = every bank); pick: "All", one bank's code, or "Some"
+    ticked = [c for c in all_codes if c in (state.get("dash_banks") or [])]
+    if not ticked:
+        ticked = all_codes
+    state.dash_banks = state._dash_banks_last = (["All"] if ticked == all_codes else []) + ticked
     if state.get("dash_kind") not in kinds:
         state.dash_kind = "month"
-    pick, kind = state.dash_bank, state.dash_kind
+    kind = state.dash_kind
+    pick = "All" if ticked == all_codes else ticked[0] if len(ticked) == 1 else "Some"
     with_partial = bool(state.get("dash_partial", False))
-    pick_banks = all_codes if pick == "All" else [pick]
+    pick_banks = ticked
     options = (dashboard.period_options([f for f in facts if f.bank in pick_banks], kind) if with_partial
                else dashboard.complete_options(facts, kind, pick_banks))
     if options and state.get(f"dash_period_{kind}") not in options:
@@ -2136,9 +2218,14 @@ def dashboard_page():
     with st.container(key="dash_tools", horizontal=True, vertical_alignment="center", gap="small"):
         with st.container(key="dash_kind_tabs", width="content"):     # Year | Quarter | Month | Week
             _seg("Period type", list(kinds), "dash_kind", default="month", fmt=kinds.get, hide_label=True)
-        with st.container(key="dash_bank_tabs", width="content"):     # All | I&M | Ecobank | Bank of Africa | BPR
-            _seg("Bank", ["All"] + all_codes, "dash_bank", default="All", hide_label=True,
-                 fmt=lambda c: "All" if c == "All" else engine.BANKS[c].NAME)
+        with st.container(key="dash_bank_tabs", width="content"):     # All | ☑ I&M | ☑ Ecobank | ☑ Bank of Africa | ☑ BPR
+            st.segmented_control("Bank", ["All"] + all_codes, selection_mode="multi", key="dash_banks",
+                                 on_change=_bank_ticks, args=(all_codes,), label_visibility="collapsed",
+                                 format_func=lambda c: "All" if c == "All" else engine.BANKS[c].NAME)
+            # each bank's tick box in its colour (the colours of the charts, e.g. "Processed by bank")
+            st.html("<style>" + "".join(
+                f'.st-key-dash_bank_tabs [data-testid="stButtonGroup"] button:nth-of-type({i + 2}) {{--tick: {bank_color(c)};}}'
+                for i, c in enumerate(all_codes)) + "</style>")
         # the drop-downs together, on the right (also when they go to the next line on a narrow screen)
         with st.container(key="dash_drops", horizontal=True, vertical_alignment="center", gap="small", width="content"):
             short_p = lambda k: ((lambda m, n: f"Week {n} · {m:%b %Y}")(*engine.week_number(k)) if kind == "week"
@@ -2185,7 +2272,7 @@ def dashboard_page():
         return
 
     # ---- the facts of the view (bank, status filter) and of the period compared with
-    banks = all_codes if pick == "All" else [pick]
+    banks = ticked
     sel_all = dashboard.select(facts, kind, first, last, banks)
     bef_all = dashboard.select(facts, kind, *before_span, banks) if before_span else []
     no_compare = ""
@@ -2206,7 +2293,8 @@ def dashboard_page():
     now, before = dashboard.totals(sel, cur), (dashboard.totals(bef, cur) if bef else None)
     now_by = dashboard.by_bank(sel, cur, banks)
     bef_by = dashboard.by_bank(bef, cur, banks) if bef else {}
-    scope_name = "All banks" if pick == "All" else engine.BANKS[pick].FULL_NAME
+    scope_name = ("All banks" if pick == "All" else engine.BANKS[pick].FULL_NAME if pick != "Some"
+                  else " + ".join(engine.BANKS[c].NAME for c in banks))
 
     # ---- the main view (22/10/2026): four key cards, then two rows of two charts; every figure from the reports
     tiles = dashboard.tiles(now, before, now_by, span_before)          # for the Excel / Slack exports below
@@ -2230,12 +2318,12 @@ def dashboard_page():
     except DriveError:
         pass
     p_end = dashboard.period_end(dashboard.period_key(pd.Timestamp(last if last is not None else first), kind), kind)
-    fu_start = pd.Timestamp(SETTINGS["followup"]["from"])
     fu_days = int(SETTINGS["followup"]["days"])
     fu_here = followup.in_period(fu_items, first, p_end, banks)
     fu_sum = followup.summary(fu_here, fu_dec, days=fu_days)
-    fu = {"followed": p_end >= fu_start, "summary": fu_sum, "open_money": followup.money(fu_sum["open_amount"]),
-          "start": f"{fu_start:%d/%m/%Y}", "unit": kinds[kind].lower()}
+    # 28/10/2026: every saved report is followed up (no start date any more)
+    fu = {"followed": True, "summary": fu_sum, "open_money": followup.money(fu_sum["open_amount"]),
+          "unit": kinds[kind].lower()}
     kpis = dashboard_view.kpi_cards(now, before, fu)
     st.html(kpis)
 
@@ -2369,12 +2457,34 @@ def dashboard_page():
                 "notif": (dashboard_view.alt_group_bars(n_cmp.fillna(0), "Figure", [(now_n, dashboard_view.BAD),
                                                                                     (bef_n, dashboard_view.PREV)],
                                                         horizontal=True), legend2(dashboard_view.BAD))}
+    # ---- 28/10/2026: all banks only - each bank's share of the processed transactions (or of the amount processed),
+    #      next to "Pending & delayed notifications"; a ring with the total inside
+    if len(banks) > 1:                                    # 28/10/2026: all banks, or the banks ticked
+        b_cur = cur if cur in ("RWF", "USD") else "RWF"
+        b_measure = state.get("dash_bank_measure") if state.get("dash_bank_measure") in ("Transactions", "Amount") \
+            else "Transactions"
+        b_unit = "processed" if b_measure == "Transactions" else b_cur
+        b_tab = dashboard.bank_shares(now_by, bef_by if before_span else None,
+                                      "processed" if b_unit == "processed" else "amount", b_cur)
+        b_colors = {c: bank_color(c) for c in engine.BANKS}
+        b_table = b_tab.drop(columns="Code").rename(columns={
+            "Value": "Processed transactions" if b_unit == "processed" else f"Amount processed ({b_cur})",
+            "Before": f"Before ({span_before})"})
+        charts.append(("banks", "Processed by bank",
+                       f"{span} · share of the " + ("processed transactions" if b_unit == "processed"
+                                                    else f"amount processed in {b_cur}")
+                       + (f" · change vs {span_before}" if before_span and bef else ""),
+                       dashboard_view.bank_ring(b_tab, b_colors, b_unit), b_table))
+        if not b_tab.empty:
+            live["banks"] = (dashboard_view.alt_bank_ring(b_tab, b_colors, b_unit),
+                             dashboard_view.bank_list(b_tab, b_colors, b_unit))
     for row in (charts[:2], charts[2:4], charts[4:]):
         cols = st.columns(len(row), gap="medium")
         for col, (key, title, sub, chart, table) in zip(cols, row):
             with col.container(border=True, key=f"dcard_{key}"):
                 if key == "notif":                             # + ⬇ Excel (27/10/2026)
-                    h1, h2, h3, h4 = st.columns([5.2, 1.4, 0.9, 0.9], vertical_alignment="center")
+                    h1, h2, h3, h4 = st.columns([5.2, 1.4, 0.9, 0.9] if len(row) == 1 else [3, 1.7, 1.1, 1.1],
+                                                vertical_alignment="center")
                 else:
                     h1, h2, h3 = st.columns([3.4, 1.9, 1.35], vertical_alignment="center")
                 h1.markdown(f'<div class="dc-t">{_esc(title)}</div><div class="dc-s">{_esc(sub)}</div>',
@@ -2384,6 +2494,10 @@ def dashboard_page():
                 if key == "amount" and bef and before_span and labels:   # comparing: one currency at a time
                     st.segmented_control("Currency", ["RWF", "USD"], default="RWF", key="dash_amt_cur",
                                          label_visibility="collapsed")
+                if key == "banks":                             # 28/10/2026: transactions or amount, per bank
+                    st.segmented_control("Measure", ["Transactions", "Amount"], default="Transactions",
+                                         key="dash_bank_measure", label_visibility="collapsed",
+                                         format_func=lambda m: m if m == "Transactions" else f"Amount ({b_cur})")
                 body = chart if shown == "Chart" else dashboard_view.table_html(table)
 
                 pdf_body = body
@@ -2417,7 +2531,12 @@ def dashboard_page():
                                                  f"{re.sub(r'[^0-9A-Za-z]+', '_', span)}.xlsx",
                                        help="Download the table as an Excel file", width="stretch",
                                        on_click="ignore")          # no page redraw: the PDF button stays ready
-                if shown == "Chart" and key in live:
+                if shown == "Chart" and key == "banks" and key in live:      # the ring, its list next to it
+                    r1, r2 = st.columns([1, 1.35], vertical_alignment="center")
+                    r1.altair_chart(live[key][0], width="stretch")
+                    with r2:
+                        st.html(live[key][1])
+                elif shown == "Chart" and key in live:
                     st.altair_chart(live[key][0], width="stretch")
                     if live[key][1]:
                         st.html(dashboard_view.STYLE_D + live[key][1])
@@ -2483,7 +2602,7 @@ def dashboard_page():
                     return pdf_report.dashboard_pdf(export)
             try:
                 st.download_button("⬇ PDF for the manager", data=dashboard_pdf_bytes, type="primary",
-                                   file_name=f"Reports_dashboard_{'all_banks' if pick == 'All' else pick}_"
+                                   file_name=f"Reports_dashboard_{'all_banks' if pick == 'All' else '_'.join(banks)}_"
                                              f"{re.sub(r'[^0-9A-Za-z]+', '_', span)}.pdf",
                                    mime="application/pdf", width="stretch", key="dash_pdf")
             except Exception as err:                     # the page stays usable even if the PDF cannot be made
@@ -2511,18 +2630,16 @@ def dashboard_page():
 # 8a. FOLLOW-UP (22/10/2026): the pending and paid-twice items of the saved reports, and what finally happened to them
 # =====================================================================================================================
 def followup_data(client, root, refresh: bool = False):
-    """(items, decisions) of the follow-up: the items of the saved reports since the start date (Settings), read once
-    (kept for the session and on this computer, like the dashboard's figures), and the decisions shared on Drive."""
-    start = pd.Timestamp(SETTINGS["followup"]["from"])
+    """(items, decisions) of the follow-up: the items of every saved report (28/10/2026: no start date, the period is
+    chosen on the page), read once (kept for the session and on this computer, like the dashboard's figures), and
+    the decisions shared on Drive."""
+    start = None
     cached = state.get("history_index")
     if refresh or not cached or cached[0] != root:
         with irembo_loading("Reading the reports on Google Drive…", "Reconciliation Reports"):
             state.history_index = (root, report_history.drive_index(client, root))
             state.history_index_at = pd.Timestamp.now()
-    # a notebook-made report is left out: its Pending notification / Duplicate payment sheets do not have this
-    # app's own column names (no invoice_number, name, payment_provider; Ccy not Currency) - its items cannot be
-    # read correctly here (found 2026-10-27, the same day notebook reports started being recognised at all)
-    reports = followup.latest_reports([r for r in state.history_index[1].records if not r.notebook], start)
+    reports = followup.latest_reports(state.history_index[1].records, start)
     cache = state.setdefault("fu_items", {})
     key = facts_cache.key
     todo = [r for r in reports if key(r) not in cache]
@@ -2563,11 +2680,10 @@ def followup_page():
                     "<br>The follow-up reads the saved reports and keeps its decisions on Google Drive.</div>",
                     unsafe_allow_html=True)
         return
-    days, start = int(SETTINGS["followup"]["days"]), pd.Timestamp(SETTINGS["followup"]["from"])
+    days = int(SETTINGS["followup"]["days"])
     t1, t2 = st.columns([4, 1], vertical_alignment="center")
     t1.markdown(f'<div class="dash-sub">What happened to the <b>pending</b> and <b>paid twice</b> items of the saved '
-                f'reports, after the report · reports from <b>{start:%d/%m/%Y}</b> (Settings) · overdue after '
-                f'<b>{days} days</b></div>', unsafe_allow_html=True)
+                f'reports, after the report · overdue after <b>{days} days</b> (Settings)</div>', unsafe_allow_html=True)
     refresh = t2.button("🔄 Refresh", key="fu_refresh", width="stretch", help="Read the reports and the decisions again")
     try:
         items, decisions = followup_data(client, root, refresh)
@@ -2575,8 +2691,31 @@ def followup_page():
         st.error(str(err), icon="⚠️")
         return
     if not items:
-        st.markdown(f'<div class="rh-empty">✅ No pending or paid-twice item in the reports saved since '
-                    f'{start:%d/%m/%Y}.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="rh-empty">✅ No pending or paid-twice item in the saved reports.</div>',
+                    unsafe_allow_html=True)
+        return
+
+    # ---- the period (28/10/2026, like the Dashboard): Week | Month | Quarter | Year | All, then the period itself;
+    #      everything below (cards, list, reminder) is the items paid in that period
+    ptypes = {"week": "Week", "month": "Month", "quarter": "Quarter", "year": "Year", "all": "All"}
+    period_txt = "all periods"
+    with st.container(key="fu_tools", horizontal=True, vertical_alignment="center", gap="small"):
+        with st.container(key="fu_kind_tabs", width="content"):
+            ptype = _seg("Period type", list(ptypes), "fu_kind", default="month", fmt=ptypes.get, hide_label=True)
+        if ptype != "all":
+            options = sorted({dashboard.period_key(i["paid_on"], ptype) for i in items if i["paid_on"] is not None},
+                             reverse=True)                  # the periods with items, the latest first
+            if state.get(f"fu_period_{ptype}") not in options:
+                state[f"fu_period_{ptype}"] = options[0] if options else None
+            if options:
+                st.selectbox("Period", options, key=f"fu_period_{ptype}", label_visibility="collapsed", width=260,
+                             format_func=lambda k: "📅 " + dashboard.period_label(k, ptype))
+    if ptype != "all":
+        first = state.get(f"fu_period_{ptype}")
+        items = followup.in_period(items, first, dashboard.period_end(first, ptype)) if first is not None else []
+        period_txt = dashboard.period_label(first, ptype) if first is not None else ptypes[ptype].lower()
+    if not items:
+        st.caption(f"No pending or paid-twice item paid in {period_txt}.")
         return
     sm = followup.summary(items, decisions, days=days)
     cards = [("OPEN", f"{sm['open']:,}", f"{sm['by_type']['Pending'][0]:,} pending · {sm['by_type']['Paid twice'][0]:,} "
@@ -2633,7 +2772,7 @@ def followup_page():
         options = [DASH] + sorted({d for v in followup.DECISIONS.values() for d in v})
         table["Decision"] = table["Decision"].replace("", DASH)
         edited = st.data_editor(
-            table.drop(columns="_key"), hide_index=True, width="stretch", key=f"fu_editor_{show}_{kinds}_{pick}",
+            table.drop(columns="_key"), hide_index=True, width="stretch", key=f"fu_editor_{period_txt}_{show}_{kinds}_{pick}",
             disabled=[c for c in table.columns if c not in ("Decision", "Comment", "_key")],
             column_config={
                 "Amount": st.column_config.NumberColumn("Amount", format="localized"),
@@ -3058,19 +3197,18 @@ def settings_page():
     # ---- follow-up: the reports followed up and the days before an open item is overdue
     with st.container(border=True):
         st.markdown('<div class="card-title">📋 Follow-up</div>', unsafe_allow_html=True)
-        st.caption("The Follow-up page lists the pending and paid-twice items of the reports whose period starts on or "
-                   "after this date; an item still open after this many days is overdue (red, and in the reminder).")
+        # 28/10/2026: no "Follow the reports from" date any more - the period is chosen on the Follow-up page
+        st.caption("An item still open after this many days is overdue (red, and in the reminder). The period is "
+                   "chosen on the Follow-up page.")
         fu = SETTINGS["followup"]
-        c1, c2 = st.columns(2)
-        fu_from = c1.date_input("Follow the reports from", pd.Timestamp(fu["from"]).date(), key="set_fu_from",
-                                format="DD/MM/YYYY", disabled=not app_settings.can_edit(role))
-        fu_days = c2.number_input("Overdue after (days)", 1, 90, int(fu["days"]), key="set_fu_days",
+        c1, _ = st.columns(2)
+        fu_days = c1.number_input("Overdue after (days)", 1, 90, int(fu["days"]), key="set_fu_days",
                                   disabled=not app_settings.can_edit(role))
-        changed = f"{fu_from:%Y-%m-%d}" != fu["from"] or int(fu_days) != int(fu["days"])
+        changed = int(fu_days) != int(fu["days"])
         if app_settings.can_edit(role) and st.button("Save follow-up", type="primary", key="set_fu_save",
                                                      disabled=not changed):
             try:
-                app_settings.set_followup(f"{fu_from:%Y-%m-%d}", int(fu_days), user)
+                app_settings.set_followup(fu["from"], int(fu_days), user)
                 state.toast = "Follow-up settings saved"
                 st.rerun()
             except app_settings.SettingsError as err:
@@ -3356,9 +3494,28 @@ elif state.step == 1:
                 if state.run_error:
                     st.error(state.run_error, icon="⚠️")
 
-    # ---- ② upload: the bank statements + the IremboPay payment file (read in memory, never saved) - the same
-    #      screen as the period, no separate step; a run with no transactions is answered with the No-Transaction
-    #      Report automatically (in Check), never a choice made here (approved 2026-10-27)
+        # 27/10/2026: no "Choose report generation method" block any more - always the normal reconciliation
+    no_tx = False
+    if no_tx:                                   # the report is seen first, on its own page (below)
+        c1, _, c3 = st.columns([1, 2, 1.3])
+        if c3.button("Generate No-Transaction Report →", type="primary", width="stretch", disabled=bool(not_ended),
+                     help="This period has not ended yet" if not_ended else None):
+            state.no_tx_preview = True
+            made_at = pd.Timestamp.now()            # made once: the file downloaded is the one saved on Drive
+            with irembo_loading(f"Looking for the {bank.NAME} {period.previous().name} report…"):
+                previous, compared_with, problem = previous_counts()
+            state.no_tx_mem = {"name": engine.report_path(Path("."), period, bank).name, "made_at": made_at,
+                               "xlsx": engine.no_transaction_excel(period, bank, made_at, previous),
+                               "previous": previous, "compared_with": compared_with, "problem": problem}
+            state.no_tx_drive = None
+            st.rerun()
+    STEP1_UPLOAD = not no_tx and ready          # 27/10/2026: the files are added on this same page, under the period
+
+# =====================================================================================================================
+# 10. STEP 1 (continued) - UPLOAD, under the period on the same page (27/10/2026): the bank statements + the
+#     IremboPay payment file (read in memory, never saved)
+# =====================================================================================================================
+if state.step == 1 and not state.get("no_tx_preview") and STEP1_UPLOAD:     # ③ the files, on the step-1 page
     acc, rej = accepted_files()
     # ---- what to upload (depends on the bank)
     monday = engine.extra_monday(period, bank)
@@ -3392,6 +3549,7 @@ elif state.step == 1:
                 if bank_src == "Google Drive" and st.button("", icon=":material/refresh:", key="drive_stmt_again",
                                                             type="tertiary", help="Read the Google Drive folder again"):
                     state.drive_stmt_key = None
+                    state.drive_stmt_fresh = True             # the folder's list is read again too
                     st.rerun()
             if bank_src == "Google Drive":
                 drive_end = need_to + pd.Timedelta(days=1 if engine.option(bank, "DAY_AFTER_RECOMMENDED", False) else 0)
@@ -3424,8 +3582,8 @@ elif state.step == 1:
                         unsafe_allow_html=True)
         elif bank_src == "This computer":
             # the upload area on its own: it grows so this card has no empty space under its text (section 3 CSS)
-            st.markdown(f'<div class="up-drop up-drop-fill">{UP_SVG["file"]}<div class="up-drop-title">Choose bank '
-                        f'statements folder</div><div class="up-drop-sub">{"Excel" if set(bank.FILE_TYPES) <= {"xls", "xlsx"} else "Bank"}'
+            st.markdown(f'<div class="up-drop up-drop-fill">{UP_SVG["file"]}<div class="up-drop-title">Upload bank file'
+                        f'</div><div class="up-drop-sub">{"Excel" if set(bank.FILE_TYPES) <= {"xls", "xlsx"} else "Bank"}'
                         f' format · {types}</div></div>', unsafe_allow_html=True)
         help_lines = [f"Upload the {' and '.join(bank.CURRENCIES) + ' ' if per_currency else ''}statements "
                       f"covering <b>{period.start:%d/%m} to {need_to:%d/%m/%Y}</b>."]
@@ -3445,11 +3603,10 @@ elif state.step == 1:
         # 27/10/2026: the note ABOVE the button, so "Choose bank file" ends the card, level with "Add selected file"
         st.markdown(f'<div class="up-help">{"<br>".join(help_lines) if not bank_files and bank_src == "This computer" else ""}</div>',
                     unsafe_allow_html=True)
-        bank_up = (st.file_uploader(f"{bank.NAME} bank files ({types})", type=bank.FILE_TYPES,
-                                    accept_multiple_files=True, key=f"bank_{state.uploader_round}",
-                                    label_visibility="collapsed") if bank_src == "This computer" else None)
+        bank_folder_files = (folder_field(f"{bank.NAME} bank files folder ({types})", f"bank_folder_{bank.CODE}",
+                                          bank.FILE_TYPES) if bank_src == "This computer" else [])
 
-    pay_up, from_drive = None, None
+    pay_folder_files, from_drive = [], None
     with u2.container(border=True, key="up_pay_card"):         # 2. IremboPay file: Google Drive or this computer
         st.markdown(f'<div class="up-head"><div class="up-tile">{UP_SVG["cloud"]}</div><div>'
                     f'<div class="up-title">2. IremboPay file</div><div class="up-sub">Choose a source</div>'
@@ -3482,20 +3639,19 @@ elif state.step == 1:
                 st.markdown(f'<div class="upf-foot">{len(pay_files)} file{"s" if len(pay_files) != 1 else ""}'
                             " · ✕ removes one</div>", unsafe_allow_html=True)
             else:
-                st.markdown(f'<div class="up-drop up-drop-fill">{UP_SVG["file"]}<div class="up-drop-title">Choose '
-                            f'IremboPay files folder</div><div class="up-drop-sub">{pay_label.replace(".", "").upper()} format'
+                st.markdown(f'<div class="up-drop up-drop-fill">{UP_SVG["file"]}<div class="up-drop-title">Upload '
+                            f'IremboPay file</div><div class="up-drop-sub">{pay_label.replace(".", "").upper()} format'
                             f' · {pay_label}</div></div>', unsafe_allow_html=True)
             st.markdown(f'<div class="up-help">{"" if pay_files else f"The IremboPay payment file for <b>{period.name}</b>."}'
                         '</div>', unsafe_allow_html=True)
-            pay_up = st.file_uploader(f"IremboPay payment file ({pay_label})", type=pay_types,
-                                      accept_multiple_files=True, key=f"pay_{state.uploader_round}",
-                                      label_visibility="collapsed")
+            pay_folder_files = folder_field(f"IremboPay payment files folder ({pay_label})", f"pay_folder_{bank.CODE}",
+                                            pay_types)
         else:
             from_drive = irembopay_from_drive(pay_types)
 
     with st.container(border=bool(acc or rej or state.read_errors)):   # what was added, and what was refused
-        new = ([(f.name, f.getvalue(), "bank") for f in (bank_up or [])]
-               + [(f.name, f.getvalue(), "payments") for f in (pay_up or [])]
+        new = ([(name, content, "bank") for name, content in bank_folder_files]
+               + [(name, content, "payments") for name, content in pay_folder_files]
                + ([from_drive] if from_drive else []) + from_drive_bank)
         if new:
             with irembo_loading("Reading the files…"):
@@ -3574,26 +3730,20 @@ elif state.step == 1:
                     st.rerun()
     has_bank = any(f.kind == "bank" for f in acc)
     has_pay = any(f.kind == "payments" for f in acc)
-    if not ready:
-        next_help = "This period has not ended yet" if not_ended else "Add the previous report first, or untick the comparison"
-    elif not (has_bank and has_pay):
-        next_help = "Add at least one bank file and the payment file"
-    else:
-        next_help = None
-    _, _, c3 = st.columns([1, 2, 1.3])
-    if c3.button("Next: check →", type="primary", width="stretch", disabled=not (ready and has_bank and has_pay),
-                 help=next_help):
+    c1, _, c3 = st.columns([1, 2, 1.3])
+    if c3.button("Next: check →", type="primary", width="stretch", disabled=not (has_bank and has_pay),
+                 help=None if has_bank and has_pay else "Add at least one bank file and the payment file"):
         state.run_error = None
         go(2)
 
 # =====================================================================================================================
-# 11. STEP 2 - CHECK: the checklist (engine.check_period), then "Run reconciliation"
+# 11. STEP 3 - CHECK: the checklist (engine.check_period), then "Run reconciliation"
 # =====================================================================================================================
-elif state.step == 2:
+elif state.step == 2:     # Check
     acc, _ = accepted_files()
     chk = engine.check_period(period, acc, bank)
     with st.container(border=True):
-        st.markdown(f'<div class="card-title">② Check: {period.name}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="card-title">③ Check: {period.name}</div>', unsafe_allow_html=True)
         # one compact list (26/10/2026: no empty space between the lines). 27/10/2026: a warning about a line (same
         # label, e.g. "Ecobank statements: …") is not repeated in a yellow box - it is that line's ⓘ explanation
         tips, boxes = {}, []
@@ -3612,7 +3762,7 @@ elif state.step == 2:
         for w in boxes:
             st.warning(w, icon="⚠️")
         if chk.blocking:
-            st.error("Run is blocked until the missing bank files are added. Go back to Choose.", icon="⛔")
+            st.error("Run is blocked until the missing bank files are added. Go back to Upload.", icon="⛔")
         if compare:
             st.caption(f"The report will be compared with {period.previous().name}.")
         if state.run_error:
@@ -3626,15 +3776,6 @@ elif state.step == 2:
                 state.result = run_reconciliation(acc)
             state.run_error = None
             go(3)
-        except engine.NoTransactionsError:
-            # the files cover the period, but none of their rows fall in it: every category would be 0 anyway,
-            # so show the No-Transaction Report directly instead of an error (approved 2026-10-27)
-            state.no_tx_mem = build_no_tx_mem()
-            state.no_tx_drive = None
-            state.run_error = None
-            state.step = 1
-            state.no_tx_preview = True
-            st.rerun()
         except engine.ReconError as err:
             state.run_error = str(err)
             st.rerun()
@@ -3643,10 +3784,10 @@ elif state.step == 2:
             st.rerun()
 
 # =====================================================================================================================
-# 12. STEP 3 - RECONCILE & EXCEPTION RESOLUTION (one page since 27/10/2026): the result of the matching (bank rows,
+# 12. STEP 4 - RECONCILE & EXCEPTION RESOLUTION (one page since 27/10/2026): the result of the matching (bank rows,
 #     matched, not found, amounts), then under it the exceptions to resolve
 # =====================================================================================================================
-elif state.step == 3:
+elif state.step == 3:     # Reconcile & Exception Resolution
     res = state.result
     if res is None:
         go(2)
@@ -3896,16 +4037,16 @@ elif state.step == 3:
         st.info("The report is made as soon as every exception is resolved (Reviewed = Yes) and saved.", icon="⏸️")
 
 # =====================================================================================================================
-# 14. STEP 4 - REPORT & EXPORT
-#     ① summary of the run   ② Quick Export: the standard report as it is (Excel / PDF), no configuration
+# 14. STEP 5 - REPORT & EXPORT
+#     ① summary of the run   ② saved on Drive and sent to Slack (Quick Export removed on 27/10/2026)
 #     ③ Custom Report (closed until "Customize Report"): type, sections, views, layout, preview, export
 # =====================================================================================================================
-elif state.step == 4:
+elif state.step == 4:     # Report & Export
     res = state.result
     mem = state.get("report_mem")
     if (res is None or res.stopped_for_review or res.report_file is None
             or not mem or mem["name"] != res.report_file.name):           # the report is kept in memory only
-        go(3)
+        go(2)
     main = next((b for b in res.blocks if b[0] in ("Summary-Monthly", "Summary-Daily")), res.blocks[0])
 
     # ---- ① the summary of the run
@@ -3941,15 +4082,7 @@ elif state.step == 4:
         with st.expander("Summary tables"):
             render_summary(res.blocks, period.report_type, res.merchants)
 
-    # ---- ② Quick Export: the standard report, unchanged
-    with st.container(border=True):
-        st.markdown('<div class="card-title">⚡ Quick Export</div>', unsafe_allow_html=True)
-        st.caption("Download the standard reconciliation report. No configuration required.")
-        q1, q2, _ = st.columns([1, 1, 1])
-        q1.download_button("⬇ Download Excel", data=mem["xlsx"], file_name=mem["name"],
-                           mime=XLSX_MIME, type="primary", width="stretch", key="quick_xlsx")
-        q2.download_button("⬇ Download PDF", data=mem["pdf"], file_name=Path(mem["name"]).with_suffix(".pdf").name,
-                           mime="application/pdf", type="primary", width="stretch", key="quick_pdf")
+    # (the Quick Export block was removed on 27/10/2026: the report is saved on Drive below, with its links)
 
     # ---- saved to Google Drive and sent to Slack automatically (once per report)
     with st.container(border=True):
@@ -4048,10 +4181,15 @@ elif state.step == 4:
 
     c1, _, c3 = st.columns([1, 1.5, 1.8])
     if c1.button("← Back", width="stretch"):
-        go(3 if getattr(res, "to_review", res.not_found) else 2)   # Exception Resolution skipped when nothing to resolve
+        go(3)                                   # back to Reconcile & Exception Resolution (one step since 27/10/2026)
     if c3.button("🔄  New report", width="stretch"):
         state.files, state.read_errors, state.result = {}, [], None
         state.customize = state.cr_preview = False
         state.report_mem = state.drive_save = None          # the report leaves memory (it is on Drive if saved)
         state.session_folder.clear()                        # only this session's own temporary folder
         go(1)
+
+
+# 27/10/2026: the step is drawn - the page loader (shown on a step change) goes away
+page_loader.empty()
+PAGE_LOADER["on"] = False
