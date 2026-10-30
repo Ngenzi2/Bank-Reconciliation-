@@ -255,22 +255,20 @@ def kpi_cards(now: dict, before: dict | None, fu: dict | None = None) -> str:
     if fu is not None:
         if fu.get("followed"):
             s = fu["summary"]
-            if s["open"]:
-                cards[0] = cards[0][:3] + (cards[0][3] + f'<div class="dk-f">Still to follow up: '
-                                           f'{escape(fu["open_money"])} ({s["by_type"]["Pending"][0]:,} pending, '
-                                           f'{s["by_type"]["Paid twice"][0]:,} paid twice)</div>',)
+            # 30/10/2026: the money still to follow up is shown on the FOLLOW-UP card only, not on AMOUNT
             if s["received_later"] and now["processed"]:
                 after = (now["received"] + s["received_later"]) / now["processed"]
                 cards[2] = cards[2][:3] + (cards[2][3] + f'<div class="dk-f"><b>{after * 100:.2f}%</b> after follow-up '
                                            f'({s["received_later"]:,} received later)</div>',)
             red = " dk-red" if s["overdue"] else ""
             if s["total"]:
-                left = s["open"]
-                sub = (f'{left:,} still to check after the report ({s["by_type"]["Pending"][0]:,} pending, '
-                       f'{s["by_type"]["Paid twice"][0]:,} paid twice) · {escape(fu["open_money"])}' if left
-                       else "Nothing left to check after the report")
-                cards.append(("FOLLOW-UP", "fu", f'<span class="{red.strip()}">{s["resolved"]:,} of {s["total"]:,} '
-                                                 f'checked</span>', sub))
+                # 30/10/2026: "4 / 75" then "Checked", the open items per type, and the money still open
+                rows = "".join(f'<div><span>{t}</span><b>{s["by_type"][t][0]:,}</b></div>'
+                               for t in ("Pending", "Paid twice"))
+                sub = (f'Checked<div class="dk-fu">{rows}</div>'
+                       + (f'{escape(fu["open_money"])} remaining' if s["open"] else "Nothing left to check"))
+                cards.append(("FOLLOW-UP", "fu", f'<span class="{red.strip()}">{s["resolved"]:,} / {s["total"]:,}'
+                                                 f'</span>', sub))
             else:
                 cards.append(("FOLLOW-UP", "fu", '<span class="dk-msg">Nothing to check</span>',
                               "No pending or paid-twice payment after the report"))
@@ -517,7 +515,9 @@ STYLE_D = f'''<style>
 .dk-h{{display:flex;justify-content:space-between;align-items:center;font-size:11px;font-weight:700;letter-spacing:.06em;color:{MUT}}}
 .dk-v{{font-size:26px;font-weight:800;margin:7px 0 5px;line-height:1.15}} .dk-v2{{font-size:19px}}
 .dk-s{{font-size:11.5px;color:{MUT}}} .dk-f{{font-size:11px;color:#8A5B00;margin-top:5px}} .dk-f b{{color:{TEAL}}}
-.dk-red{{color:{BAD}}} .dk-msg{{font-size:16px;line-height:1.3;display:block}} .dk-g{{color:#2E7D4F;font-weight:800}} .dk-r{{color:{BAD};font-weight:800}} .dk-n{{color:{MUT}}}
+.dk-fu{{border-top:1px solid #E1EEF0;margin:8px 0 6px;padding-top:6px}}
+.dk-fu div{{display:flex;justify-content:space-between;gap:8px;line-height:1.7}} .dk-fu b{{color:{TEAL};font-weight:700}}
+.dk-red{{color:{BAD}}}.dk-msg{{font-size:16px;line-height:1.3;display:block}} .dk-g{{color:#2E7D4F;font-weight:800}} .dk-r{{color:{BAD};font-weight:800}} .dk-n{{color:{MUT}}}
 .dl{{display:flex;flex-wrap:wrap;justify-content:center;gap:14px;font-size:11.5px;color:{TEAL};margin-top:4px;font-family:"Nunito",system-ui,sans-serif}}
 .dl i{{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px}}
 .dm{{font-family:"Nunito","Segoe UI",system-ui,sans-serif;color:{TEAL}}}
