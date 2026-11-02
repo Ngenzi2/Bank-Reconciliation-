@@ -1558,10 +1558,10 @@ def accepted_files():
 
 
 def folder_field(label: str, key: str, extensions) -> list:
-    """A folder path (typed, or chosen with Browse) + everything in it matching `extensions` - "This computer",
-    picked once for this run, nothing kept on disk, nothing saved as a setting. Reads the folder again only when
-    the path itself changes, so removing a file added from it (the ✕ button) stays removed. Returns
-    [(name, content bytes), ...]."""
+    """A folder path (typed, or chosen with Browse) + its contents (folder_picker.contents: the folder itself and
+    every folder under it) - "This computer", picked once for this run, nothing kept on disk, nothing saved as a
+    setting. Reads the folder again only when the path itself changes, so removing a file added from it (the ✕
+    button) stays removed. Returns [(name, content bytes), ...]."""
     scanned_key, pending_key = f"{key}_scanned", f"{key}_pending"
     if pending_key in state:          # a widget's session-state key cannot be set after it is created this run
         state[key] = state.pop(pending_key)       # (Browse stages its result here; applied just before, next run)
@@ -1582,9 +1582,7 @@ def folder_field(label: str, key: str, extensions) -> list:
     if not path.is_dir():
         st.error(f"{folder}: this folder was not found.", icon="⚠️")
         return []
-    exts = {e.lower().lstrip(".") for e in extensions}
-    return [(p.name, p.read_bytes()) for p in sorted(path.iterdir())
-            if p.is_file() and not p.name.startswith(("~$", ".")) and p.suffix.lower().lstrip(".") in exts]
+    return folder_picker.contents(path, extensions)
 
 
 # ---- key figures + summary tables (step 5 and a saved report)

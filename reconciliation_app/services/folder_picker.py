@@ -9,15 +9,34 @@ raising, so the caller can fall back to the text box that is there anyway. A clo
 error: the caller just keeps the text box as it was.
 
     browse_folder(title, start="") -> (path or None, error or None)
+    contents(path, extensions)       the files matching `extensions` in that folder and every folder under it
 """
 from __future__ import annotations
 
+import os
 import platform
 import subprocess
 import sys
 from pathlib import Path
 
 TIMEOUT = 120   # seconds: generous for someone actually browsing, but always bounded
+
+
+def contents(path: Path, extensions) -> list:
+    """Every file matching `extensions` inside `path` AND inside every folder under it, any depth (e.g. choosing
+    "Bpr-irembo" also reads its "July 2026", "August 2026", ... folders - approved 2026-11-02). A hidden folder
+    (its name starts with ".") is not looked into. Returns [(name, content bytes), ...], folder by folder, name by
+    name; a file of the same name in two different folders is still kept apart (duplicate content, not duplicate
+    name, is what is refused when the files are added)."""
+    exts = {e.lower().lstrip(".") for e in extensions}
+    found = []
+    for root, dirs, names in os.walk(path):
+        dirs[:] = sorted(d for d in dirs if not d.startswith("."))      # do not look inside a hidden folder
+        for name in sorted(names):
+            p = Path(root) / name
+            if not name.startswith(("~$", ".")) and p.suffix.lower().lstrip(".") in exts:
+                found.append((name, p.read_bytes()))
+    return found
 
 
 def browse_folder(title: str, start: str = "") -> tuple[str | None, str | None]:
