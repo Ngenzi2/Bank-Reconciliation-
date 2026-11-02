@@ -19,8 +19,7 @@ import dataclasses
 import pickle
 from pathlib import Path
 
-VERSION = 3                     # 2: weekly reports and their days, the rules of 26/10/2026
-                                 # 3: a monthly notebook report's own weeks, read from its Summary-Weekly sheet too
+VERSION = 2                     # 2: weekly reports and their days, the rules of 26/10/2026
 
 
 def key(record) -> str:

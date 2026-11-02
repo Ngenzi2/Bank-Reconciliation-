@@ -21,9 +21,9 @@ def tables(proc=(1000, 10), amt=(5_000_000.0, 900.0), received=(990, 10), sla=(5
             d.TITLES["duplicate"]: table(dup, a(dup))}
 
 
-def record(bank="IM", kind="month", start="2026-08-01", version=1, modified="2026-10-01", name=None):
-    return SimpleNamespace(bank=bank, kind=kind, start=pd.Timestamp(start), version=version,
-                           name=name or f"{bank}-{start}", ext="xlsx", modified=pd.Timestamp(modified, tz="UTC"))
+def record(bank="IM", kind="month", start="2026-08-01", version=1):
+    return SimpleNamespace(bank=bank, kind=kind, start=pd.Timestamp(start), version=version, name=f"{bank}-{start}",
+                           ext="xlsx", modified=pd.Timestamp("2026-10-01", tz="UTC"))
 
 
 def month_report(bank="IM", month="2026-08", weeks=((1, 2), (3, 9)), **kw):
@@ -41,15 +41,6 @@ def test_records_keep_the_first_version_of_monthly_and_weekly_reports_only():
             record("IM", "week", "2026-08-03"), record("IM", "day", "2026-08-03")]
     kept = d.report_records(recs)
     assert [(r.kind, r.version) for r in kept] == [("week", 1), ("month", 1)]
-
-
-def test_a_duplicate_of_the_same_version_keeps_the_one_saved_last():
-    # two accidental saves of the same period, same version (not a deliberate new version): the first one saved
-    # is not always the good one (e.g. a native Google Sheet too large to export) - approved 2026-10-28
-    recs = [record("ECO", "month", "2026-07-01", 1, modified="2026-10-27 13:43", name="Ecobank_report_July_2026(1)"),
-           record("ECO", "month", "2026-07-01", 1, modified="2026-10-27 14:14", name="Ecobank_report_July_2026")]
-    kept = d.report_records(recs)
-    assert [r.name for r in kept] == ["Ecobank_report_July_2026"]
 
 
 def test_a_monthly_report_gives_its_month_and_its_weeks():
@@ -206,10 +197,10 @@ def test_pending_card_is_pending_over_processed():
     now = {"processed": 647, "received": 581, "sla": 12, "pending": 22, "duplicate": 43,
            "amounts": {"RWF": {"received": 1_000_000.0, "pending": 392_140.0}}}
     html = dv.kpi_cards(now, None)
-    assert "PENDING" in html and "3.4%" in html
+    assert "PENDING" in html and "3.40%" in html                                # 2 decimals (27/10/2026)
     assert "Not notified: 22 of 647 processed transactions" in html and "RWF 392" in html
     before = dict(now, pending=11)
-    assert "PENDING" in dv.kpi_cards(now, before) and "1.7%" in dv.kpi_cards(now, before)   # the change, in points
+    assert "PENDING" in dv.kpi_cards(now, before) and "1.70%" in dv.kpi_cards(now, before)  # the change, in points
 
 
 def test_pending_and_delayed_per_period_and_the_weeks_without_report():
@@ -227,3 +218,30 @@ def test_pending_and_delayed_per_period_and_the_weeks_without_report():
     assert tab.iloc[-1]["Pending amount"] == "RWF 4.0K"                       # 2 x RWF 2,000 (2 x 1000.0)
     missing = d.missing_children(facts, "month", pd.Timestamp("2026-08-01"), today="2026-10-27")
     assert missing == ["Week 3", "Week 4", "Week 5", "Week 6"]                # 10/08 - 31/08: no report
+
+
+def test_pending_card_two_decimals_never_zero_when_some_are_pending():
+    """27/10/2026: 4 of 10,506 pending is 0.04% (not "0.0%"); a share that would round to 0 shows "<0.01%"."""
+    from services import dashboard_view as dv
+    card = lambda pending, processed: dv.kpi_cards({"processed": processed, "received": processed - pending, "sla": 0,
+                                                    "pending": pending, "duplicate": 0, "amounts": {}}, None)
+    assert "0.04%" in card(4, 10_506)
+    assert "&lt;0.01%" in card(1, 50_000) or "<0.01%" in card(1, 50_000)
+    assert "0.00%" in card(0, 50_000)
+
+
+def test_bank_shares_of_the_processed_transactions_and_the_amount():
+    """28/10/2026: "Processed by bank" (all banks): each bank's share, the biggest first; a bank with nothing is left
+    out; the amount is the amount processed in one currency; the change when a period is compared with."""
+    t = lambda n, rwf: {"processed": n, "amounts": {"RWF": {"processed": rwf}}}
+    now = {"IM": t(10_506, 50e6), "ECO": t(6_120, 80e6), "BOA": None, "BPR": t(1_430, 5e6)}
+    tab = d.bank_shares(now)
+    assert list(tab["Code"]) == ["IM", "ECO", "BPR"] and list(tab["Share %"]) == [58.2, 33.9, 7.9]
+    amt = d.bank_shares(now, measure="amount", currency="RWF")
+    assert list(amt["Code"]) == ["ECO", "IM", "BPR"] and amt.iloc[0]["Value"] == 80e6
+    cmp = d.bank_shares(now, {"IM": t(9_000, 0), "ECO": None, "BPR": t(1_430, 0)})
+    assert list(cmp["Change %"].fillna(-1)) == [16.7, -1, 0.0]
+    from services import dashboard_view as dv
+    html = dv.bank_ring(tab, {"IM": "#123239"}, "processed")
+    assert "Most used: I&amp;M Bank (58.2%)" in html and "10,506" in html
+    assert "No processed transaction" in dv.bank_ring(d.bank_shares({"IM": None}), {}, "processed")

@@ -65,18 +65,15 @@ class Fact:
 # READING
 # =====================================================================================================================
 def report_records(records: list) -> list:
-    """The Excel reports the dashboard uses: monthly and weekly reports, one per bank and period - the lowest
-    version (a deliberate new version does not retroactively change the dashboard's trend); at the same version,
-    the latest saved, not the first - two files of the same version are an accidental duplicate, not a correction
-    to preserve, and the first one saved is not always the good one (e.g. too large to export - 2026-10-28). Daily
-    reports are left out (their days are in the weeks)."""
+    """The Excel reports the dashboard uses: monthly and weekly reports, one per bank and period - the first version
+    (at the same version, the first saved). Daily reports are left out (their days are in the weeks)."""
     best = {}
     for r in records:
         if r.ext != "xlsx" or r.kind not in ("month", "week"):
             continue
         key = (r.bank, r.kind, pd.Timestamp(r.start).normalize())
-        saved = r.modified if r.modified is not None and pd.notna(r.modified) else pd.Timestamp(0, tz="UTC")
-        rank = (r.version, -saved.value)
+        saved = r.modified if r.modified is not None and pd.notna(r.modified) else pd.Timestamp.max.tz_localize("UTC")
+        rank = (r.version, saved)
         if key not in best or rank < best[key][0]:
             best[key] = (rank, r)
     return sorted((r for _, r in best.values()), key=lambda r: (r.start, r.bank), reverse=True)
@@ -386,6 +383,29 @@ def by_bank(facts: list, currency: str = "All", banks=None) -> dict:
     codes = list(banks) if banks is not None else list(engine.BANKS)
     return {code: (totals([f for f in facts if f.bank == code], currency)
                    if any(f.bank == code for f in facts) else None) for code in codes}
+
+
+def bank_shares(now_by: dict, before_by: dict | None = None, measure: str = "processed",
+                currency: str = "RWF") -> pd.DataFrame:
+    """28/10/2026: each bank's share of the processed transactions (measure "processed") or of the amount processed
+    in `currency` (measure "amount"), the biggest first; a bank with nothing is left out. Columns: Code, Bank, Value,
+    Share %, and Before / Change % when a period is compared with."""
+    def value(t):
+        if not t:
+            return 0.0
+        return t["processed"] if measure == "processed" else t["amounts"].get(currency, {}).get("processed", 0.0)
+    rows = [{"Code": c, "Bank": engine.BANKS[c].FULL_NAME if c in engine.BANKS else c, "Value": value(t)}
+            for c, t in now_by.items()]
+    rows = [r for r in rows if r["Value"]]
+    total = sum(r["Value"] for r in rows)
+    for r in rows:
+        r["Share %"] = round(r["Value"] / total * 100, 1)
+        if before_by:
+            b = value(before_by.get(r["Code"]))
+            r["Before"] = b
+            r["Change %"] = round((r["Value"] - b) / b * 100, 1) if b else None
+    cols = ["Code", "Bank", "Value", "Share %"] + (["Before", "Change %"] if before_by else [])
+    return pd.DataFrame(rows, columns=cols).sort_values("Value", ascending=False, kind="stable").reset_index(drop=True)
 
 
 def change(now, before):

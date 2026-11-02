@@ -59,8 +59,6 @@ PROVIDER_ALIASES = ["BPR"]
 PROVIDERS = {PROVIDER, *PROVIDER_ALIASES}
 CURRENCIES = ["RWF", "USD"]               # taken from IremboPay (the statement has no currency)
 FILE_TYPES = ["xlsx", "xls"]
-DRIVE_STATEMENTS = "bpr_statements_folder_id"   # 27/10/2026: step 2 can read the statements from this Drive folder
-                                                # (drive_settings.toml), picked by the days inside them
 STATEMENT_SHEET = "BPR statement"
 
 COMPLETED_STATUSES = {"SETTLED", "PAID", "PAYOUT_INITIATED"}     # same as I&M

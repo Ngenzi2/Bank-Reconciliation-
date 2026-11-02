@@ -211,7 +211,7 @@ def test_app_offers_boa_and_checks_its_files():
     from streamlit.testing.v1 import AppTest
     at = AppTest.from_file(str(APP_DIR / "app.py"), default_timeout=120)
     at.session_state["bank_code"] = "BOA"
-    at.session_state["step"] = 2          # Check (Choose & Upload: 1, Check: 2, 27/10/2026)
+    at.session_state["step"] = 2          # Check (27/10/2026: 4 steps)
     at.session_state["report_label"] = "Month"
     at.session_state["picked"] = SEP.start.date()
     files = [read(statement(ROWS)), e.read_payment_file("p.csv", payments(PAYS), "BOA")]

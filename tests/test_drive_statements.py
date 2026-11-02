@@ -2,11 +2,20 @@
 only, at most 10 downloads started per second, the days remembered between two reads."""
 import time
 
+import pytest
+
 import pandas as pd
 
 import engine
 from integrations.google_drive import DriveFile
 from services import drive_statements as ds
+
+
+@pytest.fixture(autouse=True)
+def nothing_kept_between_tests():
+    """27/10/2026: the statements read and the folder lists are kept in memory - each test starts with none."""
+    ds._CONTENT.clear(); ds._LISTING.clear(); ds.JOBS.clear()
+    yield
 
 
 class FakeDrive:
@@ -56,16 +65,6 @@ def test_picked_by_the_days_inside_not_the_name(tmp_path, monkeypatch):
     assert [n for n, _ in again.files] == [n for n, _ in got.files] and again.downloaded == 3
 
 
-def test_a_bank_with_no_name_prefix_considers_every_file(tmp_path, monkeypatch):
-    # BPR has no DRIVE_STATEMENTS_PREFIX (unlike Ecobank's "IREMBO PAY"): every file of its own file types is a
-    # candidate, whatever its name - its statements have no fixed naming convention
-    monkeypatch.setattr(engine, "read_bank_file", fake_read)
-    drive = FakeDrive({"Statement 01-07 August 2026.xlsx": "2026-08-03", "random_export.xlsx": "2026-08-05"})
-    got = ds.pick(drive, "folder", "BPR", "2026-08-01", "2026-08-10", tmp_path / "c.pkl")
-    assert got.considered == 2 and {n for n, _ in got.files} == {"Statement 01-07 August 2026.xlsx",
-                                                                 "random_export.xlsx"}
-
-
 def test_at_most_ten_downloads_start_per_second(tmp_path, monkeypatch):
     monkeypatch.setattr(engine, "read_bank_file", fake_read)
     drive = FakeDrive({f"IREMBO PAY2026-08-{d:02d}.xlsx": f"2026-08-{d:02d}" for d in range(1, 26)})
@@ -92,3 +91,25 @@ def test_a_file_slow_to_come_is_asked_again(tmp_path, monkeypatch):
     t = time.monotonic()
     got = ds.pick(drive, "folder", "ECO", "2026-08-03", "2026-08-09", tmp_path / "c.pkl")
     assert time.monotonic() - t < 5.5 and len(got.files) == 2 and calls["id0"] == 2
+
+
+def test_a_statement_read_once_is_not_downloaded_again(tmp_path, monkeypatch):
+    """27/10/2026: switching back to a bank and period already read is instant - nothing is downloaded again."""
+    monkeypatch.setattr(engine, "read_bank_file", fake_read)
+    drive = FakeDrive({"IREMBO PAY2026-08-04.xlsx": "2026-08-03", "IREMBO PAY2026-08-05.xlsx": "2026-08-04"})
+    ds.pick(drive, "folder", "ECO", "2026-08-03", "2026-08-09", tmp_path / "c.pkl")
+    drive.started.clear()
+    again = ds.pick(drive, "folder", "ECO", "2026-08-03", "2026-08-09", tmp_path / "c.pkl")
+    assert len(again.files) == 2 and drive.started == []
+
+
+def test_the_reading_runs_in_the_background(tmp_path, monkeypatch):
+    """27/10/2026: start_job returns at once; the job says how far it is and gives the result when done."""
+    monkeypatch.setattr(engine, "read_bank_file", fake_read)
+    drive = FakeDrive({f"IREMBO PAY2026-08-{d:02d}.xlsx": f"2026-08-{d:02d}" for d in range(1, 21)})
+    t = time.monotonic()
+    job = ds.start_job(("ECO", "k"), lambda: drive, "folder", "ECO", "2026-08-01", "2026-08-31", tmp_path / "c.pkl")
+    assert time.monotonic() - t < 0.5 and ds.start_job(("ECO", "k"), None, "", "ECO", 0, 0, tmp_path) is job
+    while not job["done"]:
+        time.sleep(0.05)
+    assert job["error"] is None and len(job["result"].files) == 20 and job["n"] == 20
