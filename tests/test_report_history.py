@@ -116,6 +116,14 @@ def _notebook_workbook(path, base=5):
         ws.cell(top + 1, 4, "Total Amount")
         ws.cell(top + 2, 2, "RWF"); ws.cell(top + 2, 3, n); ws.cell(top + 2, 4, amount)
         ws.cell(top + 3, 3, n); ws.cell(top + 3, 4, amount)                 # the Total row (no Currency)
+    dup_row = base + 2 + 2 * e.GS_STEP
+    ws.cell(dup_row, 8, "Payment per merchant")
+    ws.cell(dup_row + 1, 8, "Merchant name"); ws.cell(dup_row + 1, 9, "Number of Transactions")
+    ws.cell(dup_row + 1, 10, "Total Amount"); ws.cell(dup_row + 1, 11, "%")
+    ws.cell(dup_row + 2, 8, "RSSB"); ws.cell(dup_row + 2, 9, 5); ws.cell(dup_row + 2, 10, 50000)
+    ws.cell(dup_row + 2, 11, 1.0)
+    ws.cell(dup_row + 3, 8, "All"); ws.cell(dup_row + 3, 9, 5); ws.cell(dup_row + 3, 10, 50000)
+    ws.cell(dup_row + 3, 11, 1.0)
     pending = wb.create_sheet("Pending notification")
     pending.append(["Ccy", "Amount"])
     pending.append(["RWF", 7000])
@@ -134,6 +142,18 @@ def test_read_notebook_report_derives_notified_from_processed_minus_pending_and_
     notified = tables["Overall notifications received by Irembo"]
     assert notified["Number of Transactions"].iloc[0] == 7              # 10 processed - 1 pending - 2 duplicate
     assert notified["Total Amount"].iloc[0] == 73000                    # 100000 - 5000 - 20000
+
+
+def test_read_notebook_report_reads_its_merchant_table_labelled_rwf(tmp_path):
+    path = tmp_path / "BOA_report_August_2026.xlsx"
+    _notebook_workbook(path)
+    period = e.make_period("month", "2026-08-01")
+    rep = e.read_notebook_report(path, "BOA", period)
+    heading = rep["blocks"][0][1]
+    merchants = rep["merchants"][heading]
+    assert set(merchants["Currency"]) == {"RWF"}
+    row = merchants[merchants["Merchant name"] == "RSSB"].iloc[0]
+    assert (row["Number of Transactions"], row["Total Amount"]) == (5, 50000)
 
 
 def test_read_report_counts_derives_the_two_tables_the_notebooks_never_write(tmp_path):

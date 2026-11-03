@@ -19,7 +19,7 @@ import dataclasses
 import pickle
 from pathlib import Path
 
-VERSION = 3                     # 3: notebook-made reports (Ecobank, BPR) are read into the Dashboard again
+VERSION = 4                     # 4: a notebook-made report's own merchant table is read too
 
 
 def key(record) -> str:
