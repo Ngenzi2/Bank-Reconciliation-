@@ -65,8 +65,9 @@ def test_decisions_are_merged_with_the_latest_on_drive():
 
 def test_latest_version_of_each_report_since_the_start():
     class R:
-        def __init__(self, stem, v, start, ext="xlsx"):
+        def __init__(self, stem, v, start, ext="xlsx", notebook=False):
             self.stem, self.version, self.start, self.ext, self.modified = stem, v, pd.Timestamp(start), ext, None
+            self.notebook = notebook
     recs = [R("IM_w1", 1, "2026-10-05"), R("IM_w1", 2, "2026-10-05"), R("IM_sep", 1, "2026-09-01"),
             R("IM_w1", 3, "2026-10-05", "pdf")]
     got = followup.latest_reports(recs, "2026-10-01")
@@ -74,6 +75,10 @@ def test_latest_version_of_each_report_since_the_start():
     # 28/10/2026: no start date (the period is chosen on the Follow-up page): every report, latest version
     every = followup.latest_reports(recs, None)
     assert sorted((r.stem, r.version) for r in every) == [("IM_sep", 1), ("IM_w1", 2)]
+    # 03/11/2026: a notebook report has no review reasons - nothing to follow up on, left out
+    with_nb = recs + [R("ECO_nb", 1, "2026-10-05", notebook=True)]
+    assert sorted((r.stem, r.version) for r in followup.latest_reports(with_nb, None)) == \
+           [("IM_sep", 1), ("IM_w1", 2)]
 
 
 def test_items_in_the_period_of_some_banks():

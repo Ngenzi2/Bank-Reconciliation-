@@ -73,10 +73,11 @@ def items_from_report(path: Path, record, bank_code: str) -> list:
 
 def latest_reports(records: list, start) -> list:
     """The saved Excel reports whose period starts on or after `start` (None: every report), the latest version of
-    each."""
+    each. A report the reconciliation notebooks made is left out: it has no review reasons, so nothing to follow up
+    on (CLAUDE.md)."""
     latest = {}
     for r in records:
-        if r.ext != "xlsx" or (start is not None and pd.Timestamp(r.start) < pd.Timestamp(start)):
+        if r.ext != "xlsx" or getattr(r, "notebook", False) or (start is not None and pd.Timestamp(r.start) < pd.Timestamp(start)):
             continue
         if r.stem not in latest or r.version > latest[r.stem].version:
             latest[r.stem] = r
