@@ -298,6 +298,13 @@ class Period:
                                               "month": self.start - pd.offsets.MonthBegin(1)}[self.report_type])
 
 
+def month_of(kind: str, start: pd.Timestamp) -> str:
+    """'2026-10': the month a period starting on `start` belongs to - a week by its Thursday, a day or a month by
+    its own start (kind: "day" / "week" / "month", as on Period.report_type or a saved report's name)."""
+    anchor = start + pd.Timedelta(days=3) if kind == "week" else start
+    return f"{anchor:%Y-%m}"
+
+
 def make_period(report_type: str, date) -> Period:
     """The day / week / month that contains `date`."""
     day = pd.Timestamp(date).normalize()
@@ -993,7 +1000,15 @@ def apply_review(merged: pd.DataFrame, not_found: pd.DataFrame, payments: pd.Dat
 # =====================================================================================================================
 def read_report_counts(path: Path, sheet: str, bank=None):
     """({table title: {"RWF": n, "USD": n, "Total": n}}, heading, rows not reviewed) from the first block of a
-    summary sheet of a report made by this app or the notebook."""
+    summary sheet of a report made by this app or the reconciliation notebooks (whichever column their tables are
+    in: the title text is found first, then its numbers are read relative to it). The notebooks never write
+    "Pending notifications" to their Summary itself - derived here from their own "Pending notification" sheet
+    (counted; 0 when it is not there), the same way engine.read_notebook_report does. "Overall notifications
+    received by Irembo" is always derived too (Processed - Pending - Duplicate, CLAUDE.md's own definition), never
+    read from the file: some of the notebooks' own reports do carry a table under that exact title, but it is a
+    different count (every payment Irembo's checkout logged, not the ones it shows as paid) - approved 2026-10-27,
+    found while wiring up "Compare with previous period" against the notebooks' reports."""
+    bank = get_bank(bank)
     wb = load_workbook(path, data_only=True)
     try:
         if sheet not in wb.sheetnames:
@@ -1003,12 +1018,23 @@ def read_report_counts(path: Path, sheet: str, bank=None):
         counts = {}
         for row in ws.iter_rows(min_row=1, max_row=min(ws.max_row, 30)):
             for c in row:
-                if c.value in TABLE_TITLES and c.value not in counts:
+                if c.value in TABLE_TITLES and c.value != "Overall notifications received by Irembo" and c.value not in counts:
                     vals = {}
-                    for i, cur in enumerate(get_bank(bank).CURRENCIES + ["Total"]):
+                    for i, cur in enumerate(bank.CURRENCIES + ["Total"]):
                         v = ws.cell(c.row + 2 + i, c.column + 1).value
                         vals[cur] = int(v) if isinstance(v, (int, float)) else 0
                     counts[c.value] = vals
+        if "Pending notifications" not in counts:
+            pending = _notebook_sheet_counts(wb, "Pending notification", bank.CURRENCIES)
+            counts["Pending notifications"] = ({"Total" if pd.isna(c) else c: int(n) for c, n in
+                                               zip(pending["Currency"], pending["Number of Transactions"])}
+                                               if pending is not None
+                                               else {**{cur: 0 for cur in bank.CURRENCIES}, "Total": 0})
+        if "Overall processed payments" in counts:
+            counts["Overall notifications received by Irembo"] = {
+                cur: counts["Overall processed payments"].get(cur, 0) - counts["Pending notifications"].get(cur, 0)
+                     - counts.get("Duplicate Payment", {}).get(cur, 0)
+                for cur in bank.CURRENCIES + ["Total"]}
         not_reviewed = max(wb[NOT_FOUND_SHEET].max_row - 1, 0) if NOT_FOUND_SHEET in wb.sheetnames else 0
     finally:
         wb.close()
@@ -2125,6 +2151,155 @@ def read_report(path: Path, count_reviewed: bool = True) -> dict:
     return {"report_type": kind, "bank": bank_name(code), "full_name": BANKS[code].FULL_NAME if code in BANKS else code,
             "title": period_title(kind, report_label(path)), "blocks": blocks, "not_found": not_found,
             "reconciled_on": reconciled_on, "merchants": merchants}
+
+
+def _notebook_table(ws, top: int, n_currencies: int, col: int = 2) -> pd.DataFrame:
+    """One table of a notebook report's Summary sheet, starting at its own title's column (B for Overall processed
+    payments / SLA Violated / Duplicate Payment - one column to the right of where this app puts its own, see
+    report_history.parse_notebook_name; further right, at whatever column, for Overall notifications received by
+    Irembo / Pending notifications, when the notebooks wrote them - found by read_notebook_report, not assumed
+    here)."""
+    headers, c = [], col
+    while c < col + 5 and ws.cell(top + 1, c).value and (c == col or ws.cell(top + 1, c).value != "Currency"):
+        headers.append(ws.cell(top + 1, c).value)
+        c += 1
+    rows = [[ws.cell(top + 2 + i, col + j).value for j in range(len(headers))] for i in range(n_currencies + 1)]
+    t = pd.DataFrame(rows, columns=headers)
+    t["Number of Transactions"] = pd.to_numeric(t["Number of Transactions"], errors="coerce").fillna(0).astype(int)
+    t["Total Amount"] = pd.to_numeric(t["Total Amount"], errors="coerce")
+    return t
+
+
+def _notebook_block_starts(ws) -> list:
+    """[(row, col), ...] of every "Overall processed payments" table in a notebook Summary sheet - one per week
+    block (Summary-Weekly: a week each) or the one block of Summary-Monthly, wherever its own heading is (above
+    it, two rows up, in the same column)."""
+    out = []
+    for r in range(1, ws.max_row + 1):
+        for c in range(1, 12):
+            if ws.cell(r, c).value and ws.cell(r + 2, c).value == "Overall processed payments":
+                out.append((r, c))
+                break
+    return out
+
+
+_NB_BLOCK_DATES = re.compile(r"\((\d{4}-\d{2}-\d{2})\s+to\s+(\d{4}-\d{2}-\d{2})\)")
+
+
+def _notebook_block_tables(ws, row: int, col: int, bank, pending_fallback: pd.DataFrame | None) -> dict:
+    """The 5 summary tables of one block: Overall processed payments / SLA Violated / Duplicate Payment read from
+    the Summary sheet; Pending notifications read from the same row group when the notebooks wrote it there (any
+    column, searched for - not assumed to be at a fixed offset), else `pending_fallback` (None: counted as 0, not
+    a guess - used for a week block, whose own pending cannot be told apart in the notebooks' one "Pending
+    notification" sheet for the whole report). Overall notifications received by Irembo is always derived
+    (Processed - Pending - Duplicate), never read: the notebooks' own column under that title can mirror Processed
+    instead of Notified (CLAUDE.md; found 2026-10-28, not trusted here)."""
+    n = len(bank.CURRENCIES)
+    processed = _notebook_table(ws, row + 2, n, col)
+    sla_row = row + 2 + GS_STEP
+    sla = _notebook_table(ws, sla_row, n, col)
+    duplicate = _notebook_table(ws, row + 2 + 2 * GS_STEP, n, col)
+    pending = None
+    for c in range(1, 12):
+        if ws.cell(sla_row, c).value == "Pending notifications":
+            pending = _notebook_table(ws, sla_row, n, c)
+            break
+    if pending is None:
+        pending = (pending_fallback if pending_fallback is not None
+                  else _notebook_difference(processed, processed, currencies=bank.CURRENCIES))
+    notified = _notebook_difference(processed, pending, duplicate, currencies=bank.CURRENCIES)
+    return {"Overall processed payments": processed, "Overall notifications received by Irembo": notified,
+           "SLA Violated": sla, "Pending notifications": pending, "Duplicate Payment": duplicate}
+
+
+def _notebook_sheet_counts(wb, sheet_name: str, currencies: list) -> pd.DataFrame | None:
+    """A table in the same shape as _notebook_table, counted from a notebook report's per-invoice sheet (Pending
+    notification, Duplicate payment other channel) instead of read from the Summary - the notebooks never write
+    these two as a Summary table. None when the sheet is not there at all."""
+    if sheet_name not in wb.sheetnames:
+        return None
+    ws = wb[sheet_name]
+    headers = [c.value for c in ws[1]]
+    if "Ccy" not in headers or "Amount" not in headers:
+        return None
+    ci, ai = headers.index("Ccy"), headers.index("Amount")
+    rows = []
+    for cur in currencies:
+        n, amount = 0, 0.0
+        for r in range(2, ws.max_row + 1):
+            if ws.cell(r, ci + 1).value == cur:
+                n += 1
+                amount += float(ws.cell(r, ai + 1).value or 0)
+        rows.append({"Currency": cur, "Number of Transactions": n, "Total Amount": amount})
+    rows.append({"Currency": None, "Number of Transactions": sum(r["Number of Transactions"] for r in rows),
+                "Total Amount": sum(r["Total Amount"] for r in rows)})
+    return pd.DataFrame(rows)
+
+
+def _notebook_difference(minuend: pd.DataFrame, *subtrahends, currencies: list) -> pd.DataFrame:
+    """minuend minus each of subtrahends, currency by currency (count and amount) - a missing subtrahend (no
+    Pending notification sheet, say) counts as 0. Used for the two tables the notebooks never write at all
+    (Overall notifications received by Irembo = Processed - Pending - Duplicate): for Ecobank this can come out
+    surprising, even negative - the same gap already known for its Processed figure (CLAUDE.md), not something
+    introduced here."""
+    def by_currency(t):
+        if t is None:
+            return {}
+        return {r["Currency"]: (r["Number of Transactions"], 0.0 if pd.isna(r["Total Amount"]) else r["Total Amount"])
+               for _, r in t.iterrows() if pd.notna(r["Currency"])}
+    base = by_currency(minuend)
+    subs = [by_currency(t) for t in subtrahends]
+    rows = []
+    for cur in currencies:
+        n, amount = base.get(cur, (0, 0.0))
+        for s in subs:
+            sn, samount = s.get(cur, (0, 0.0))
+            n, amount = n - sn, amount - samount
+        rows.append({"Currency": cur, "Number of Transactions": n, "Total Amount": amount})
+    rows.append({"Currency": None, "Number of Transactions": sum(r["Number of Transactions"] for r in rows),
+                "Total Amount": sum(r["Total Amount"] for r in rows)})
+    return pd.DataFrame(rows)
+
+
+def read_notebook_report(path: Path, bank, period: Period) -> dict:
+    """Read a report made by the reconciliation notebooks (CLAUDE.md's reference notebooks), not this app: same
+    return shape as read_report(), so the Dashboard and Report History do not need to know which kind they got.
+    A monthly report also has its own Summary-Weekly sheet, one block per week of that month (the notebooks write
+    it next to Summary-Monthly) - both are read, so the Dashboard's per-week charts have real weeks instead of
+    none at all (2026-10-28). No merchant table, no "reconciled on" stamp, no "needs a look" count - the notebooks
+    do not keep those."""
+    bank = get_bank(bank)
+    sheet = SUMMARY_SHEET[period.report_type]
+    wb = load_workbook(path, data_only=True)
+    try:
+        if sheet not in wb.sheetnames:
+            raise ReconError(f"{path.name}: not a report the notebooks made (no {sheet} sheet).")
+        pending_sheet = _notebook_sheet_counts(wb, "Pending notification", bank.CURRENCIES)
+        ws = wb[sheet]
+        starts = _notebook_block_starts(ws)
+        if not starts:
+            raise ReconError(f"{path.name}: not a report the notebooks made (no summary table found).")
+        row, col = starts[0]                        # the period's own total: the month, or the lone week
+        if period.report_type == "month":
+            heading = f"Month: {period.start:%B %Y} ({period.start:%d/%m/%Y} - {period.last_day:%d/%m/%Y})"
+        else:
+            heading = f"Week 1: {period.start:%d/%m/%Y} - {period.last_day:%d/%m/%Y}"
+        blocks = [(sheet, heading, _notebook_block_tables(ws, row, col, bank, pending_sheet))]
+        if period.report_type == "month" and "Summary-Weekly" in wb.sheetnames:
+            wws = wb["Summary-Weekly"]
+            for r, c in _notebook_block_starts(wws):
+                dates = _NB_BLOCK_DATES.search(str(wws.cell(r, c).value or ""))
+                if not dates:                       # a week heading not in the expected format: left out
+                    continue
+                a, b = (pd.Timestamp(x) for x in dates.groups())
+                blocks.append(("Summary-Weekly", f"Week: {a:%d/%m/%Y} - {b:%d/%m/%Y}",
+                              _notebook_block_tables(wws, r, c, bank, None)))
+    finally:
+        wb.close()
+    label = f"{period.start:%d-%m-%Y}_to_{period.last_day:%d-%m-%Y}"
+    return {"report_type": period.report_type, "bank": bank_name(bank.CODE), "full_name": bank.FULL_NAME,
+            "title": period_title(period.report_type, label), "blocks": blocks, "not_found": 0,
+            "reconciled_on": "", "merchants": {}}
 
 
 # =====================================================================================================================

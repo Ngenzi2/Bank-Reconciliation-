@@ -19,7 +19,7 @@ import dataclasses
 import pickle
 from pathlib import Path
 
-VERSION = 2                     # 2: weekly reports and their days, the rules of 26/10/2026
+VERSION = 3                     # 3: notebook-made reports (Ecobank, BPR) are read into the Dashboard again
 
 
 def key(record) -> str:
