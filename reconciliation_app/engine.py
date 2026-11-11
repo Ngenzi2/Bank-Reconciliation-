@@ -49,10 +49,13 @@ Words used in the code
 """
 from __future__ import annotations
 
+import datetime
 import hashlib
 import io
+import numbers
 import re
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -97,6 +100,30 @@ def option(bank, name, default):
     return getattr(get_bank(bank), name, default)
 
 
+DETAILS_SHEET = "Payment details"          # every credit with its IremboPay payment (BK: "Matched details")
+
+
+def details_sheet(bank=None, sheetnames=None) -> str:
+    """The name of the sheet with every credit and its IremboPay payment: "Payment details", or the bank's own name
+    (05/11/2026, BK: "Matched details" - its "Payment details" holds the IremboPay file's rows). sheetnames: the
+    sheets of a saved report - one made before the bank had its own name still has "Payment details"."""
+    module = BANKS.get(bank) if isinstance(bank, str) else get_bank(bank)      # an unknown code: the default name
+    name = getattr(module, "DETAILS_SHEET", DETAILS_SHEET)
+    if sheetnames is not None and name not in sheetnames:
+        return DETAILS_SHEET
+    return name
+
+
+def irembopay_rows(payments: pd.DataFrame, rep: pd.DataFrame, start, end) -> pd.DataFrame:
+    """(05/11/2026, BK) The IremboPay payment file's own rows and columns for the report: every transaction paid in
+    [start, end), and every transaction of an invoice credited in the period (paid just before it), oldest first."""
+    paid = pd.to_datetime(payments["paid_at"], errors="coerce")
+    credited = set(rep["invoice_number"].dropna().astype(str))
+    keep = paid.between(start, end, inclusive="left") | payments["invoice_number"].astype(str).isin(credited)
+    cols = [c for c in payments.columns if not str(c).startswith("_")]
+    return payments.loc[keep, cols].sort_values("paid_at", kind="stable")
+
+
 def present(*cols):
     """Columns that the bank has (a bank may have no posted date)."""
     return [c for c in cols if c]
@@ -138,6 +165,8 @@ def with_extra_decisions(rows: pd.DataFrame, m: dict, window: pd.Series) -> dict
         # 26/10/2026: an invoice counts at most ONCE in each table - an extra credit put in a table that already has
         # its invoice (its counted credit, or an earlier extra one) is not counted again (it stays, with a note)
         extra = window & rows["is_extra_credit"].fillna(False).astype(bool) & ~excluded
+        if not (extra & table.isin(list(EXTRA_DECIDED))).any():     # no extra credit put in a table: nothing to add
+            return out
         inv = rows["invoice_number"].astype(object).where(rows["invoice_number"].notna(), "").astype(str)
         for choice, key in EXTRA_DECIDED.items():
             there = set(inv[out[key]])
@@ -230,6 +259,7 @@ NOT_FOUND_SHEET = "not found in IremboPay"     # only in old reports (removed wh
 REPORT_SHEETS = ({"Summary-Daily", "Summary-Weekly", "Summary-Monthly", "Pending notification",
                   "Duplicate payment other channel", NOT_FOUND_SHEET, "Payment details"}
                  | {b.STATEMENT_SHEET for b in BANKS.values()}
+                 | {getattr(b, "DETAILS_SHEET", "Payment details") for b in BANKS.values()}
                  | {s for b in BANKS.values() for s in getattr(b, "EXTRA_SHEETS", [])})   # written by the app (rest = user's)
 REPORT_SUFFIX = "_recon_summary_"              # report file = <CODE>_recon_summary_<period label>.xlsx
 
@@ -746,10 +776,15 @@ def _write_store(base_dir: Path, store: pd.DataFrame, what="save again"):
     """Save the whole review store (a clear message if the file is open in Excel)."""
     path = store_path(base_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
+    # 02/11/2026: written under a name of its own, then put in place: never read half-written by another save
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex[:8]}.tmp")
     try:
-        store.to_csv(path, index=False)
+        store.to_csv(tmp, index=False)
+        tmp.replace(path)
     except PermissionError:
         raise ReconError(f"The review store is open in another program. Close it and {what}.") from None
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def save_decisions(base_dir: Path, period: Period, review: pd.DataFrame, bank=None):
@@ -833,26 +868,28 @@ def review_rows(base_dir: Path, period: Period, not_found: pd.DataFrame, bank=No
     by_key = others.drop_duplicates("key", keep="last").set_index("key")
     by_inv = (others[others["invoice_number"].ne("")]
               .drop_duplicates("invoice_number", keep="last").set_index("invoice_number"))
-    suggested = 0
-    no_currency = option(bank, "CURRENCY_FROM_IREMBOPAY", False)
-    for i, r in review.iterrows():
-        key = r["_key"]
-        if key not in mine.index and no_currency:         # saved while its currency was still unknown (blank)
-            blank = "|" + key.split("|", 1)[1]
-            key = blank if blank in mine.index else key
-        if key in mine.index:                             # 1. decided for this period: use it as it is
-            for c in EDIT_COLS:
-                review.at[i, c] = mine.loc[key, c]
+    # (04/11/2026: whole columns at once - a BK month can have 200,000 lines)
+    keys = review["_key"]
+    key = keys.copy()
+    if option(bank, "CURRENCY_FROM_IREMBOPAY", False):   # saved while its currency was still unknown (blank)
+        blank = "|" + keys.str.split("|", n=1).str[1]
+        use = ~keys.isin(mine.index) & blank.isin(mine.index)
+        key[use] = blank[use]
+    decided = key.isin(mine.index)                        # 1. decided for this period: use it as it is
+    for c in EDIT_COLS:
+        review.loc[decided, c] = mine.loc[key[decided], c].to_numpy()
+    inv = review["invoice_number"].astype(object).where(review["invoice_number"].notna(), "").astype(str)
+    from_key = ~decided & keys.isin(by_key.index)         # 2. decided in another period: a suggestion to confirm
+    from_inv = ~decided & ~from_key & inv.isin(by_inv.index)
+    for mask, source, by in ((from_key, by_key, keys), (from_inv, by_inv, inv)):
+        if not mask.any():
             continue
-        inv = str(r["invoice_number"]) if pd.notna(r["invoice_number"]) else ""
-        source = by_key.loc[r["_key"]] if r["_key"] in by_key.index else (by_inv.loc[inv] if inv in by_inv.index else None)
-        if source is not None:                            # 2. decided in another period: a suggestion to confirm
-            for c in EDIT_COLS:
-                if c != "Reviewed (Yes/No)":
-                    review.at[i, c] = source[c]
-            review.at[i, SUGGEST_COL] = _period_title(source["period"])
-            suggested += 1
-    return review, suggested
+        found = source.loc[by[mask]]
+        for c in EDIT_COLS:
+            if c != "Reviewed (Yes/No)":
+                review.loc[mask, c] = found[c].to_numpy()
+        review.loc[mask, SUGGEST_COL] = found["period"].map(_period_title).to_numpy()
+    return review, int(from_key.sum() + from_inv.sum())
 
 
 def apply_review(merged: pd.DataFrame, not_found: pd.DataFrame, payments: pd.DataFrame, review: pd.DataFrame,
@@ -873,12 +910,17 @@ def apply_review(merged: pd.DataFrame, not_found: pd.DataFrame, payments: pd.Dat
     payment_fields = [c for c in payments.columns if c != "invoice_number"]
     counts, messages, exclude_keys = {"Not reviewed": 0}, [], []
 
-    for _, r in review.iterrows():
-        rows = current & to_review & merged["_key"].eq(r["_key"])
-        if not is_yes(r["Reviewed (Yes/No)"]):
-            merged.loc[rows, "review_status"] = "Not reviewed"
-            counts["Not reviewed"] += 1
-            continue
+    # 04/11/2026: the rows of each key found once (not one search of every row per review line: a BK month can have
+    # 200,000 lines); the lines not reviewed are marked all at once
+    rows_of = merged[current & to_review].groupby("_key").groups
+    no_rows = merged.index[:0]
+    done = review["Reviewed (Yes/No)"].map(is_yes).astype(bool)
+    waiting = merged["_key"].isin(set(review.loc[~done, "_key"])) & current & to_review
+    merged.loc[waiting, "review_status"] = "Not reviewed"
+    counts["Not reviewed"] = int((~done).sum())
+
+    for _, r in review[done].iterrows():
+        rows = rows_of.get(r["_key"], no_rows)
         table_choice = str(r["Report table"]).strip()
         if table_choice and table_choice not in TABLE_CHOICES:
             table_choice = ""
@@ -1247,7 +1289,12 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
     current = merged["period"].eq("current")
     if not current.any():
         raise ReconError(f"The bank files have no Irembo payments with a {paid_on} in {period.name}.")
-    no_invoice = merged.loc[current, "invoice_number"].isna().sum()
+    # some banks (BK, 04/11/2026): credits counted in Processed that are never matched nor reviewed (card payments,
+    # bank transfers); the reason is shown in the report
+    merged["_not_reviewed"] = (bank.counted_not_reviewed(merged).where(current, "")
+                               if hasattr(bank, "counted_not_reviewed") else "")
+    skip = merged["_not_reviewed"].ne("")
+    no_invoice = merged.loc[current & ~skip, "invoice_number"].isna().sum()
     if no_invoice:
         res.add("warning", f"{no_invoice} bank row(s) have no invoice number in the description.")
     res.bank_rows = int(current.sum())
@@ -1256,7 +1303,7 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
     if hasattr(bank, "review_reasons"):                   # found, but to be checked (e.g. BPR: another provider)
         reasons[current] = bank.review_reasons(merged[current])
         flagged = current & merged["found_in_irembopay"] & reasons.ne("")
-    merged["_to_review"] = (current & ~merged["found_in_irembopay"]) | flagged
+    merged["_to_review"] = ((current & ~merged["found_in_irembopay"]) | flagged) & ~skip
     # the extra credits of an invoice credited more than once (BPR): never the one counted in the summary tables
     merged["_credited_again"] = reasons.astype(str).str.startswith("Invoice credited again")
     no_invoice_pending = current & merged["invoice_number"].isna() & option(bank, "NO_INVOICE_PENDING", False)
@@ -1285,7 +1332,7 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
         not_found.loc[again, "Reason"] = [f"{a} ({b})" for a, b in zip(reasons.reindex(not_found.index)[again],
                                                                        not_found.loc[again, "Reason"])]
     not_found = not_found[bank_cols(bank)].sort_values(paid_on)
-    res.not_found = int((current & ~merged["found_in_irembopay"]).sum())
+    res.not_found = int((current & ~merged["found_in_irembopay"] & ~skip).sum())
     res.to_review = len(not_found)
     res.timings["match"] = time.perf_counter() - t
 
@@ -1356,6 +1403,15 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
         combined = combined + "; " + extra
     combined = combined.str.replace("(?:; )+", "; ", regex=True).str.strip("; ")
     rep["Reason"] = combined.where(found_, "Not found in IremboPay")
+    rep["Reason"] = rep["_not_reviewed"].where(rep["_not_reviewed"].ne(""), rep["Reason"])   # BK: not a bill payment
+    if hasattr(bank, "row_result"):                       # BK (05/11/2026): one word per credit, to filter on
+        rep["Result"] = bank.row_result(rep)
+    if option(bank, "COUNTED_CREDIT_COLUMN", False) and ref:   # BK (05/11/2026): on a second credit, the bank
+        extra_ = rep["is_extra_credit"].astype(bool)            # reference of the credit counted for its invoice
+        counted = (rep[~extra_ & rep["invoice_number"].notna()].drop_duplicates("invoice_number")
+                   .set_index("invoice_number")[ref].astype(str))
+        rep["Counted credit"] = ""
+        rep.loc[extra_, "Counted credit"] = rep.loc[extra_, "invoice_number"].map(counted).fillna("")
 
     def table_rows(a, b):
         """Rows of each of the 5 tables for [a, b): the bank's own rule, or by payment date (default).
@@ -1509,23 +1565,30 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
     # ---- I. report: the detail sheets, the Excel file, the run log ----
     t = time.perf_counter()
     statement_cols = ["Currency"] + present(posted, paid_on, desc, ref, amount)
-    detail_cols = statement_cols + option(bank, "DETAIL_COLUMNS", []) + [
+    detail_cols = statement_cols + ["Result"] + option(bank, "DETAIL_COLUMNS", []) + [
         "invoice_number", "found_in_irembopay", "amount", "currency", "payment_status",
         "payment_provider", "payment_channel", "transaction_status", "name", "created_at",
         "paid_at", "settled_at", "provider_reference", "transaction_reference",
         sla_col, "sla_status", "review_status", "review_comment",
         "notification_received", "times_on_statement", "is_extra_credit", "Reason", "Report note", "IremboPay check",
         "Source file"]
+    front = option(bank, "FRONT_COLUMNS", [])               # BK (05/11/2026): the decision next to the amount
+    detail_cols = statement_cols + ["Result"] + front + [c for c in detail_cols[len(statement_cols) + 1:]
+                                                         if c not in front]
     whole = table_rows(start, end)
     rep["Report note"] = table_notes(rep, whole, bank)          # an invoice credited more than once: why, where
     rep["Report note"] = checkout_notes(rep, whole)              # pending, but paid in IremboPay since (checkout)
     detail = rep[[col for col in detail_cols if col in rep.columns]]
     sheets = {"Pending notification": detail[whole["pending"]].sort_values(paid_on),
               "Duplicate payment other channel": detail[whole["duplicate"]].sort_values(["payment_provider", paid_on]),
-              bank.STATEMENT_SHEET: rep[statement_cols + ["invoice_number", "Source file"]]}
+              bank.STATEMENT_SHEET: rep[statement_cols + ["invoice_number"]
+                                        + [c for c in option(bank, "STATEMENT_LINK_COLUMNS", []) if c in rep]
+                                        + ["Source file"]]}
     if hasattr(bank, "extra_sheets"):
         sheets.update(bank.extra_sheets(rep, attempts, start, end, whole))
-    sheets["Payment details"] = detail
+    sheets[details_sheet(bank)] = detail
+    if option(bank, "IREMBOPAY_SHEET", None):            # BK: the IremboPay file's rows of the period, as they are
+        sheets[bank.IREMBOPAY_SHEET] = irembopay_rows(pd.concat(pays, ignore_index=True), rep, start, end)
     res.sheets = sheets
     report_file = report_path(base_dir, period, bank, report_dir)
     report_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1671,8 +1734,10 @@ def _style_table_sheet(ws, bank):
                 cell.number_format = "yyyy-mm-dd hh:mm:ss"
 
 
-def _write_table(ws, top, left, title, table):
-    """One summary table: a merged title row, the column names, then one row per currency + the total row."""
+def _write_table(ws, top, left, title, table, bands=None):
+    """One summary table: a merged title row, the column names, then one row per currency + the total row.
+    bands: a column (e.g. "Currency") - a merged, shaded row with its value before each new value (04/11/2026:
+    Payment per merchant). Returns the number of rows written."""
     ncols = len(table.columns)
     ws.merge_cells(start_row=top, start_column=left, end_row=top, end_column=left + ncols - 1)
     t = ws.cell(top, left, title)
@@ -1682,7 +1747,18 @@ def _write_table(ws, top, left, title, table):
         ws.cell(top, left + j).fill = GS_TITLE_FILL
         ws.cell(top, left + j).border = BOX
         ws.cell(top + 1, left + j, name).border = BOX
-    for i, rec in enumerate(table.itertuples(index=False), start=2):
+    i, last = 1, object()
+    for rec in table.itertuples(index=False):
+        i += 1
+        if bands is not None and rec[table.columns.get_loc(bands)] != last:
+            last = rec[table.columns.get_loc(bands)]
+            ws.merge_cells(start_row=top + i, start_column=left, end_row=top + i, end_column=left + ncols - 1)
+            band = ws.cell(top + i, left, last)
+            band.font, band.alignment = BOLD, Alignment(horizontal="center", vertical="center")
+            for j in range(ncols):
+                ws.cell(top + i, left + j).fill = GS_TITLE_FILL
+                ws.cell(top + i, left + j).border = BOX
+            i += 1
         for j, value in enumerate(rec):
             c = ws.cell(top + i, left + j, None if pd.isna(value) else value)
             c.border = BOX
@@ -1693,6 +1769,7 @@ def _write_table(ws, top, left, title, table):
                 c.number_format = "0.00%"
             elif name.startswith("VS prev"):
                 c.alignment = Alignment(horizontal="right")
+    return i - 1
 
 
 def _write_summary(ws, blocks, reconciled_on=None, merchants=None):
@@ -1716,8 +1793,8 @@ def _write_summary(ws, blocks, reconciled_on=None, merchants=None):
         if table is not None:
             col, slot = MERCHANT_SLOT
             top = base + 2 + slot * GS_STEP
-            _write_table(ws, top, col + shift, MERCHANT_TITLE, table)
-            height = max(GS_BLOCK, top - base + 2 + len(table) + 3)       # a long table pushes the next block down
+            n = _write_table(ws, top, col + shift, MERCHANT_TITLE, table, bands="Currency")
+            height = max(GS_BLOCK, top - base + 2 + n + 3)                 # a long table pushes the next block down
         base += height
 
 
@@ -1735,18 +1812,120 @@ def _open_report(path: Path):
         raise ReconError(f"{path.name} is open in Excel. Close it and run again.") from None
 
 
+# 04/11/2026: a detail sheet with more rows than this (BK: ~250,000 a month) is written in two steps - openpyxl
+# writes its header and first FAST_SAMPLE rows (formats, widths, filter, frozen header), then all its rows are written
+# straight into the file with the same cell formats (_fill_big_sheets: ~5x faster). Smaller sheets: openpyxl only.
+FAST_SHEET_ROWS = 20_000
+FAST_SAMPLE = 200
+_XML_BAD = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")          # characters an Excel file cannot hold
+_EXCEL_DAY0 = pd.Timestamp("1899-12-30")
+
+
+def _xml_text(value) -> str:
+    text = _XML_BAD.sub("", str(value))[:32767]
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _xml_cell(value, ref: str, s: str) -> str:
+    """One cell of an object column, written the way openpyxl writes it ('' = an empty cell)."""
+    if value is None or value is pd.NaT or value is pd.NA or (isinstance(value, float) and value != value):
+        return ""
+    if isinstance(value, bool):
+        return f'<c r="{ref}"{s} t="b"><v>{int(value)}</v></c>'
+    if isinstance(value, numbers.Integral):
+        return f'<c r="{ref}"{s} t="n"><v>{int(value)}</v></c>'
+    if isinstance(value, numbers.Real):
+        return f'<c r="{ref}"{s} t="n"><v>{float(value)!r}</v></c>' if abs(value) != float("inf") else ""
+    if isinstance(value, (datetime.date, pd.Timestamp)):
+        days = (pd.Timestamp(value) - _EXCEL_DAY0) / pd.Timedelta(days=1)
+        return f'<c r="{ref}"{s} t="n"><v>{float(days)!r}</v></c>'
+    text = _xml_text(value)
+    if not text:                                          # as openpyxl writes an empty text
+        return f'<c r="{ref}"{s} t="inlineStr"></c>'
+    keep = ' xml:space="preserve"' if text != text.strip() else ""
+    return f'<c r="{ref}"{s} t="inlineStr"><is><t{keep}>{text}</t></is></c>'
+
+
+def _xml_column(values: pd.Series, letter: str, rows: pd.Series, s: str) -> pd.Series:
+    """Every cell of one column (one string per row; '' where the cell is empty)."""
+    refs = letter + rows
+    if pd.api.types.is_bool_dtype(values):
+        return f'<c r="' + refs + f'"{s} t="b"><v>' + values.astype(int).astype(str) + "</v></c>"
+    if pd.api.types.is_datetime64_any_dtype(values):
+        days = (values - _EXCEL_DAY0) / pd.Timedelta(days=1)
+        return ('<c r="' + refs + f'"{s} t="n"><v>' + days.astype(str) + "</v></c>").where(values.notna(), "")
+    if pd.api.types.is_numeric_dtype(values):
+        ok = values.notna() & values.abs().ne(float("inf"))
+        return ('<c r="' + refs + f'"{s} t="n"><v>' + values.astype(str) + "</v></c>").where(ok, "")
+    if pd.api.types.infer_dtype(values, skipna=True) in ("string", "empty"):     # text only: the whole column at once
+        text = (values.astype(object).where(values.notna(), "").astype(str).str.replace(_XML_BAD, "", regex=True)
+                .str[:32767].str.replace("&", "&amp;", regex=False).str.replace("<", "&lt;", regex=False)
+                .str.replace(">", "&gt;", regex=False))
+        keep = text.ne(text.str.strip()).map({True: ' xml:space="preserve"', False: ""})
+        cell = '<c r="' + refs + f'"{s} t="inlineStr"><is><t' + keep + ">" + text + "</t></is></c>"
+        cell = cell.where(text.ne(""), '<c r="' + refs + f'"{s} t="inlineStr"></c>')
+        return cell.where(values.notna(), "")
+    return pd.Series([_xml_cell(v, r, s) for v, r in zip(values, refs)], index=values.index, dtype=object)
+
+
+def _fill_big_sheets(path: Path, big: dict):
+    """Write all the rows of the big sheets ({sheet name: table}) into the saved report: the header row and the sheet
+    settings openpyxl wrote are kept; each column gets the cell format openpyxl gave its first rows."""
+    import zipfile
+    with zipfile.ZipFile(path) as z:
+        book, rels = z.read("xl/workbook.xml").decode(), z.read("xl/_rels/workbook.xml.rels").decode()
+        target_of = {m.group(2): m.group(1) for m in re.finditer(r'Target="([^"]+)" Id="([^"]+)"', rels)}
+        files = {}
+        for m in re.finditer(r'<sheet [^>]*name="([^"]+)"[^>]*r:id="([^"]+)"', book):
+            name = m.group(1).replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"')
+            if name in big:
+                files[target_of[m.group(2)].lstrip("/")] = big[name]
+        tmp = path.with_name(path.name + ".tmp")
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as out:
+            for info in z.infolist():
+                if info.filename not in files:
+                    out.writestr(info, z.read(info.filename))
+                    continue
+                df, xml = files[info.filename], z.read(info.filename).decode()
+                head, rest = xml.split("<sheetData>", 1)
+                data, tail = rest.split("</sheetData>", 1)
+                header = re.match(r'<row r="1"[^>]*>.*?</row>', data).group(0)
+                letters = [get_column_letter(j + 1) for j in range(len(df.columns))]
+                styles = {}
+                for letter, s in re.findall(r'<c r="([A-Z]+)(?!1")\d+" s="(\d+)"', data):
+                    styles.setdefault(letter, s)
+                last = f"{letters[-1] if letters else 'A'}{len(df) + 1}"
+                head = re.sub(r'<dimension ref="[^"]*"/>', f'<dimension ref="A1:{last}"/>', head)
+                tail = re.sub(r'<autoFilter ref="[^"]*"/>', f'<autoFilter ref="A1:{last}"/>', tail)
+                member = zipfile.ZipInfo(info.filename, info.date_time)
+                member.compress_type = zipfile.ZIP_DEFLATED             # (a new entry is stored uncompressed)
+                with out.open(member, "w") as f:
+                    f.write((head + "<sheetData>" + header).encode())
+                    for start in range(0, len(df), 20_000):
+                        part = df.iloc[start:start + 20_000]
+                        rows = pd.Series(range(start + 2, start + 2 + len(part)), index=part.index).astype(str)
+                        line = '<row r="' + rows + '">'
+                        for letter, col in zip(letters, range(len(df.columns))):
+                            s = f' s="{styles[letter]}"' if letter in styles else ""
+                            line = line + _xml_column(part.iloc[:, col], letter, rows, s)
+                        f.write(("".join(line + "</row>")).encode())
+                    f.write(("</sheetData>" + tail).encode())
+    tmp.replace(path)
+
+
 def _write_report(path: Path, blocks, sheets, bank=None, reconciled_on=None, merchants=None):
     """Write the whole report: summary sheets first, then the detail sheets."""
     summary_sheets = []
     for sheet, _, _ in blocks:
         if sheet not in summary_sheets:
             summary_sheets.append(sheet)
+    big = {name: df for name, df in sheets.items() if len(df) > FAST_SHEET_ROWS}
     try:
         with _open_report(path) as writer:
             for sheet in summary_sheets:                       # empty first, so the summaries are the first tabs
                 pd.DataFrame().to_excel(writer, sheet_name=sheet, index=False)
             for name, df in sheets.items():
-                df.to_excel(writer, sheet_name=name, index=False)
+                (df.head(FAST_SAMPLE) if name in big else df).to_excel(writer, sheet_name=name, index=False)
                 _style_table_sheet(writer.sheets[name], bank)
             for sheet in summary_sheets:
                 _write_summary(writer.sheets[sheet], [(h, t) for s, h, t in blocks if s == sheet], reconciled_on,
@@ -1754,6 +1933,8 @@ def _write_report(path: Path, blocks, sheets, bank=None, reconciled_on=None, mer
             for old in {NOT_FOUND_SHEET} | OLD_SHEETS:             # left over in a report made before
                 if old in writer.book.sheetnames and old not in sheets:
                     del writer.book[old]
+        if big:
+            _fill_big_sheets(path, big)
     except PermissionError:
         raise ReconError(f"{path.name} is open in Excel. Close it and run again.") from None
 
@@ -1998,7 +2179,8 @@ def _read_merchant_table(ws, top: int, col: int) -> pd.DataFrame:
         c += 1
     rows, r = [], top + 2
     while ws.cell(r, col).value not in (None, ""):
-        rows.append([ws.cell(r, col + j).value for j in range(len(headers))])
+        if ws.cell(r, col + 1).value not in (None, ""):   # a currency band row (no Currency cell) is skipped
+            rows.append([ws.cell(r, col + j).value for j in range(len(headers))])
         r += 1
     t = pd.DataFrame(rows, columns=headers)
     if len(t):
@@ -2112,8 +2294,9 @@ def read_report(path: Path, count_reviewed: bool = True) -> dict:
                     if col is not None:
                         merchants[heading] = _read_merchant_table(ws, base + 2 + slot * GS_STEP, col)
         not_found = 0                                             # rows that went through the review
-        if count_reviewed and "Payment details" in wb.sheetnames:
-            ws = wb["Payment details"]
+        details = details_sheet(code, wb.sheetnames)
+        if count_reviewed and details in wb.sheetnames:
+            ws = wb[details]
             headers = list(next(ws.iter_rows(min_row=1, max_row=1, values_only=True), ()))
             if "review_status" in headers:
                 col = headers.index("review_status")
@@ -2456,7 +2639,7 @@ def custom_content(res: RunResult, opts: dict, bank=None) -> dict:
                                      for cur, p, r in fig["currencies"]]
 
     # ---- the other sections: a summary table or a chart, and the list of invoices when there is one
-    details = res.sheets.get("Payment details", pd.DataFrame())
+    details = res.sheets.get(details_sheet(bank), pd.DataFrame())
     base = {paid_on: paid_on, "Currency": "Currency", "invoice_number": "Invoice", amount: "Amount"}
     for key in chosen:
         if key == "overview":
