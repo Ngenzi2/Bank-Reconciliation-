@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import dataclasses
 import pickle
+import uuid
 from pathlib import Path
 
 VERSION = 2                     # 2: weekly reports and their days, the rules of 26/10/2026
@@ -44,14 +45,15 @@ def save(path: Path, entries: dict, keep=None) -> None:
         data[k] = [dataclasses.replace(f, record=None) for f in facts]
     if keep is not None:
         data = {k: v for k, v in data.items() if k in set(keep)}
+    # 02/11/2026: a name of its own (uuid): two saves at the same time never write into the same file
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex[:8]}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
         with open(tmp, "wb") as fh:
             pickle.dump({"version": VERSION, "facts": data}, fh)
         tmp.replace(path)
-    except OSError:
-        pass
+    except Exception:                            # not saved: read from Drive again next time
+        tmp.unlink(missing_ok=True)
 
 
 def attach(facts: list, record) -> list:
