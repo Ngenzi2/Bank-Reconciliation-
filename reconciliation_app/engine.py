@@ -151,6 +151,17 @@ def with_extra_decisions(rows: pd.DataFrame, m: dict, window: pd.Series) -> dict
 PAID_SINCE = ("Paid in IremboPay since (checkout) - IremboPay had it as NEW in the payment file, so it stays in "
               "Pending")
 
+INVOICE_RE = re.compile(r"8\d{11}")   # an invoice number: 12 digits starting with 8 (CLAUDE.md)
+
+
+def has_invoice_number(invoice_number) -> bool:
+    """False for a bank credit with no real invoice number - NaN (BPR: no invoice found), or, for a bank that
+    always fills invoice_number from its own reference text (Ecobank: "IREMBO|..."), anything not shaped like
+    one (2026-11-10, NO_INVOICE_PENDING_REVIEWED)."""
+    if pd.isna(invoice_number):
+        return False
+    return bool(INVOICE_RE.fullmatch(str(invoice_number).strip()))
+
 
 def checkout_notes(rows: pd.DataFrame, whole: dict) -> pd.Series:
     """28/10/2026: a row in Pending (NEW, no paid_at in the IremboPay payment file) that IremboPay's checkout now
@@ -880,9 +891,17 @@ def apply_review(merged: pd.DataFrame, not_found: pd.DataFrame, payments: pd.Dat
     payment_fields = [c for c in payments.columns if c != "invoice_number"]
     counts, messages, exclude_keys = {"Not reviewed": 0}, [], []
 
+    no_invoice_reviewed = option(bank, "NO_INVOICE_PENDING_REVIEWED", False)
     for _, r in review.iterrows():
         rows = current & to_review & merged["_key"].eq(r["_key"])
         if not is_yes(r["Reviewed (Yes/No)"]):
+            if no_invoice_reviewed and not has_invoice_number(r["invoice_number"]):
+                # a credit with no invoice number: still shown here for a person to check (the row stays in
+                # Exception Resolution, unlike BPR's NO_INVOICE_PENDING), but counted as Pending in the
+                # meantime, not left out of every table while nobody has looked at it yet (2026-11-10)
+                merged.loc[rows, "review_status"] = "Pending notification (no invoice number)"
+                merged.loc[rows, "payment_status"] = "NEW"
+                continue
             merged.loc[rows, "review_status"] = "Not reviewed"
             counts["Not reviewed"] += 1
             continue

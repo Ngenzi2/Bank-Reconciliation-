@@ -100,6 +100,60 @@ def test_an_invoice_counts_once_per_table_and_the_report_says_where_each_credit_
     assert notes[1].startswith("In Duplicate payment: second credit") and "D412 of 20/10 19:47 -> Pending" in notes[1]
 
 
+def test_review_reasons_prefers_the_credit_irembopay_recorded():
+    """2026-11-10 (rule 4, PREFER_RECORDED_REFERENCE removed again - fixed directly in review_reasons): a second
+    debit with a different Cba Ref No - the one matching IremboPay's own provider_reference is kept, not just
+    whichever came in first. No match for either: falls back to the earliest, as before."""
+    rows = pd.DataFrame({
+        "invoice_number": ["A", "A", "A", "B", "B"],
+        "Cba Rsp Code": ["000"] * 5,
+        "Request Date": pd.to_datetime(["2026-10-26 16:19", "2026-10-28 09:05", "2026-10-29 12:26",
+                                        "2026-10-20 10:00", "2026-10-21 10:00"]),
+        "Cba Ref No": ["RW1271529910", "RW1271705012", "ITHERPPGTR261029", "X1", "X2"],
+        "provider_reference": ["ITHERPPGTR261029"] * 3 + ["", ""]})
+    reasons = ecobank.review_reasons(rows)
+    # A: the third row (matches provider_reference) is kept; the other two are "credited again"
+    assert reasons[0] != "" and "ITHERPPGTR261029" in reasons[0]
+    assert reasons[1] != "" and "ITHERPPGTR261029" in reasons[1]
+    assert reasons[2] == ""
+    # B: IremboPay recorded no reference for either credit - falls back to the earliest (X1)
+    assert reasons[3] == ""
+    assert reasons[4] != "" and "X1" in reasons[4]
+
+
+def test_no_invoice_credit_is_pending_automatically_but_stays_in_review():
+    """2026-11-10 (NO_INVOICE_PENDING_REVIEWED): a bank credit with no real invoice number is counted as Pending
+    straight away - but, unlike BPR's NO_INVOICE_PENDING, it is not removed from Exception Resolution, so a
+    person can still see and override it."""
+    import engine
+    assert engine.has_invoice_number("886299919186") is True
+    assert engine.has_invoice_number("IREMBO|27-Oct-2026|000162") is False
+    assert engine.has_invoice_number(None) is False
+
+    merged = pd.DataFrame({
+        "period": ["current", "current"],
+        "invoice_number": ["IREMBO|27-Oct-2026|000162", "886200000000"],
+        "found_in_irembopay": [False, False], "payment_status": [None, None],
+        "paid_at": pd.to_datetime([None, None]),
+        "Currency": ["RWF", "RWF"], "Request Date": pd.to_datetime(["2026-10-27", "2026-10-27"])})
+    merged["_key"] = engine.key_of(merged, "ECO")
+    merged["_to_review"] = True
+    review = pd.DataFrame({
+        "_key": merged["_key"], "invoice_number": merged["invoice_number"],
+        "Reviewed (Yes/No)": ["", ""], "Report table": ["", ""], "Correct invoice number": ["", ""],
+        "payment_status": ["", ""], "payment_provider": ["", ""],
+        "paid_at (YYYY-MM-DD HH:MM:SS)": ["", ""], "Merchant name": ["", ""]})
+    payments = pd.DataFrame({"invoice_number": pd.Series([], dtype=str), "amount": pd.Series([], dtype=float)})
+    out, _, counts, _ = engine.apply_review(merged, merged.copy(), payments, review, "ECO")
+
+    no_inv = out[out["invoice_number"] == "IREMBO|27-Oct-2026|000162"].iloc[0]
+    assert no_inv["review_status"] == "Pending notification (no invoice number)"
+    assert no_inv["payment_status"] == "NEW"
+    real = out[out["invoice_number"] == "886200000000"].iloc[0]
+    assert real["review_status"] == "Not reviewed"              # a real, unresolved invoice: unaffected
+    assert counts["Not reviewed"] == 1                           # only the real invoice blocks require_review
+
+
 def test_pending_but_paid_in_irembopay_since_gets_a_note_and_stays_pending():
     """28/10/2026: NEW in the payment file (Pending) but the checkout now says Paid: a note, still in Pending."""
     import engine

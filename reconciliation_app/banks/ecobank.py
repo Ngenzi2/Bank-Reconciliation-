@@ -84,6 +84,10 @@ CHECKOUT_ALL = True                # 26/10/2026: every invoice goes through Irem
 SEPARATE_CREDITED_AGAIN = True     # step 5: an invoice debited twice (second SUCCESS) in a table of its own
 PAYMENT_FILE_TYPES = ["csv", "xlsx"]
 PAYMENT_OPTIONAL_COLUMNS = ["created_at"]
+# 2026-11-10 (matching the notebook, approved by the team):
+NO_INVOICE_PENDING_REVIEWED = True   # a credit with no invoice number: counted as Pending straight away, but
+                                     # (unlike BPR's NO_INVOICE_PENDING) still shown in Exception Resolution
+                                     # for a person to check
 
 
 # the review recognises an invoice by currency | Request Date | invoice: the Cba Ref No is Ecobank's own number, it is
@@ -251,17 +255,26 @@ def duplicate(rows: pd.DataFrame) -> pd.Series:
 
 def review_reasons(rows: pd.DataFrame) -> pd.Series:
     """Why a request FOUND in IremboPay still goes to Exception Resolution ("" = it does not). 26/10/2026: an
-    invoice Ecobank answered SUCCESS more than once (debited twice) - the first SUCCESS counts, the others are
-    checked."""
+    invoice Ecobank answered SUCCESS more than once (debited twice) - the credit whose own reference equals the
+    one IremboPay recorded (provider_reference) counts; the others are checked. When none of them matches (or
+    IremboPay recorded none), the earliest counts, as before (2026-11-10, rule 4 - found while checking SLA: the
+    old rule always kept the earliest even when a later credit was the one IremboPay actually matched)."""
     out = pd.Series("", index=rows.index, dtype=object)
     # 26/10/2026: also an invoice NOT found in IremboPay - its second credit goes to "credited more than once" too
     found = rows[rows["invoice_number"].notna() & is_success(rows)]
+    clean = lambda s: s.fillna("").astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+    ref = clean(found["Cba Ref No"])
+    recorded = clean(found["provider_reference"]) if "provider_reference" in found else pd.Series("", index=found.index)
     for _, group in found.groupby("invoice_number"):
         if len(group) < 2:
             continue
         group = group.sort_values("Request Date", kind="stable")
-        kept = str(group["Cba Ref No"].iloc[0] if pd.notna(group["Cba Ref No"].iloc[0]) else group["Request Date"].iloc[0])
-        out[group.index[1:]] = f"Invoice credited again: debited again by Ecobank; the request counted is {kept}"
+        matches = (ref.loc[group.index] == recorded.loc[group.index]) & recorded.loc[group.index].ne("")
+        keep = group.index[matches.to_numpy().argmax()] if matches.any() else group.index[0]
+        kept_row = group.loc[keep]
+        kept = str(kept_row["Cba Ref No"]) if pd.notna(kept_row["Cba Ref No"]) else str(kept_row["Request Date"])
+        out[[i for i in group.index if i != keep]] = (
+            f"Invoice credited again: debited again by Ecobank; the request counted is {kept}")
     return out
 
 

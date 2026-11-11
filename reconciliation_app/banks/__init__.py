@@ -97,6 +97,8 @@ OPTIONAL = {
     "SEPARATE_CREDITED_AGAIN": "True to show the extra credits of an invoice in their own table in Exception "
                                "Resolution, next to the credit counted",
     "NO_INVOICE_PENDING": "True: a credit with no invoice number goes straight to Pending notification (not reviewed)",
+    "NO_INVOICE_PENDING_REVIEWED": "True: a credit with no invoice number is counted as Pending straight away, but "
+                                   "(unlike NO_INVOICE_PENDING) stays in Exception Resolution for a person to check",
     "DAY_AFTER_RECOMMENDED": "True to recommend (never require) the statement of the day after the period",
     "SLA_UNIT": "'minutes' when the SLA setting is in minutes (default: days)",
     "SLA_DEFAULT": "the SLA setting before anyone changes it (default 0)",
