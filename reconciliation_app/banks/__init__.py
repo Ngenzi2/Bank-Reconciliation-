@@ -10,6 +10,8 @@ engine.py. The app checks every bank file at start-up and says exactly what is m
                  against its own totals; matching by invoice, or by Ref no when the description has none)
     bpr.py       BPR Bank Rwanda (invoice = DOC ID; currency from IremboPay; SLA in minutes; files checked against
                  their balances and against each other; found-but-doubtful credits go to review)
+    bk.py        Bank of Kigali (the BK notebook's rules; 5 collection accounts, 4 currencies; card payments and bank
+                 transfers counted but not reviewed; 5 extra report sheets)
 
 To add a bank
     1. copy im.py to a new file (e.g. bk.py)
@@ -23,13 +25,13 @@ CONTENTS
     3. Optional settings (OPTIONAL): leave them out to work like I&M
     4. Checking the bank files at start-up
 """
-from . import boa, bpr, ecobank, im
+from . import bk, boa, bpr, ecobank, im
 
 
 # =====================================================================================================================
 # 1. ACTIVE BANKS
 # =====================================================================================================================
-ACTIVE = [im, ecobank, boa, bpr]     # the first one is the default
+ACTIVE = [im, ecobank, boa, bpr, bk]     # the first one is the default
 
 
 # =====================================================================================================================
@@ -77,6 +79,8 @@ OPTIONAL = {
     "REVIEW_KEY_WITHOUT_REFERENCE": "True when the review recognises a row by currency | date | invoice only (the "
                                     "bank reference is not in the IremboPay files; default False)",
     "DETAIL_COLUMNS": "extra statement columns shown in the detail sheets",
+    "STATEMENT_LINK_COLUMNS": "columns shown after invoice_number in the statement sheet: how the invoice was found "
+                              "(BK: Invoice found by, provider_reference)",
     "DATETIME_COLUMNS": "statement columns with a time, formatted with hh:mm:ss",
     "TOTALS_CHECK_SKIP": "summary tables left out of the 'weeks add up to the month' check",
     # ---- the bank's own rules (functions)
@@ -84,6 +88,7 @@ OPTIONAL = {
     "in_period": "function(rows, attempts, start, end): which rows belong to the period",
     "tables": "function(rows, attempts, a, b): rows of the 5 tables (default: by payment date)",
     "extra_sheets": "function(rows, attempts, start, end, whole): {sheet name: table} added to the report",
+    "EXTRA_SHEETS": "the names of the sheets extra_sheets adds (so a report made again replaces them)",
     # ---- BPR-like banks (see bpr.py)
     "find_invoices": "function(statement, payments): the invoice of rows without one, found another way (only "
                      "when IremboPay has it)",
@@ -101,6 +106,15 @@ OPTIONAL = {
     "SLA_UNIT": "'minutes' when the SLA setting is in minutes (default: days)",
     "SLA_DEFAULT": "the SLA setting before anyone changes it (default 0)",
     "SLA_MAX": "the largest SLA setting allowed (default 10)",
+    # ---- BK (see bk.py)
+    "DETAILS_SHEET": "the name of the sheet with every credit and its IremboPay payment (default 'Payment details')",
+    "COUNTED_CREDIT_COLUMN": "True: a 'Counted credit' column - on a second credit, the reference of the credit "
+                             "counted for its invoice",
+    "FRONT_COLUMNS": "details-sheet columns moved right after the bank columns (BK: review_status, review_comment)",
+    "row_result": "function(rows): one word per credit, shown in the details sheet's 'Result' column",
+    "IREMBOPAY_SHEET": "the name of a sheet with the IremboPay payment file's own rows of the period",
+    "counted_not_reviewed": "function(rows): why a credit is counted in Processed but never matched nor reviewed "
+                            "('' = handled normally; BK: card payments, bank transfers)",
 }
 
 
