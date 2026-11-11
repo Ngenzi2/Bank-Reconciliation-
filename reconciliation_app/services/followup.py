@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import pickle
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -110,14 +111,15 @@ def cache_save(path: Path, entries: dict, keep=None) -> None:
     data.update(entries)
     if keep is not None:
         data = {k: v for k, v in data.items() if k in set(keep)}
+    # 02/11/2026: a name of its own (uuid): two saves at the same time never write into the same file
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex[:8]}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
         with open(tmp, "wb") as fh:
             pickle.dump({"version": CACHE_VERSION, "items": data}, fh)
         tmp.replace(path)
-    except OSError:
-        pass
+    except Exception:                            # not saved: read from Drive again next time
+        tmp.unlink(missing_ok=True)
 
 
 # ---- the decisions, shared on Google Drive -------------------------------------------------------------------------

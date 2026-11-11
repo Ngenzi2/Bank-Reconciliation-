@@ -45,7 +45,8 @@ def _bool(series) -> pd.Series:
 
 def _details(path: Path, bank) -> pd.DataFrame:
     c = bank.COLUMNS
-    d = pd.read_excel(path, sheet_name="Payment details", dtype={"invoice_number": str}, engine=engine.EXCEL_ENGINE)
+    name = engine.details_sheet(bank, pd.ExcelFile(path, engine=engine.EXCEL_ENGINE).sheet_names)
+    d = pd.read_excel(path, sheet_name=name, dtype={"invoice_number": str}, engine=engine.EXCEL_ENGINE)
     for col in (c["payment_date"], c.get("posted_date"), "paid_at", "created_at", "settled_at"):
         if col and col in d:
             d[col] = pd.to_datetime(d[col], errors="coerce")
@@ -188,7 +189,14 @@ def redo(path: Path, bank_code: str, kind: str, start: pd.Timestamp, out_path: P
               "Duplicate payment other channel": detail[whole["duplicate"]].sort_values(["payment_provider", paid_on])}
     if statement is not None:
         sheets[bank.STATEMENT_SHEET] = statement
-    sheets["Payment details"] = detail
+    sheets[engine.details_sheet(bank)] = detail
+    irembopay = getattr(bank, "IREMBOPAY_SHEET", None)       # BK: the IremboPay rows are kept as they were
+    if irembopay:
+        try:
+            sheets[irembopay] = pd.read_excel(path, sheet_name=irembopay, dtype={"invoice_number": str},
+                                              engine=engine.EXCEL_ENGINE)
+        except Exception:
+            pass
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.unlink(missing_ok=True)
     engine._write_report(out_path, blocks, sheets, bank, pd.Timestamp.now(), merchants)

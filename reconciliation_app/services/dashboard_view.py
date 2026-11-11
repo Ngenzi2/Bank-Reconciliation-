@@ -230,6 +230,13 @@ def kpi_cards(now: dict, before: dict | None, fu: dict | None = None) -> str:
     pct = lambda v, n=2: ("N/A" if v is None else f"<{10 ** -n:.{n}f}%" if 0 < v * 100 < 0.5 * 10 ** -n
                           else f"{v * 100:.{n}f}%")
     amount_big = "<br>".join(f"{c} {short(amt[c])}" for c in curs) or "–"
+
+    def rows(label, top, pairs, tail=""):
+        """09/11/2026: the FOLLOW-UP card's design - a label (or the change), a line, then label | number rows."""
+        lines = "".join(f'<div><span>{k}</span><b>{v:,}</b></div>' for k, v in pairs)
+        return f'{top or label}<div class="dk-fu">{lines}</div>{tail}'
+
+    pend_money = {c: v for c in curs if (v := (now.get("amounts", {}).get(c, {}) or {}).get("pending", 0.0))}
     amount_sub = (" · ".join(f"{c} " + (_arrow(amt[c], amt_b.get(c), fmt=lambda v: short(v)) or "no earlier figure")
                              for c in curs) if amt_b is not None else "Total received (notifications received)")
     cards = [
@@ -240,15 +247,13 @@ def kpi_cards(now: dict, before: dict | None, fu: dict | None = None) -> str:
         ("RATE", "rate", pct(rate(now)),
          _arrow(rate(now), rate(before), points=True, fmt=pct) if before else "Received notification ÷ processed transaction"),
         ("SLA", "sla", pct(sla(now), 1),
-         _arrow(sla(now), sla(before), good_up=False, points=True, fmt=lambda v: pct(v, 1)) if before
-         else f"Violated: {now['sla']:,} of {now['processed']:,} processed transactions"),
+         rows("Violated", _arrow(sla(now), sla(before), good_up=False, points=True, fmt=lambda v: pct(v, 1))
+              if before else None, [("Violated", now["sla"]), ("Processed", now["processed"])])),
         # 27/10/2026: pending notifications ÷ processed (debited at the bank, never notified to IremboPay)
         ("PENDING", "pending", pct(pend(now)),             # 27/10/2026: 2 decimals (4 of 10,506 = 0.04%, not 0.0%)
-         _arrow(pend(now), pend(before), good_up=False, points=True, fmt=pct) if before
-         else f"Not notified: {now.get('pending', 0):,} of {now['processed']:,} processed transactions"
-              + (" · " + " · ".join(f"{c} {short(v)}" for c in curs
-                                    if (v := (now.get('amounts', {}).get(c, {}) or {}).get('pending', 0.0)))
-                 if any((now.get('amounts', {}).get(c, {}) or {}).get('pending') for c in curs) else "")),
+         rows("Not notified", _arrow(pend(now), pend(before), good_up=False, points=True, fmt=pct) if before else None,
+              [("Not notified", now.get("pending", 0)), ("Processed", now["processed"])],
+              " · ".join(f"{c} {v:,.0f}" for c, v in pend_money.items()) + " not notified" if pend_money else "")),
     ]
     # the follow-up after the report (services/followup.py): the report's figures are never changed, the follow-up
     # is shown next to them
@@ -256,10 +261,7 @@ def kpi_cards(now: dict, before: dict | None, fu: dict | None = None) -> str:
         if fu.get("followed"):
             s = fu["summary"]
             # 30/10/2026: the money still to follow up is shown on the FOLLOW-UP card only, not on AMOUNT
-            if s["received_later"] and now["processed"]:
-                after = (now["received"] + s["received_later"]) / now["processed"]
-                cards[2] = cards[2][:3] + (cards[2][3] + f'<div class="dk-f"><b>{after * 100:.2f}%</b> after follow-up '
-                                           f'({s["received_later"]:,} received later)</div>',)
+            # 03/11/2026: no "% after follow-up" line on RECEIVED; the card shows the report's own rate only
             red = " dk-red" if s["overdue"] else ""
             if s["total"]:
                 # 30/10/2026: "4 / 75" then "Checked", the open items per type, and the money still open
@@ -472,16 +474,198 @@ def alt_bank_ring(table: pd.DataFrame, colors: dict, unit: str):
     return _alt_theme(alt.layer(ring, big, small), height=230)
 
 
-def table_html(df: pd.DataFrame) -> str:
-    """The numbers behind a chart, as a plain table (numbers right-aligned)."""
+NOT_NOTIFIED = "#E3E9EB"          # 10/11/2026: the part of the success-rate ring that was processed but not notified
+
+
+def _rate_parts(table: pd.DataFrame, colors: dict) -> list:
+    """[(label, value, colour)]: each bank's notifications received, then the processed ones not notified (grey)."""
+    parts = [(r.Bank, float(r.Received), colors.get(r.Code, MUT)) for r in table.itertuples() if r.Received]
+    missing = float(table["Processed"].sum() - table["Received"].sum())
+    return parts + ([("Not notified", missing, NOT_NOTIFIED)] if missing > 0 else [])
+
+
+def _rate_change(ch) -> str:
+    """' ↗ 0.40 pts' after a bank's rate (its "Change pts") when a period is compared with."""
+    if ch is None or pd.isna(ch):
+        return ""
+    if abs(ch) < 0.005:
+        return f' <span style="color:{MUT};font-size:11.5px;font-weight:600">= 0 pts</span>'
+    return (f' <span style="color:{"#2E7D4F" if ch >= 0 else BAD};font-size:11.5px;font-weight:600">'
+            f'{"↗" if ch >= 0 else "↘"} {abs(ch):.2f} pts</span>')
+
+
+def bank_rate_list(table: pd.DataFrame, colors: dict) -> str:
+    """10/11/2026: next to the success-rate ring: each bank (its colour) and its success rate, then the lowest one."""
+    if table.empty:
+        return ""
+    cell = "padding:7px 0;border-bottom:1px solid #E6EEF0"
+    rows = "".join(
+        f'<tr><td style="{cell};padding-left:19px;text-indent:-19px"><i style="display:inline-block;width:11px;'
+        f'height:11px;border-radius:3px;background:{colors.get(r["Code"], MUT)};margin-right:8px;vertical-align:-1px">'
+        f'</i>{escape(r["Bank"])}</td>'
+        f'<td style="{cell};text-align:right;font-weight:800;white-space:nowrap;padding-left:18px">{r["Rate %"]:.2f}%'
+        f'{_rate_change(r.get("Change pts"))}</td></tr>'
+        for r in table.to_dict("records"))
+    low = table.sort_values("Rate %", kind="stable").iloc[0]
+    return (f'<div style="font-family:Nunito,\'Segoe UI\',sans-serif;font-size:13px;color:{TEAL}">'
+            f'<table style="width:100%;border-collapse:collapse"><thead><tr style="color:{MUT};font-size:11.5px">'
+            f'<th style="text-align:left;font-weight:600">Bank</th><th style="text-align:right;font-weight:600;'
+            f'padding-left:18px">Success rate</th></tr></thead><tbody>{rows}</tbody></table>'
+            f'<div style="margin-top:12px;font-weight:800">Lowest: {escape(low["Bank"])} ({low["Rate %"]:.2f}%)</div></div>')
+
+
+def _rate_text(table: pd.DataFrame) -> str:
+    from services import dashboard
+    v = dashboard.overall_rate(table)
+    return "N/A" if v is None else f"{v:.2f}%"
+
+
+def bank_rate_ring(table: pd.DataFrame, colors: dict) -> str:
+    """10/11/2026: the success rate as a ring - each bank's notifications received in its colour, the processed ones
+    not notified in grey, the rate of the banks together inside - + the list next to it (the drawing of the PDFs;
+    the screen uses alt_bank_rate_ring)."""
+    if table.empty:
+        return '<div class="dv-empty">No processed transaction in this period.</div>'
+    parts = _rate_parts(table, colors)
+    total, cx, cy, ro, ri = sum(v for _, v, _ in parts), 110, 110, 100, 62
+    svg_parts, a0 = [], -math.pi / 2
+    for _, v, col in parts:
+        a1 = a0 + 2 * math.pi * v / total
+        if v >= total:                                  # every one notified by one bank: a full ring
+            svg_parts.append(f'<circle cx="{cx}" cy="{cy}" r="{(ro + ri) / 2}" fill="none" stroke="{col}" '
+                             f'stroke-width="{ro - ri}"/>')
+        else:
+            p = lambda a, rad: f"{cx + rad * math.cos(a):.2f} {cy + rad * math.sin(a):.2f}"
+            big = 1 if a1 - a0 > math.pi else 0
+            svg_parts.append(f'<path d="M {p(a0, ro)} A {ro} {ro} 0 {big} 1 {p(a1, ro)} L {p(a1, ri)} '
+                             f'A {ri} {ri} 0 {big} 0 {p(a0, ri)} Z" fill="{col}" stroke="#fff" stroke-width="2"/>')
+        a0 = a1
+    svg = (f'<svg viewBox="0 0 220 220">{"".join(svg_parts)}<text x="{cx}" y="{cy + 2}" text-anchor="middle" '
+           f'class="dv-dc">{_rate_text(table)}</text><text x="{cx}" y="{cy + 22}" text-anchor="middle" '
+           f'class="dv-ds">success rate</text></svg>')
+    return (f'<div style="display:flex;gap:22px;align-items:center;flex-wrap:wrap">'
+            f'<div style="flex:0 0 200px">{_img(svg, "width:200px;display:block")}</div>'
+            f'<div style="flex:1 1 220px">{bank_rate_list(table, colors)}</div></div>')
+
+
+def alt_bank_rate_ring(table: pd.DataFrame, colors: dict):
+    """The same ring on the screen: hovering a part shows the bank and its success rate (grey: not notified)."""
+    import altair as alt
+    parts = _rate_parts(table, colors)
+    rates = dict(zip(table["Bank"], table["Rate %"]))
+    t = pd.DataFrame({"Part": [n for n, _, _ in parts], "Value": [v for _, v, _ in parts],
+                      "o": range(len(parts)),
+                      "Success rate": [f"{rates[n]:.2f}%" if n in rates else "–" for n, _, _ in parts]})
+    ring = alt.Chart(t).mark_arc(innerRadius=62, outerRadius=100, stroke="#fff", strokeWidth=2).encode(
+        theta=alt.Theta("Value:Q", stack=True),
+        color=alt.Color("Part:N", scale=alt.Scale(domain=list(t["Part"]), range=[c for _, _, c in parts]), legend=None),
+        order=alt.Order("o:Q"),
+        tooltip=[alt.Tooltip("Part:N", title="Bank"), alt.Tooltip("Success rate:N")])
+    centre = pd.DataFrame({"t": [_rate_text(table)], "s": ["success rate"]})
+    big = alt.Chart(centre).mark_text(fontSize=22, fontWeight=800, color=TEAL, dy=-6).encode(text="t:N")
+    small = alt.Chart(centre).mark_text(fontSize=11.5, color=MUT, dy=14).encode(text="s:N")
+    return _alt_theme(alt.layer(ring, big, small), height=230)
+
+
+def ranked_xlsx(table: pd.DataFrame, title: str, sub: str, by: str, sheet: str = "By bank") -> bytes:
+    """10/11/2026: a table as an Excel file, ranked: a centred title and line above it, a Rank column (the biggest
+    `by` first), the header in IremboPay teal, every cell centred and bold, thin lines inside and a thick one around.
+    Rates (%) with 2 decimals, shares and changes with 1, counts and amounts with thousands separators. Two-level
+    columns (top, sub; 11/11/2026): two header rows, the top merged over its sub-columns, a column whose sub is ""
+    merged down both rows."""
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    ranked = table.sort_values(by, ascending=False, kind="stable").reset_index(drop=True)
+    two = isinstance(ranked.columns, pd.MultiIndex)
+    ranked.insert(0, ("Rank", "") if two else "Rank", range(1, len(ranked) + 1))
+    pairs = [tuple(c) if two else (c, "") for c in ranked.columns]
+    cols = [f"{t} {sub}".strip() for t, sub in pairs]
+    ranked.columns = cols
+    fmt = {c: ("0.00" if "(%)" in c else "+0.0;-0.0;0.0" if c.startswith("Change") else "0.0" if c.endswith("%")
+               else "#,##0") for c in cols}
+    wb = Workbook()
+    ws = wb.active
+    ws.title = sheet
+    centre = Alignment(horizontal="center", vertical="center")
+    for row, text, font in ((1, title, Font(bold=True, size=14, color=TEAL.lstrip("#"))),
+                            (2, sub, Font(size=10, color=MUT.lstrip("#")))):
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=len(cols))
+        ws.cell(row, 1, text).font = font
+        ws.cell(row, 1).alignment = centre
+    thin, thick = Side(style="thin", color="7F8C8D"), Side(style="medium", color=TEAL.lstrip("#"))
+    first = 4
+    head = first + 1 if two else first                    # the last header row
+    ws.append([])
+    if two:
+        ws.append([t for t, _ in pairs])
+        ws.append([sub for _, sub in pairs])
+    else:
+        ws.append(cols)
+    for r in ranked.itertuples(index=False):
+        ws.append([None if (isinstance(v, float) and pd.isna(v)) else v for v in r])
+    last = head + len(ranked)
+    for r in range(first, last + 1):
+        for c, name in enumerate(cols, 1):
+            cell = ws.cell(r, c)
+            cell.alignment = centre
+            cell.border = Border(left=thick if c == 1 else thin, right=thick if c == len(cols) else thin,
+                                 top=thick if r == first else thin, bottom=thick if r in (head, last) else thin)
+            if r <= head:
+                cell.font, cell.fill = Font(bold=True, color="FFFFFF"), PatternFill("solid", fgColor=TEAL.lstrip("#"))
+            else:
+                cell.font = Font(bold=True)
+                if isinstance(cell.value, (int, float)) and name != "Rank":
+                    cell.number_format = fmt[name]
+        ws.row_dimensions[r].height = 22
+    for c, name in enumerate(cols, 1):
+        label = pairs[c - 1][1] or pairs[c - 1][0]       # a sub-column: as wide as its sub and its numbers
+        width = 8 if name == "Rank" else max(12 if pairs[c - 1][1] else 14, len(label) + 4,
+                                              *(len(f"{v:,.0f}" if isinstance(v, (int, float)) and not pd.isna(v)
+                                                    else str(v)) + 4 for v in ranked[name]) if len(ranked) else [14])
+        ws.column_dimensions[ws.cell(first, c).column_letter].width = width
+    if two:                                               # the headings: merged over their sub-columns, or down
+        c = 1
+        while c <= len(pairs):
+            top, sub = pairs[c - 1]
+            end = c
+            while sub and end < len(pairs) and pairs[end][0] == top and pairs[end][1]:
+                end += 1
+            if sub:
+                if end > c:
+                    ws.merge_cells(start_row=first, start_column=c, end_row=first, end_column=end)
+            else:
+                ws.merge_cells(start_row=first, start_column=c, end_row=head, end_column=c)
+            c = end + 1
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def table_html(df: pd.DataFrame, bold: bool = False, decimals: int | None = None) -> str:
+    """The numbers behind a chart, as a plain table (numbers right-aligned). bold: every row in bold; decimals: the
+    decimal numbers (not the counts) always with this many decimals (10/11/2026, the success rates: 100.00, not 100).
+    Two-level columns (top, sub) give a heading over its sub-columns (11/11/2026: "Amount (Success)" over RWF, USD…);
+    a column whose sub is "" takes both header rows."""
     head = "".join(f"<th>{escape(str(c))}</th>" for c in df.columns)
+    if isinstance(df.columns, pd.MultiIndex):
+        groups = []                                       # [(top, [subs])], neighbours with the same top together
+        for top, sub in df.columns:
+            if sub and groups and groups[-1][0] == top and groups[-1][1][-1]:
+                groups[-1][1].append(sub)
+            else:
+                groups.append((top, [sub]))
+        head = "".join(f'<th rowspan="2">{escape(str(t))}</th>' if not subs[0] else
+                       f'<th colspan="{len(subs)}" class="g">{escape(str(t))}</th>' for t, subs in groups)
+        head += "</tr><tr>" + "".join(f"<th>{escape(str(sub))}</th>" for t, subs in groups if subs[0] for sub in subs)
     blank = lambda v: v is None or (isinstance(v, float) and pd.isna(v)) or str(v) in ("nan", "None", "<NA>")
     body = "".join("<tr>" + "".join(
         '<td class="n">–</td>' if blank(v) else
         f'<td class="{"n" if isinstance(v, (int, float)) else ""}">'
-        f'{escape(f"{v:,.2f}" if isinstance(v, float) and not float(v).is_integer() else f"{v:,.0f}" if isinstance(v, (int, float)) else str(v))}</td>'
+        f'{escape(f"{v:,.{decimals}f}" if decimals is not None and isinstance(v, float) else f"{v:,.2f}" if isinstance(v, float) and not float(v).is_integer() else f"{v:,.0f}" if isinstance(v, (int, float)) else str(v))}</td>'
         for v in row) + "</tr>" for row in df.itertuples(index=False))
-    return f'{STYLE_D}<table class="dt"><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>'
+    return (f'{STYLE_D}<table class="dt{" dt-b" if bold else ""}"><thead><tr>{head}</tr></thead><tbody>{body}</tbody>'
+            '</table>')
 
 
 def card_page(title: str, sub: str, scope: str, period: str, body: str, made: str) -> str:
@@ -514,7 +698,7 @@ STYLE_D = f'''<style>
 .dk-c{{background:#fff;border:1px solid #E1EEF0;border-radius:12px;padding:15px 17px;box-shadow:0 1px 3px rgba(18,50,57,.06);min-width:0}}
 .dk-h{{display:flex;justify-content:space-between;align-items:center;font-size:11px;font-weight:700;letter-spacing:.06em;color:{MUT}}}
 .dk-v{{font-size:26px;font-weight:800;margin:7px 0 5px;line-height:1.15}} .dk-v2{{font-size:19px}}
-.dk-s{{font-size:11.5px;color:{MUT}}} .dk-f{{font-size:11px;color:#8A5B00;margin-top:5px}} .dk-f b{{color:{TEAL}}}
+.dk-s{{font-size:11.5px;color:{MUT}}}
 .dk-fu{{border-top:1px solid #E1EEF0;margin:8px 0 6px;padding-top:6px}}
 .dk-fu div{{display:flex;justify-content:space-between;gap:8px;line-height:1.7}} .dk-fu b{{color:{TEAL};font-weight:700}}
 .dk-red{{color:{BAD}}}.dk-msg{{font-size:16px;line-height:1.3;display:block}} .dk-g{{color:#2E7D4F;font-weight:800}} .dk-r{{color:{BAD};font-weight:800}} .dk-n{{color:{MUT}}}
@@ -533,8 +717,8 @@ STYLE_D = f'''<style>
 .dm-note{{font-size:12px;color:{MUT};margin-top:10px}}
 .dt{{width:100%;border-collapse:collapse;font-family:"Nunito","Segoe UI",system-ui,sans-serif;font-size:12px;color:{TEAL}}}
 .dt th{{text-align:left;font-weight:800;color:{MUT};border-bottom:1px solid #E1EEF0;padding:7px 8px}}
-.dt td{{border-bottom:1px solid #F0F4F5;padding:7px 8px}} .dt td.n{{text-align:right;font-variant-numeric:tabular-nums}}
-.dt th:not(:first-child){{text-align:right}}
+.dt td{{border-bottom:1px solid #F0F4F5;padding:7px 8px}} .dt-b td{{font-weight:800}} .dt td.n{{text-align:right;font-variant-numeric:tabular-nums}}
+.dt th:not(:first-child){{text-align:right}} .dt th.g{{text-align:center;border-bottom:1px solid #C9DADD}}
 @media (max-width:1100px){{.dk{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}
 </style>'''
 

@@ -8,9 +8,12 @@ private temporary folder, and every file is deleted as soon as it has been read 
     <system temp>/bank-reconciliation/session-<random id>/     (only this computer's user can open it)
     (the environment variable BANK_RECON_TMP can replace <system temp>/bank-reconciliation)
 
-The folder is made only when a file is needed and removed again as soon as it is empty, so nothing stays behind
-after a run. A session can only delete inside its own folder: every delete checks the path first. Nothing here ever
-touches another session's folder, output/, or any other folder.
+The folder is made only when a file is needed. Every file gets its own private sub-folder (02/11/2026): two steps
+of one session can use a file of the same name at the same time (the Compare report and the Dashboard's copy of
+the same report), and deleting one must never delete the other. A file is deleted with its sub-folder as soon as it
+has been read, so nothing stays behind after a run; the session folder itself goes on "New report" (clear).
+A session can only delete inside its own folder: every delete checks the path first. Nothing here ever touches
+another session's folder, output/, or any other folder.
 """
 from __future__ import annotations
 
@@ -37,9 +40,15 @@ class SessionFolder:
             self._path = Path(tempfile.mkdtemp(prefix=f"session-{self.id}-", dir=self.root))
         return self._path
 
+    def private(self) -> Path:
+        """A new sub-folder of this session's folder, used by one step only (made now)."""
+        target = Path(tempfile.mkdtemp(prefix="f-", dir=self.path))
+        return target
+
     def file(self, *parts: str) -> Path:
-        """A path inside this session's folder (its parent folders are made)."""
-        target = self.path.joinpath(*parts)
+        """A path inside a private sub-folder of this session's folder (its parent folders are made): the same name
+        asked twice gives two different files."""
+        target = self.private().joinpath(*parts)
         if not self.owns(target):
             raise ValueError("A temporary file must stay inside the session's folder.")
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -56,12 +65,16 @@ class SessionFolder:
         return resolved != base and base in resolved.parents
 
     def remove(self, path) -> bool:
-        """Delete one temporary file of this session (then the folder too when it is empty). Anything outside the
-        session's folder is never touched."""
+        """Delete one temporary file of this session with its private sub-folder (never the session folder: another
+        step may be using a file in it at the same time). Anything outside the session's folder is never touched."""
         if not self.owns(path):
             return False
-        Path(path).unlink(missing_ok=True)
-        self._tidy()
+        path = Path(path).resolve()
+        own = self._path.resolve() / path.relative_to(self._path.resolve()).parts[0]
+        if own == path:                          # directly in the session folder (not made by file / private)
+            path.unlink(missing_ok=True)
+        else:
+            shutil.rmtree(own, ignore_errors=True)
         return True
 
     def clear(self):
@@ -72,10 +85,6 @@ class SessionFolder:
                     shutil.rmtree(child, ignore_errors=True)
                 else:
                     child.unlink(missing_ok=True)
-        self._tidy()
-
-    def _tidy(self):
-        """Remove this session's folder when no file is left in it (it is made again when needed)."""
         if self._path is not None and self._path.exists() and not self.files():
             shutil.rmtree(self._path, ignore_errors=True)
             self._path = None

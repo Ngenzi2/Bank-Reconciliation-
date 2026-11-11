@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -78,12 +79,13 @@ def load(path: Path | None = None) -> dict:
 
 def _save(data: dict, path: Path | None = None):
     path = Path(path or FILE)
-    tmp = path.with_suffix(".tmp")
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex[:8]}.tmp")    # 02/11/2026: never shared by two saves
     try:
         tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, path)
     except OSError as err:
-        raise SettingsError(f"The settings could not be saved ({err.strerror or err}).") from None
+        tmp.unlink(missing_ok=True)
+        raise SettingsError(f"The settings could not be saved ({err.strerror or err}). Please try again.") from None
 
 
 def admins() -> set:

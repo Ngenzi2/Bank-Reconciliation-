@@ -112,6 +112,38 @@ def test_a_broken_balance_is_refused(tmp_path):
         read(buf.getvalue())
 
 
+@pytest.mark.parametrize("without", [("#",), ("Balance",), ("#", "Balance")])
+def test_files_without_the_row_number_or_the_balance_are_read(tmp_path, without):
+    """09/11/2026: not every BOA export has '#' and 'Balance': the file is read the same, only their checks skipped."""
+    plain = boa.clean_statement(read(statement(ROWS)).data)
+    other = boa.clean_statement(read(statement(ROWS, without=without)).data)
+    for col in ("Value Date", "Ref no", "Description", "Credit", "invoice_number"):
+        assert plain[col].equals(other[col]), col
+    res, _ = run_september(tmp_path)
+    res2 = e.run(tmp_path / "b2", SEP, [read(statement(ROWS, without=without)),
+                                         e.read_payment_file("Payment details.csv", payments(PAYS), "BOA")],
+                 require_review=False, bank="BOA", report_dir=tmp_path / "r2")
+    assert res2.sheets["Payment details"].shape[0] == res.sheets["Payment details"].shape[0]
+
+
+def test_without_the_row_number_a_broken_balance_is_still_refused():
+    import io
+    from openpyxl import load_workbook
+    wb = load_workbook(io.BytesIO(statement(ROWS, without=("#",))))
+    ws = wb.active
+    row = next(r for r in ws.iter_rows() if r[3].value == "S00003")     # Ref no is column D without '#'
+    row[7].value = row[7].value + 1                                     # Balance is column H
+    buf = io.BytesIO()
+    wb.save(buf)
+    with pytest.raises(e.ReconError, match="Balance column does not follow"):
+        read(buf.getvalue())
+
+
+def test_other_columns_are_still_required():
+    with pytest.raises(e.ReconError, match="missing the column\\(s\\) Branch"):
+        read(statement(ROWS, drop_column="Branch"))
+
+
 @pytest.mark.parametrize("content, message", [
     (statement(ROWS, currency="USD"), "USD account"),
     (statement(ROWS, drop_column="Value Date"), "not a Bank of Africa account history"),

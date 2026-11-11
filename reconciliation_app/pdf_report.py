@@ -514,7 +514,7 @@ def build_pdf(rep: dict, made: pd.Timestamp = None) -> bytes:
 def report_pdf(path: Path) -> bytes:
     """Summary-only PDF of a saved report (same content as engine.report_pdf, A4 portrait management layout)."""
     path = Path(path)
-    return build_pdf(engine.read_report(path), made=pd.Timestamp(path.stat().st_mtime, unit="s"))
+    return build_pdf(engine.read_report(path, count_reviewed=False), made=pd.Timestamp(path.stat().st_mtime, unit="s"))
 
 
 # =====================================================================================================================

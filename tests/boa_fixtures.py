@@ -13,9 +13,10 @@ PAY_COLUMNS = ["invoice_number", "transaction_id", "amount", "currency", "paymen
 
 def statement(rows, currency="RWF", opening=1000, count=None, total_credit=None, total_debit=None, closing=None,
               blank_lines_before_header=1, extra_rows_after=(), date_cells=False, repeat_header_at=None,
-              drop_column=None):
+              drop_column=None, without=()):
     """rows: [(date 'dd/mm/yyyy', ref, description, debit or None, credit or None)] OLDEST FIRST; written newest
-    first with row numbers and balances, like the real export. Returns the .xlsx bytes."""
+    first with row numbers and balances, like the real export; `without` leaves columns out (e.g. '#', 'Balance').
+    Returns the .xlsx bytes."""
     balances, bal = [], opening
     for _, _, _, d, c in rows:
         bal = bal + (c or 0) + (d or 0)
@@ -39,14 +40,17 @@ def statement(rows, currency="RWF", opening=1000, count=None, total_credit=None,
     header = ["#", "Ledger Date", "Value Date", "Branch", "Ref no", "Description", "Debit", "Credit", "Balance"]
     if drop_column:
         header = [h if h != drop_column else "Something else" for h in header]
-    ws.append(header)
+    def keep(row):
+        return [v for h, v in zip(header, row) if h not in without]
+    ws.append(keep(header))
     for n, i in enumerate(range(len(rows) - 1, -1, -1), start=1):
         day, ref, desc, d, c = rows[i]
         when = datetime.strptime(day, "%d/%m/%Y") if date_cells else day
-        ws.append([n, when, when, "HEAD OFFICE", ref, desc, d, c, balances[i]])
+        ws.append(keep([n, when, when, "HEAD OFFICE", ref, desc, d, c, balances[i]]))
         if repeat_header_at == n:
-            ws.append(header)
-    ws.append(["Totals (D / C)", None, None, None, None, None, debits, credits, None])
+            ws.append(keep(header))
+    totals = keep(["Totals (D / C)", None, None, None, None, None, debits, credits, None])
+    ws.append(totals if "#" not in without else ["Totals (D / C)"] + totals[1:])
     ws.append([])
     ws.append(["Bank of Africa Rwanda - e-banking - Account history. Generated from your internet banking session."])
     for r in extra_rows_after:

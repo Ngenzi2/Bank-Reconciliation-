@@ -198,7 +198,10 @@ def test_pending_card_is_pending_over_processed():
            "amounts": {"RWF": {"received": 1_000_000.0, "pending": 392_140.0}}}
     html = dv.kpi_cards(now, None)
     assert "PENDING" in html and "3.40%" in html                                # 2 decimals (27/10/2026)
-    assert "Not notified: 22 of 647 processed transactions" in html and "RWF 392" in html
+    # 09/11/2026: the FOLLOW-UP card's design - rows "Not notified 22", "Processed 647", the money in full
+    assert "<span>Not notified</span><b>22</b>" in html and "<span>Processed</span><b>647</b>" in html
+    assert "RWF 392,140 not notified" in html
+    assert "<span>Violated</span><b>12</b>" in html
     before = dict(now, pending=11)
     assert "PENDING" in dv.kpi_cards(now, before) and "1.70%" in dv.kpi_cards(now, before)  # the change, in points
 
@@ -245,3 +248,65 @@ def test_bank_shares_of_the_processed_transactions_and_the_amount():
     html = dv.bank_ring(tab, {"IM": "#123239"}, "processed")
     assert "Most used: I&amp;M Bank (58.2%)" in html and "10,506" in html
     assert "No processed transaction" in dv.bank_ring(d.bank_shares({"IM": None}), {}, "processed")
+
+
+def test_processed_by_bank_shows_each_banks_success_rate_and_the_banks_together():
+    """10/11/2026: "Rate" on the Processed by bank card: each bank's success rate (received ÷ processed), the banks
+    together = every notification ÷ every transaction (not the average of the rates), and the lowest bank."""
+    from services import dashboard
+    from services import dashboard_view as dv
+    now_by = {"ECO": {"processed": 2460, "received": 2142}, "BOA": {"processed": 53, "received": 53},
+              "BPR": {"processed": 0, "received": 0}}
+    tab = dashboard.bank_rates(now_by)
+    assert list(tab["Code"]) == ["ECO", "BOA"]                         # the biggest first; nothing processed: left out
+    assert list(tab["Rate %"]) == [87.07, 100.0]
+    assert round(dashboard.overall_rate(tab), 2) == 87.35               # 2,195 of 2,513 (the average would be 93.54)
+    html = dv.bank_rate_ring(tab, {"ECO": "#5FAF3C", "BOA": "#2B8A99"})
+    assert "87.07%" in html and "100.00%" in html and "Lowest: Ecobank (87.07%)" in html
+    before = dashboard.bank_rates(now_by, {"ECO": {"processed": 100, "received": 90}})
+    assert before.loc[0, "Change pts"] == -2.93 and pd.isna(before.loc[1, "Before %"])
+    assert "↘ 2.93 pts" in dv.bank_rate_list(before, {})
+    dv.alt_bank_rate_ring(tab, {"ECO": "#5FAF3C", "BOA": "#2B8A99"}).to_dict()   # the screen's ring is valid
+
+
+def test_the_rate_table_shows_successful_and_failed_transactions_and_amounts():
+    """11/11/2026: the Rate table: total, successful and failed transactions, and their amounts in RWF, USD, EUR and
+    GBP, each under one heading ("Amount (Success)" over its four currencies), on screen and in Excel."""
+    import io
+    import openpyxl
+    from services import dashboard
+    from services import dashboard_view as dv
+    now_by = {"ECO": {"processed": 2460, "received": 2142,
+                      "amounts": {"RWF": {"processed": 15788613.0, "received": 14364317.0}, "USD": {"processed": 5.0}}}}
+    row = dashboard.bank_rates(now_by).iloc[0]
+    assert (row["Failed"], row["Amount received RWF"], row["Amount failed RWF"]) == (318, 14364317, 1424296)
+    assert (row["Amount failed USD"], row["Amount received EUR"], row["Amount failed GBP"]) == (5, 0, 0)
+    table = pd.DataFrame([["Ecobank", 2460, 14364317, 0, 87.07]], columns=pd.MultiIndex.from_tuples(
+        [("Bank", ""), ("Total Transactions", ""), ("Amount (Success)", "RWF"), ("Amount (Success)", "USD"),
+         ("Success Rate (%)", "")]))
+    html = dv.table_html(table, bold=True, decimals=2)
+    assert '<th colspan="2" class="g">Amount (Success)</th>' in html and '<th rowspan="2">Bank</th>' in html
+    assert "2,460<" in html and "14,364,317<" in html and "87.07<" in html     # counts and amounts: no decimals
+    ws = openpyxl.load_workbook(io.BytesIO(dv.ranked_xlsx(table, "Banks", "Oct", ("Success Rate (%)", ""))))["By bank"]
+    assert [c.value for c in ws[4]][:4] == ["Rank", "Bank", "Total Transactions", "Amount (Success)"]
+    assert [c.value for c in ws[5]][3:5] == ["RWF", "USD"]
+    assert {str(m) for m in ws.merged_cells.ranges} >= {"D4:E4", "A4:A5", "F4:F5"}
+    assert ws["D6"].value == 14364317 and ws["D6"].number_format == "#,##0" and ws["F6"].number_format == "0.00"
+
+
+def test_the_bank_cards_excel_is_ranked_and_styled():
+    """10/11/2026: Processed by bank → ⬇ Excel: a centred title, a Rank column (highest first), bold centred cells,
+    rates with 2 decimals, and no total row."""
+    import io
+    from openpyxl import load_workbook
+    from services import dashboard_view as dv
+    table = pd.DataFrame({"Bank": ["Ecobank", "I&M Bank", "Bank of Africa Rwanda"],
+                          "Success rate (%)": [99.08, 99.85, 100.0]})
+    ws = load_workbook(io.BytesIO(dv.ranked_xlsx(table, "Banks ranked by success rate (highest first)",
+                                                 "I&M + Ecobank · Q3 2026", "Success rate (%)")))["By bank"]
+    assert ws["A1"].value == "Banks ranked by success rate (highest first)" and ws["A1"].alignment.horizontal == "center"
+    assert [c.value for c in ws[4]] == ["Rank", "Bank", "Success rate (%)"]
+    assert [[c.value for c in ws[r]] for r in (5, 6, 7)] == [[1, "Bank of Africa Rwanda", 100.0],
+                                                              [2, "I&M Bank", 99.85], [3, "Ecobank", 99.08]]
+    assert ws["C5"].number_format == "0.00" and ws["B6"].font.b and ws["B6"].alignment.horizontal == "center"
+    assert ws.max_row == 7                                               # no "All banks together" row

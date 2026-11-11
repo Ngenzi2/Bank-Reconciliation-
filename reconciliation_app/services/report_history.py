@@ -360,7 +360,7 @@ def read_drive_summary(client, file_id: str, name: str, session) -> dict:
     path = session.file(p["kind"], f"{p['code']}{engine.REPORT_SUFFIX}{p['label']}.xlsx")
     try:
         path.write_bytes(data)
-        return engine.read_report(path)
+        return engine.read_report(path, count_reviewed=False)
     finally:
         session.remove(path)
 
@@ -386,9 +386,10 @@ def read_drive_facts(client, record, session, data: bytes | None = None) -> list
         rep = (engine.read_notebook_report(path, record.bank, period) if record.notebook
               else engine.read_report(path, count_reviewed=False))  # the dashboard does not use that count
         try:
-            sheets = pd.read_excel(path, sheet_name=["Payment details", "Pending notification",
+            name = engine.details_sheet(record.bank, pd.ExcelFile(path, engine=engine.EXCEL_ENGINE).sheet_names)
+            sheets = pd.read_excel(path, sheet_name=[name, "Pending notification",
                                                      "Duplicate payment other channel"], engine=engine.EXCEL_ENGINE)
-            details = sheets["Payment details"]
+            details = sheets[name]
             weekend = dashboard.weekend_late(details, record.bank)
         except Exception:                                  # an older report without these sheets: no days
             sheets, weekend = None, None
@@ -396,7 +397,7 @@ def read_drive_facts(client, record, session, data: bytes | None = None) -> list
         if sheets is not None and not record.notebook:      # the days, from its rows (checked against it): of a
             whole = "month" if record.kind == "month" else "week"   # monthly report, or of a weekly one (27/10/2026)
             for month in [f for f in facts if f.kind == whole]:     # not known for the notebooks' own reports
-                facts += dashboard.daily_facts(month, sheets["Payment details"], sheets["Pending notification"],
+                facts += dashboard.daily_facts(month, sheets[name], sheets["Pending notification"],
                                                sheets["Duplicate payment other channel"], record.bank, weekend)
         return facts
     finally:
@@ -447,6 +448,6 @@ def read_drive_report(client, file_id: str, name: str, session, mime: str = "") 
     path = session.file(p["kind"], f"{p['code']}{engine.REPORT_SUFFIX}{p['label']}.xlsx")
     try:
         path.write_bytes(data)
-        return {"report": engine.read_report(path), "xlsx": data, "pdf": pdf_report.report_pdf(path)}
+        return {"report": engine.read_report(path, count_reviewed=False), "xlsx": data, "pdf": pdf_report.report_pdf(path)}
     finally:
         session.remove(path)

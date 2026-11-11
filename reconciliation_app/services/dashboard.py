@@ -408,6 +408,43 @@ def bank_shares(now_by: dict, before_by: dict | None = None, measure: str = "pro
     return pd.DataFrame(rows, columns=cols).sort_values("Value", ascending=False, kind="stable").reset_index(drop=True)
 
 
+RATE_CURRENCIES = ["RWF", "USD", "EUR", "GBP"]      # 11/11/2026: the Rate table's amount columns, always all four
+
+
+def bank_rates(now_by: dict, before_by: dict | None = None) -> pd.DataFrame:
+    """10/11/2026: each bank's success rate (notifications received ÷ processed transactions), the biggest bank first;
+    a bank with nothing processed is left out. Columns: Code, Bank, Processed, Received, Failed (processed but no
+    notification received), "Amount received {cur}" and "Amount failed {cur}" for each of RATE_CURRENCIES
+    (11/11/2026), Rate %, and Before % / Change pts when a period is compared with. All the banks together: overall_rate(table)."""
+    rate = lambda t: t["received"] / t["processed"] * 100 if t and t.get("processed") else None
+    rows = []
+    for c, t in now_by.items():
+        if not t or not t.get("processed"):
+            continue
+        r = {"Code": c, "Bank": engine.BANKS[c].FULL_NAME if c in engine.BANKS else c,
+             "Processed": t["processed"], "Received": t["received"], "Failed": t["processed"] - t["received"]}
+        for cur in RATE_CURRENCIES:
+            a = t.get("amounts", {}).get(cur, {})
+            r[f"Amount received {cur}"] = round(a.get("received", 0.0))
+            r[f"Amount failed {cur}"] = max(0, round(a.get("processed", 0.0) - a.get("received", 0.0)))
+        r["Rate %"] = round(rate(t), 2)
+        if before_by:
+            b = rate(before_by.get(c))
+            r["Before %"] = round(b, 2) if b is not None else None
+            r["Change pts"] = round(r["Rate %"] - b, 2) if b is not None else None
+        rows.append(r)
+    cols = (["Code", "Bank", "Processed", "Received", "Failed"] + [f"Amount received {c}" for c in RATE_CURRENCIES]
+            + [f"Amount failed {c}" for c in RATE_CURRENCIES] + ["Rate %"] + (["Before %", "Change pts"] if before_by else []))
+    return pd.DataFrame(rows, columns=cols).sort_values("Processed", ascending=False, kind="stable").reset_index(drop=True)
+
+
+def overall_rate(table: pd.DataFrame) -> float | None:
+    """The banks together: every notification received ÷ every transaction processed (not an average of the rates:
+    a bank with more transactions counts more), in %."""
+    processed = float(table["Processed"].sum()) if not table.empty else 0.0
+    return float(table["Received"].sum()) / processed * 100 if processed else None
+
+
 def change(now, before):
     """Relative change (0.25 = +25 %), or None when there is nothing before to compare with."""
     if now is None or before in (None, 0):
