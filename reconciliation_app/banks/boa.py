@@ -9,6 +9,7 @@ The BOA statement ("Account history" export of the e-banking, .xlsx)
     - a block of account details first (Account currency, Opening/Closing Bal, Total Credit/Debit, Transaction
       Count), then the table "# | Ledger Date | Value Date | Branch | Ref no | Description | Debit | Credit |
       Balance", newest first, then a "Totals (D / C)" row and a footer line. The header row is found, not assumed.
+      "#" and "Balance" may be missing (09/11/2026): the file is then read the same, without the checks they allow.
     - every file is checked against its own account details before use: the number of rows = Transaction Count,
       the credits = Total Credit, the debits = Total Debit, Opening + credits - debits = Closing, and each Balance
       follows from the row before. A file that does not add up is refused with the figures (nothing is "fixed").
@@ -43,6 +44,7 @@ CONTENTS
 import io
 import re
 
+import numpy as np
 import pandas as pd
 
 
@@ -74,6 +76,7 @@ COLUMNS = {
     "amount": "Credit",                  # credits only
 }
 _TABLE = ["#", "Ledger Date", "Value Date", "Branch", "Ref no", "Description", "Debit", "Credit", "Balance"]
+_OPTIONAL = {"#", "Balance"}      # 09/11/2026: not every BOA export has them; without them their checks are skipped
 _META = {"Account currency": "currency", "Opening Bal": "opening", "Closing Bal": "closing",
          "Total Credit": "total_credit", "Total Debit": "total_debit", "Transaction Count": "count"}
 DETAIL_COLUMNS = ["Branch", "Ref check"]                   # shown in the report's detail sheets
@@ -141,9 +144,10 @@ def read_statement(content: bytes, name: str, excel_engine=None):
                          "Ref no / Credit' header).")
     header_idx = is_header.idxmax()
     positions = {v: c for c, v in raw.loc[header_idx].items() if v}
-    missing = [c for c in _TABLE if c not in positions]
+    missing = [c for c in _TABLE if c not in positions and c not in _OPTIONAL]
     if missing:
         raise ValueError(f"{name}: the bank file is missing the column(s) {', '.join(missing)}.")
+    table = [c for c in _TABLE if c in positions]
 
     # ---- the account details above the table (label in one cell, value in the next filled one)
     meta = {}
@@ -157,21 +161,25 @@ def read_statement(content: bytes, name: str, excel_engine=None):
         raise ValueError(f"{name}: this is a {currency} account; only {', '.join(CURRENCIES)} Bank of Africa "
                          "accounts are supported.")
 
-    # ---- the table rows: a row number in '#', down to the 'Totals' row; repeated headers and blank lines skipped
-    body = raw.loc[header_idx + 1:, [positions[c] for c in _TABLE]]
-    body.columns = _TABLE
-    totals_rows = body.index[body["#"].str.lower().str.startswith("totals")]
+    # ---- the table rows: down to the 'Totals' row (in '#', or the first cell when there is no '#'); repeated
+    #      headers and blank lines skipped
+    body = raw.loc[header_idx + 1:, [positions[c] for c in table]]
+    body.columns = table
+    label = body["#"] if "#" in body else raw.loc[header_idx + 1:].iloc[:, 0]
+    totals_rows = body.index[label.str.lower().str.startswith("totals")]
     if len(totals_rows):
         body = body.loc[:totals_rows[0] - 1]
     body = body[~body.eq("").all(axis=1) & body["Ledger Date"].ne("Ledger Date")]
     debit, credit = body["Debit"].map(_number), body["Credit"].map(_number)
     ledger, value = _dates(body["Ledger Date"]), _dates(body["Value Date"])
-    bad = (~body["#"].str.fullmatch(r"\d+") | ledger.isna() | value.isna() | (debit.isna() & credit.isna())
+    numbered = body["#"].str.fullmatch(r"\d+") if "#" in body else pd.Series(True, index=body.index)
+    bad = (~numbered | ledger.isna() | value.isna() | (debit.isna() & credit.isna())
            | (debit.fillna(0).ne(0) & credit.fillna(0).ne(0)))
     if bad.any():
         shown = ", ".join(str(i + 1) for i in body.index[bad][:5])
+        need = "a number, two dates" if "#" in body else "two dates"
         raise ValueError(f"{name}: {int(bad.sum())} row(s) of the table cannot be read as transactions "
-                         f"(Excel rows {shown}…): a row needs a number, two dates and either a debit or a credit.")
+                         f"(Excel rows {shown}…): a row needs {need} and either a debit or a credit.")
 
     # ---- the file must add up to its own account details (the only use of the debits; nothing is corrected)
     problems = []
@@ -187,12 +195,18 @@ def read_statement(content: bytes, name: str, excel_engine=None):
     if pd.notna(opening) and pd.notna(closing) and abs(opening + n_credit - n_debit - closing) > 0.5:
         problems.append(f"Opening {opening:,.0f} + credits - debits = {opening + n_credit - n_debit:,.0f}, not the "
                         f"Closing {closing:,.0f}")
-    order = body["#"].astype(int).to_numpy().argsort()            # newest first: row 1 is the latest
-    b, c, d = (s.to_numpy()[order] for s in (body["Balance"].map(_number), credit.fillna(0), -debit.fillna(0)))
-    breaks = [i for i in range(len(b) - 1)
-              if pd.notna(b[i]) and pd.notna(b[i + 1]) and abs(b[i] - (b[i + 1] + c[i] - d[i])) > 0.5]
-    if breaks:
-        problems.append(f"the Balance column does not follow from the rows at {len(breaks)} place(s)")
+    if "Balance" in body:                                         # each Balance follows from the row before
+        if "#" in body:
+            order = body["#"].astype(int).to_numpy().argsort()    # newest first: row 1 is the latest
+        else:                                                     # no '#': the file's order, newest first unless
+            order = np.arange(len(body))                          # its dates go up (oldest first)
+            if len(body) > 1 and value.iloc[0] < value.iloc[-1]:
+                order = order[::-1]
+        b, c, d = (s.to_numpy()[order] for s in (body["Balance"].map(_number), credit.fillna(0), -debit.fillna(0)))
+        breaks = [i for i in range(len(b) - 1)
+                  if pd.notna(b[i]) and pd.notna(b[i + 1]) and abs(b[i] - (b[i + 1] + c[i] - d[i])) > 0.5]
+        if breaks:
+            problems.append(f"the Balance column does not follow from the rows at {len(breaks)} place(s)")
     if problems:
         raise ValueError(f"{name}: the statement does not add up to its own account details: "
                          + "; ".join(problems) + ". The file may be incomplete or edited; download it again.")
@@ -214,7 +228,9 @@ def read_statement(content: bytes, name: str, excel_engine=None):
 def clean_statement(statement: pd.DataFrame) -> pd.DataFrame:
     """Typed columns + the invoice number (the 12-digit number of the description), like I&M."""
     s = statement.copy()
-    s["Credit"], s["Balance"] = s["Credit"].map(_number), s["Balance"].map(_number)
+    s["Credit"] = s["Credit"].map(_number)
+    if "Balance" in s:
+        s["Balance"] = s["Balance"].map(_number)
     s["Ledger Date"], s["Value Date"] = _dates(s["Ledger Date"]), _dates(s["Value Date"])
     s["Ref no"] = s["Ref no"].astype(str).str.strip()
     s["invoice_number"] = s["Description"].astype(str).str.extract(_INVOICE)[0]
