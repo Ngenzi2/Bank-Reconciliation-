@@ -172,7 +172,7 @@ def test_heading_parsing():
 def test_report_pdf_reads_the_saved_report(monkeypatch, tmp_path):
     path = tmp_path / "IM_recon_summary_01-08-2026_to_31-08-2026.xlsx"
     path.write_bytes(b"x")
-    monkeypatch.setattr(P.engine, "read_report", lambda p: report())
+    monkeypatch.setattr(P.engine, "read_report", lambda p, **kw: report())
     assert P.report_pdf(path).startswith(b"%PDF")
 
 
