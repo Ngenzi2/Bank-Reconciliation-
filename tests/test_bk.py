@@ -217,16 +217,17 @@ def test_only_the_bill_payments_go_to_review(tmp_path):
     assert not reviewed["Narration"].str.contains("E- commerce|Purchase-settlement|IB Account").any()
 
 
-def test_a_bill_payment_without_invoice_number_goes_straight_to_pending(tmp_path):
+def test_a_bill_payment_without_invoice_number_goes_straight_to_not_found(tmp_path):
     empty = ("20260803", YACU, "FTCM16", 3000, 0, "BK YACU BILL PAYMENT IREMBO :")     # nothing after the colon
     res = run(tmp_path, rows=ROWS + [empty], require_review=True)
     assert "FTCM16" not in set(res.review["OurReference"])                # never in Exception Resolution
     res = run(tmp_path, rows=ROWS + [empty])
     assert counts(res, "Overall processed payments")["RWF"] == 12          # counted in Processed
     assert counts(res, "Overall notifications received by Irembo")["RWF"] == 5   # not received
-    assert counts(res, "Pending notifications")["RWF"] == 2                # 4 (NEW) + this one
-    assert "FTCM16" in set(res.sheets["Pending notification"]["OurReference"])
-    assert "FTCM16" not in set(res.sheets["Not found (BK)"]["OurReference"])
+    assert counts(res, "Pending notifications")["RWF"] == 1                # 4 (NEW) only (11/11/2026)
+    assert "FTCM16" not in set(res.sheets["Pending notification"]["OurReference"])
+    nf = res.sheets["Not found (BK)"].set_index("OurReference")
+    assert nf.at["FTCM16", "Reason"] == "Not found (no invoice number)"
     assert res.sheets["Matched details"].set_index("OurReference").at["FTCM16", "Reason"] == bk.NO_INVOICE
 
 
@@ -320,4 +321,19 @@ def test_every_collection_account_needs_a_file():
     files = [read(statement(ROWS)), e.read_payment_file("p.csv", payments(PAYS), "BK")]
     chk = e.check_period(e.make_period("day", "2026-08-03"), files, "BK", today="2026-11-04")
     assert any(RWF in t and ok for ok, t in chk.lines)
-    assert sum("no file added" in b for b in chk.blocking) == 4          # the 4 other accounts
+    assert sum("no file added" in b for b in chk.blocking) == 3          # the 3 other accounts (not GBP)
+    assert not any("100081756621" in b for b in chk.blocking)           # 11/11/2026: no GBP file only warns
+    assert any("100081756621" in t and "optional" in t and not ok for ok, t in chk.lines)
+
+
+def test_the_invoice_after_a_bar_in_the_narration_is_found():
+    """11/11/2026: BK's October 2026 files write "BK YACU BILL PAYMENT IREMBO | 886273324612 Irembo bill" (a "|", no
+    "/"), and the Source in capitals: the invoice is still cut from the Narration."""
+    from banks import bk
+    rows = pd.DataFrame({"Source": ["BK YACU BILL PAYMENT IREMBO", "New bk App Bill Payment IREMBO", "AGENT REFUND"],
+                         "Narration": ["BK YACU BILL PAYMENT IREMBO | 886273324612 Irembo billIrembo Ser",
+                                       "New bk App Bill Payment IREMBO | 876273903802 Irembo bill",
+                                       "AGENT REFUND | 886273324613"]})
+    inv, rule = bk.narration_invoice(rows)
+    assert list(inv) == ["886273324612", "876273903802", ""]               # not a bill payment: not cut
+    assert rule[0] == "Narration (after |)"
