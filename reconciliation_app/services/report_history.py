@@ -15,6 +15,8 @@ them again; it uses integrations/google_drive.py for every Drive call and engine
     local_records()      older reports still in output/ (listed only; never copied)
     find_previous()      the latest saved report of a period (for "Compare with previous period")
     read_drive_summary() the figures of a saved report (for the Reports Dashboard; no PDF is made)
+    read_drive_facts()   the dashboard's figures of a saved Excel report (facts_from_xlsx: also for its summary file,
+                         services/report_summary.py, written next to the Excel when it is saved)
 """
 from __future__ import annotations
 
@@ -105,13 +107,15 @@ def next_version(existing: list) -> int:
 
 
 def save_report(client, root_id: str, bank, period, files: dict, mode: str = "new", existing: list | None = None,
-                only: set | None = None) -> list:
+                only: set | None = None, session=None) -> list:
     """Upload the report files {ext: bytes} (ext = 'xlsx' / 'pdf') to <bank>/<YYYY-MM>/.
     mode: 'new'      first save (no file of this report on Drive yet)
           'replace'  replace the content of the existing files of the same name (Drive keeps their history)
           'version'  save next to them as _v<N>
     only: the names to (re)try (a retry after a failure). Returns one SaveResult per file; ok only when Drive
-    confirmed it. Nothing is deleted on Drive."""
+    confirmed it. Nothing is deleted on Drive.
+    session: the session's temporary folder; with it, once Drive confirmed the Excel, its summary for the dashboard
+    is written next to it (11/11/2026, write_summary: never a failure of the save)."""
     stem = report_stem(bank, period)
     existing = existing or []
     if mode == "version":
@@ -145,7 +149,27 @@ def save_report(client, root_id: str, bank, period, files: dict, mode: str = "ne
         results = [one(ext, name, None) for ext, name in targets]
     if not all(r.ok for r in results):
         client.forget_folders()                        # a folder may have been removed: look it up again next time
+    xlsx = next((r for r in results if r.ok and r.file is not None and r.name.lower().endswith(".xlsx")), None)
+    if session is not None and xlsx is not None:
+        write_summary(client, folder, xlsx.file, files["xlsx"], session)
     return results
+
+
+def write_summary(client, folder_id: str, xlsx_file: DriveFile, data: bytes, session) -> bool:
+    """The dashboard's summary of an Excel report just saved (services/report_summary.py), next to it; a summary
+    already there is replaced. True when Drive confirmed it; False (nothing raised) otherwise: the dashboard then
+    reads the Excel."""
+    from services import report_summary
+    p = parse_name(xlsx_file.name)
+    if not p:
+        return False
+    try:
+        facts = facts_from_bytes(_record(xlsx_file, p), data, session)
+        old = client.list_children(folder_id, name=report_summary.name_for(xlsx_file.name))
+    except Exception:
+        return False
+    return report_summary.write(client, folder_id, xlsx_file.name, facts, xlsx_file.md5,
+                                replace_id=old[0].id if old else None) is not None
 
 
 # ---- finding saved reports -------------------------------------------------------------------------------------------
@@ -166,6 +190,8 @@ class Record:
     path: Path | None = None         # this computer
     folder: str = ""                 # where it is: 'I&M Bank / 2026-09' ('' = the top of Reconciliation Reports)
     stem: str = ""                   # name without extension: the Excel and the PDF of one report share it
+    md5: str = ""                    # Drive's checksum of the file (11/11/2026: its summary belongs to this content)
+    parent: str = ""                 # Drive ID of its folder (where its summary goes)
 
     @property
     def month(self) -> str:
@@ -200,7 +226,7 @@ def _record(f: DriveFile, p: dict) -> Record:
     """A report file on Drive as a Record (p = parse_name of its name)."""
     return Record("Google Drive", p["code"], p["kind"], p["start"], engine.period_title(p["kind"], p["label"]), f.name,
                   p["ext"], p["version"], f.size, pd.to_datetime(f.modified, errors="coerce", utc=True), file_id=f.id,
-                  folder=f.folder, stem=p["stem"])
+                  folder=f.folder, stem=p["stem"], md5=f.md5, parent=f.parent)
 
 
 def remember_saved(index: DriveIndex, results: list, bank, period) -> DriveIndex:
@@ -287,8 +313,13 @@ def read_drive_facts(client, record, session, data: bytes | None = None) -> list
     """The dashboard's facts of one saved Excel report (services/dashboard.py): its summary blocks and the late
     payments made over the weekend and booked Monday (from its Payment details). The file exists in the session's
     temporary folder only while it is read. data: the file already downloaded (download_many), else it is."""
-    from services import dashboard
     data = client.download(record.file_id) if data is None else data
+    return facts_from_bytes(record, data, session)
+
+
+def facts_from_bytes(record, data: bytes, session) -> list:
+    """read_drive_facts of an Excel report's content (also used for its summary file when it is saved)."""
+    from services import dashboard
     p = parse_name(record.name)
     if not p or p["ext"] != "xlsx":
         raise DriveError(f"{record.name}: only an Excel report can be read.")
