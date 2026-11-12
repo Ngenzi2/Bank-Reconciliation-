@@ -70,12 +70,13 @@ class DriveFile:
     modified: str = ""                       # RFC 3339, e.g. '2026-10-09T08:15:00.000Z'
     md5: str = ""
     folder: str = ""                         # path of the folder it was found in, e.g. 'I&M / 09/2026' ("" = top)
+    parent: str = ""                         # the ID of its folder (11/11/2026: a report's summary goes next to it)
 
     @classmethod
     def from_api(cls, f: dict, folder: str = "") -> "DriveFile":
         return cls(f["id"], f.get("name", ""), f.get("mimeType", ""),
                    int(f["size"]) if f.get("size") is not None else None, f.get("modifiedTime", ""),
-                   f.get("md5Checksum", ""), folder)
+                   f.get("md5Checksum", ""), folder, (f.get("parents") or [""])[0])
 
 
 @dataclass
