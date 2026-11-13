@@ -20,8 +20,9 @@ them again; it uses integrations/google_drive.py for every Drive call and engine
     local_records()      older reports still in output/ (listed only; never copied)
     find_previous()      the latest saved report of a period (for "Compare with previous period")
     read_drive_summary() the figures of a saved report (for the Reports Dashboard; no PDF is made)
-    read_drive_facts()   the dashboard's figures of a saved Excel report (facts_from_xlsx: also for its summary file,
+    read_drive_facts()   the dashboard's figures of a saved Excel report (facts_from_bytes: also for its summary file,
                          services/report_summary.py, written next to the Excel when it is saved)
+    bank_summary_folder() where a bank's own summary file is kept (one file per bank, 13/11/2026)
 """
 from __future__ import annotations
 
@@ -227,25 +228,38 @@ def save_report(client, root_id: str, bank, period, files: dict, mode: str = "ne
         client.forget_folders()                        # a folder may have been removed: look it up again next time
     xlsx = next((r for r in results if r.ok and r.file is not None and r.name.lower().endswith(".xlsx")), None)
     if session is not None and xlsx is not None:
-        write_summary(client, folder, xlsx.file, files["xlsx"], session)
+        write_summary(client, folder, xlsx.file, files["xlsx"], session, root_id)
     return results
 
 
-def write_summary(client, folder_id: str, xlsx_file: DriveFile, data: bytes, session) -> bool:
+def write_summary(client, folder_id: str, xlsx_file: DriveFile, data: bytes, session, root_id: str = "") -> bool:
     """The dashboard's summary of an Excel report just saved (services/report_summary.py), next to it; a summary
     already there is replaced. True when Drive confirmed it; False (nothing raised) otherwise: the dashboard then
-    reads the Excel."""
-    from services import report_summary
+    reads the Excel. root_id (13/11/2026): the report is also added to its bank's own summary file."""
+    from services import facts_cache, report_summary
     p = parse_name(xlsx_file.name)
     if not p:
         return False
     try:
-        facts = facts_from_bytes(_record(xlsx_file, p), data, session)
+        record = _record(xlsx_file, p)
+        facts = facts_from_bytes(record, data, session)
         old = client.list_children(folder_id, name=report_summary.name_for(xlsx_file.name))
     except Exception:
         return False
-    return report_summary.write(client, folder_id, xlsx_file.name, facts, xlsx_file.md5,
+    done = report_summary.write(client, folder_id, xlsx_file.name, facts, xlsx_file.md5,
                                 replace_id=old[0].id if old else None) is not None
+    if root_id:
+        report_summary.update_bank(client, bank_summary_folder(client, root_id, p["code"]), p["code"],
+                                   {facts_cache.key(record): facts})
+    return done
+
+
+def bank_summary_folder(client, root_id: str, code: str) -> str:
+    """Where a bank's summary file goes: the bank's folder, or the top of Reconciliation Reports when it has none."""
+    try:
+        return client.find_folder(root_id, bank_folder(code)) or root_id
+    except Exception:
+        return root_id
 
 
 # ---- finding saved reports -------------------------------------------------------------------------------------------
@@ -438,12 +452,14 @@ def facts_from_bytes(record, data: bytes, session) -> list:
 
 def download_many(client, records: list, workers: int = 4, done=None) -> dict:
     """{file_id: bytes or DriveError} of several reports, downloaded at the same time (each on a connection of its
-    own; one after the other when the client has none to give). done(n): called after each file."""
+    own; one after the other when the client has none to give). done(n): called after each file. A record needs
+    file_id only; its mime (a notebook report kept as a Google Sheet) is used when it has one."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     def one(rec):
         try:
-            return rec.file_id, client.download(rec.file_id, rec.mime, http=client.thread_http(), as_xlsx=True)
+            return rec.file_id, client.download(rec.file_id, getattr(rec, "mime", ""), http=client.thread_http(),
+                                                as_xlsx=True)
         except DriveError as err:
             return rec.file_id, err
 
@@ -455,7 +471,7 @@ def download_many(client, records: list, workers: int = 4, done=None) -> dict:
     if not parallel:
         for i, rec in enumerate(records, 1):
             try:
-                out[rec.file_id] = client.download(rec.file_id, rec.mime, as_xlsx=True)
+                out[rec.file_id] = client.download(rec.file_id, getattr(rec, "mime", ""), as_xlsx=True)
             except DriveError as err:
                 out[rec.file_id] = err
             if done:

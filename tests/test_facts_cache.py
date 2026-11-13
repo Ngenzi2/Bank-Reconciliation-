@@ -61,3 +61,18 @@ def test_download_many_with_an_older_client_goes_one_by_one():
             return fid.encode()
     out = report_history.download_many(OldClient(), [Rec("x"), Rec("y")])
     assert out == {"x": b"x", "y": b"y"}
+
+
+def test_download_many_reads_a_file_known_by_its_id_only():
+    """13/11/2026: the Dashboard downloads a report's summary file knowing only its Drive ID (no mime)."""
+    from types import SimpleNamespace
+
+    class Client:
+        def thread_http(self):
+            return object()
+
+        def download(self, fid, mime="", http=None, as_xlsx=False):
+            return f"{fid}|{mime}".encode()
+    two = [SimpleNamespace(file_id="s1"), SimpleNamespace(file_id="s2")]
+    assert report_history.download_many(Client(), two) == {"s1": b"s1|", "s2": b"s2|"}          # at the same time
+    assert report_history.download_many(Client(), two[:1]) == {"s1": b"s1|"}                    # one by one
