@@ -1,6 +1,8 @@
 """Ecobank (26/10/2026): processed = the requests Ecobank answered SUCCESS (Cba Rsp Code 000), by Request Date,
 each invoice once - the first SUCCESS counts, a second SUCCESS (debited twice) goes to Exception Resolution;
 received = paid_at filled through ECOBANK; another provider = Duplicate Payment."""
+import io
+
 import pandas as pd
 
 from banks import ecobank
@@ -29,13 +31,15 @@ def test_success_requests_kept_first_counts_second_is_reviewed():
 
 
 def test_the_period_is_the_request_date():
-    rows = pd.DataFrame({"Request Date": pd.to_datetime(["2026-08-02 23:59", "2026-08-03 00:01"])})
+    rows = pd.DataFrame({"Request Date": pd.to_datetime(["2026-08-02 23:59", "2026-08-03 00:01"]),
+                         "invoice_number": ["A", "B"], "Cba Rsp Code": ["000", "000"], "Cba Ref No": ["r1", "r2"]})
     assert ecobank.in_period(rows, None, pd.Timestamp("2026-08-03"), pd.Timestamp("2026-08-10")).tolist() == [False, True]
 
 
 def test_a_resend_with_the_same_cba_ref_is_one_debit():
     """26/10/2026: the same invoice and the same Cba Ref No again (another Request Date) = Ecobank sent the same
-    debit again, not a second debit: only the earliest is kept; a different Cba Ref No is still an extra debit."""
+    debit again, not a second debit; a different Cba Ref No is still an extra debit.
+    13/11/2026: the re-send counts once in the period - only the rows of the period are compared."""
     rows = pd.DataFrame({
         "invoice_number": ["A", "A", "A", "B", "B"],
         "Cba Rsp Code": ["000"] * 5,
@@ -43,11 +47,16 @@ def test_a_resend_with_the_same_cba_ref_is_one_debit():
                                         "2026-10-20 14:18", "2026-10-20 14:22"]),
         "Amount": [500] * 3 + [1200] * 2, "Cba Ref No": ["ITR1", "ITR1", "ITR1", "D81", "D13"]})
     pays = pd.DataFrame({"invoice_number": ["A", "B"], "amount": [500, 1200]})
-    kept = ecobank.one_row_per_invoice(rows, pays)
-    assert kept["Cba Ref No"].tolist() == ["ITR1", "D81", "D13"]          # A once; B: two different debits
-    assert kept["Attempts"].tolist() == [3, 2, 2]                          # the resends are still counted as tries
-    reasons = ecobank.review_reasons(kept.assign(found_in_irembopay=True))
+    kept = ecobank.one_row_per_invoice(rows, pays).reset_index(drop=True)
+    assert kept["Cba Ref No"].tolist() == ["ITR1", "ITR1", "D81", "D13", "ITR1"]   # every SUCCESS, by Request Date
+    week = kept[ecobank.in_period(kept, kept, pd.Timestamp("2026-10-19"), pd.Timestamp("2026-10-26"))]
+    assert week["Cba Ref No"].tolist() == ["ITR1", "D81", "D13"]          # A once; B: two different debits
+    assert week["Attempts"].tolist() == [3, 2, 2]                          # the resends are still counted as tries
+    reasons = ecobank.review_reasons(week.assign(found_in_irembopay=True))
     assert reasons.tolist() == ["", "", "Invoice credited again: debited again by Ecobank; the request counted is D81"]
+    # A was first sent on 19/10: a period that starts on 20/10 still counts it, once (the 20/10 row, not 21/10)
+    later = kept[ecobank.in_period(kept, kept, pd.Timestamp("2026-10-20"), pd.Timestamp("2026-10-27"))]
+    assert later["Request Date"].dt.day.tolist() == [20, 20, 20]
 
 
 def test_the_table_decided_for_an_extra_debit_is_read():
@@ -162,3 +171,78 @@ def test_pending_but_paid_in_irembopay_since_gets_a_note_and_stays_pending():
     notes = engine.checkout_notes(rows, whole)
     assert notes[0] == engine.PAID_SINCE and notes[1] == "" and notes[2] == "earlier note"   # row 2: not in Pending
     assert whole["pending"].tolist() == [True, True, False]                                    # nothing moved
+
+
+def test_currency_from_checkout_only_for_a_credit_not_paid_in_the_file():
+    """13/11/2026 (CURRENCY_FROM_CHECKOUT): the invoice's own currency replaces the statement's only when the
+    payment file does not show the credit as paid and the checkout gave one."""
+    import engine
+    rows = pd.DataFrame({"invoice_number": ["A", "B", "C", None], "Currency": ["RWF"] * 4,
+                         "paid_at": pd.to_datetime(["2026-10-27 10:00", None, None, None])})
+    assert engine.currency_from_checkout(rows, {"A": "USD", "B": "USD"}).tolist() == ["RWF", "USD", "RWF", "RWF"]
+
+
+def _made_up_week(tmp_path, more=(), **kw):
+    """One made-up Ecobank week (26/10 - 01/11/2026): A paid through Ecobank, B still NEW (USD 1 in IremboPay, sent
+    as RWF 1 by the bank), C paid through MTN. more: other statement rows (invoice, amount, day of October, ref)."""
+    import engine
+    cols = ["Source Channel", "Biller Code", "Bill Ref No", "Ccy", "Amount", "Request Date", "Cba Rsp Code",
+            "Cba Rsp Msg", "Biller Rsp Code", "Biller Rsp Msg", "Cba Ref No", "Customer Ref No"]
+    row = lambda inv, amt, day, ref: ["AGENCYBANKING", "IREMBO_PAY", inv, "RWF", amt, f"2026-10-{day} 08:00:00",
+                                      "000", "SUCCESS", "000", "Success", ref, "250700000000"]
+    buf = io.BytesIO()
+    pd.DataFrame([[None] * len(cols)] * 3 + [cols, row("886200000001", 5000, 27, "R1"),
+                                             row("886200000002", 1, 28, "R2"),
+                                             row("886200000003", 3000, 29, "R3")]
+                 + [row(*m) for m in more]).to_excel(buf, header=False, index=False)
+    pays = pd.DataFrame({
+        "invoice_number": ["886200000001", "886200000002", "886200000003"], "amount": [5000, 1, 3000],
+        "currency": ["RWF", "USD", "RWF"], "payment_status": ["PAID", "NEW", "PAID"],
+        "paid_at": ["2026-10-27 10:00:05", None, "2026-10-29 09:30:00"],
+        "payment_provider": ["ECOBANK", None, "MTN"], "transaction_status": ["SUCCESSFUL", None, "SUCCESSFUL"],
+        "created_at": ["2026-10-27 09:00:00", "2026-10-20 09:00:00", "2026-10-29 09:00:00"],
+        "name": ["RRA", "GOR", "RSSB"]})
+    files = [engine.read_bank_file("IREMBO PAY2026-10-30.xlsx", buf.getvalue(), "ECO"),
+             engine.read_payment_file("payments.csv", pays.to_csv(index=False).encode(), "ECO")]
+    res = engine.run(tmp_path, engine.make_period("week", "2026-10-26"), files, bank="ECO", report_dir=tmp_path / "r",
+                     checkout={"886200000002": "Open, not paid yet"}, **kw)
+    tables = next(b for b in res.blocks if b[0] == "Summary-Weekly")[2]
+
+    def count(table, currency=None):
+        t = tables[table]
+        return int(t[t["Currency"].isna() if currency is None else t["Currency"].eq(currency)]
+                   ["Number of Transactions"].iloc[0])
+    return res, count
+
+
+def test_a_pending_invoice_takes_its_currency_from_the_checkout(tmp_path):
+    """13/11/2026: B is USD 1 in IremboPay but RWF 1 on the Ecobank statement: with the checkout's currency it is
+    counted under USD; the statement sheet keeps what the bank wrote; Processed = Notified + Pending + Duplicate."""
+    res, count = _made_up_week(tmp_path / "a", checkout_currency={"886200000002": "USD"})
+    assert count("Pending notifications", "USD") == 1 and count("Pending notifications", "RWF") == 0
+    assert count("Overall processed payments", "USD") == 1 and count("Overall processed payments", "RWF") == 2
+    assert count("Overall processed payments") == 3 == (count("Overall notifications received by Irembo")
+                                                        + count("Pending notifications") + count("Duplicate Payment"))
+    pending = res.sheets["Pending notification"]
+    assert pending["Currency"].tolist() == ["USD"] and pending["Amount"].tolist() == [1]
+    assert pending["Report note"].iloc[0].startswith("Currency from IremboPay's checkout (USD); the bank statement "
+                                                     "says RWF")
+    statement = res.sheets["Ecobank statement"].set_index("invoice_number")
+    assert statement["Currency"]["886200000002"] == "RWF"
+
+    res, count = _made_up_week(tmp_path / "b")                      # no currency from the checkout: as before
+    assert count("Pending notifications", "RWF") == 1 and count("Pending notifications", "USD") == 0
+    assert count("Overall processed payments") == 3 == (count("Overall notifications received by Irembo")
+                                                        + count("Pending notifications") + count("Duplicate Payment"))
+
+
+def test_a_resend_in_the_week_counts_whichever_earlier_statements_are_loaded(tmp_path):
+    """13/11/2026: B was first sent on 20/10 and sent again (same Cba Ref No) on 28/10 and 30/10. The week of 26/10
+    counts it once - the same figures with or without the statement of the earlier week."""
+    again = [("886200000002", 1, 30, "R2")]
+    _, alone = _made_up_week(tmp_path / "a", more=again)
+    _, with_earlier = _made_up_week(tmp_path / "b", more=again + [("886200000002", 1, 20, "R2")])
+    for count in (alone, with_earlier):
+        assert count("Overall processed payments") == 3 and count("Pending notifications") == 1
+        assert count("Overall processed payments") == (count("Overall notifications received by Irembo")
+                                                       + count("Pending notifications") + count("Duplicate Payment"))

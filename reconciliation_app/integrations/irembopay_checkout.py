@@ -15,6 +15,9 @@ The lookups run in a background thread, up to 50 invoices at the same time and a
 Ecobank and BPR every invoice is checked before the run), so the page stays usable. When IremboPay asks to slow down
 (HTTP 429) or is busy (5xx), the lookup waits and tries again (1, 2, then 4 seconds). Each invoice is looked up once
 per browser session.
+
+13/11/2026: for an invoice that can still be paid, IremboPay also gives its currency (Checker.currency). Ecobank's
+report uses it for a credit the payment file does not show as paid (CURRENCY_FROM_CHECKOUT, engine.py).
 """
 from __future__ import annotations
 
@@ -40,9 +43,15 @@ ANSWERS = {"BAD_INVOICES_PAID": "Paid", "BAD_INVOICES_PAYMENT_EXPIRED": "Expired
 
 def check(invoice: str) -> str:
     """One invoice -> one of the answers above (never raises)."""
+    return check_details(invoice)[0]
+
+
+def check_details(invoice: str) -> tuple:
+    """One invoice -> (one of the answers above, its currency). IremboPay gives the currency only for an invoice
+    that can still be paid; "" otherwise. Never raises."""
     invoice = str(invoice).strip()
     if not re.fullmatch(r"[0-9A-Za-z-]{1,40}", invoice):
-        return "Not an IremboPay invoice"
+        return "Not an IremboPay invoice", ""
     req = urllib.request.Request(URL.format(invoice), headers={"Accept": "application/json",
                                                                "User-Agent": "Mozilla/5.0 (Bank Reconciliation)"})
     for wait_s in (*RETRY_WAIT, None):
@@ -58,27 +67,32 @@ def check(invoice: str) -> str:
             continue
         break
     if status is None:
-        return COULD_NOT
+        return COULD_NOT, ""
     if status == 200:
-        return "Open, not paid yet"
+        try:
+            currency = (json.loads(body).get("data") or {}).get("currency") or ""
+        except (ValueError, AttributeError):
+            currency = ""
+        return "Open, not paid yet", str(currency).strip().upper()
     try:
         errors = json.loads(body).get("errors") or []
     except ValueError:
-        return COULD_NOT
+        return COULD_NOT, ""
     for e in errors:
         if e.get("code") in ANSWERS:
-            return ANSWERS[e["code"]]
+            return ANSWERS[e["code"]], ""
     if errors and errors[0].get("detail"):
-        return f"Other: {errors[0]['detail']}"
-    return COULD_NOT
+        return f"Other: {errors[0]['detail']}", ""
+    return COULD_NOT, ""
 
 
 class Checker:
     """The lookups of one browser session: add() queues invoices, a background thread answers them one by one."""
 
-    def __init__(self, lookup=check, pause: float = PAUSE, workers: int = WORKERS):
+    def __init__(self, lookup=check_details, pause: float = PAUSE, workers: int = WORKERS):
         self._lookup, self._pause, self._workers = lookup, pause, workers
         self._results: dict[str, str] = {}
+        self._currency: dict[str, str] = {}
         self._queue: list[str] = []
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
@@ -117,9 +131,13 @@ class Checker:
                     for future in done:
                         inv = running.pop(future)
                         try:
-                            self._results[inv] = future.result()
+                            found = future.result()
                         except Exception:
-                            self._results[inv] = COULD_NOT
+                            found = COULD_NOT
+                        answer, currency = found if isinstance(found, tuple) else (found, "")
+                        self._results[inv] = answer
+                        if currency:
+                            self._currency[inv] = currency
                         if inv in self._queue:
                             self._queue.remove(inv)
 
@@ -129,6 +147,11 @@ class Checker:
             return NO_INVOICE
         with self._lock:
             return self._results.get(invoice, CHECKING)
+
+    def currency(self, invoice) -> str:
+        """The invoice's currency as IremboPay gave it ("" when it did not: only an open invoice has one)."""
+        with self._lock:
+            return self._currency.get(str(invoice).strip(), "")
 
     def progress(self, invoices) -> tuple[int, int, int]:
         """(checked, total, could not check) for these invoices (rows without an invoice number are left out)."""

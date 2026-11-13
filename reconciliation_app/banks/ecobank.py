@@ -13,8 +13,12 @@ The Ecobank statement ("IREMBO PAY" export) is a log of payment REQUESTS, not of
 The report follows the old tool
     - processed (26/10/2026) = the requests Ecobank answered SUCCESS (Cba Rsp Code 000), by Request Date, each
       invoice once (a second SUCCESS = debited twice: Exception Resolution)
+    - re-sends (13/11/2026): the same invoice with the same Cba Ref No counts once in the period; a debit sent
+      again in a later week counts in that week too, whichever earlier statements are loaded
     - received = in IremboPay, paid (paid_at) through ECOBANK; another provider = Duplicate Payment
     - every invoice is looked up on IremboPay's checkout before the reconciliation (CHECKOUT_ALL)
+    - currency (13/11/2026): a credit not paid in the payment file takes the invoice's currency from the checkout
+      when it gives one (an invoice that can still be paid); the statement sheet keeps the bank's Ccy
     - "Duplicate Payment" table = paid with another channel (each invoice once)
 
 CONTENTS (same numbers as im.py; section 7 exists only for Ecobank)
@@ -88,6 +92,9 @@ PAYMENT_OPTIONAL_COLUMNS = ["created_at"]
 NO_INVOICE_PENDING_REVIEWED = True   # a credit with no invoice number: counted as Pending straight away, but
                                      # (unlike BPR's NO_INVOICE_PENDING) still shown in Exception Resolution
                                      # for a person to check
+CURRENCY_FROM_CHECKOUT = True      # 13/11/2026: a credit not paid in the payment file (pending, or not in it) takes
+                                   # the invoice's currency from IremboPay's checkout, not the Ccy of the statement
+                                   # (Ecobank sends some USD invoices as RWF); the report says so in its note
 
 
 # the review recognises an invoice by currency | Request Date | invoice: the Cba Ref No is Ecobank's own number, it is
@@ -195,8 +202,9 @@ def one_row_per_invoice(rows: pd.DataFrame, payments: pd.DataFrame) -> pd.DataFr
     first attempt (not processed). Attempts = how many times Ecobank tried the invoice. A missing Ecobank amount is
     taken from IremboPay (as in the old tool).
     26/10/2026: a SUCCESS with the same invoice AND the same Cba Ref No as an earlier one is the same debit sent
-    again by Ecobank (a resend), not a second debit: only the earliest is kept. Only a different Cba Ref No is an
-    extra debit."""
+    again by Ecobank (a re-send), not a second debit. Only a different Cba Ref No is an extra debit.
+    13/11/2026: the re-sends are kept here and counted once inside the period (in_period), so the result no longer
+    depends on which earlier statements are loaded."""
     rows = rows.assign(Attempts=rows.groupby("invoice_number")["invoice_number"].transform("size"))
     irembo_amount = payments.drop_duplicates("invoice_number").set_index("invoice_number")["amount"]
     rows["Amount"] = rows["Amount"].fillna(rows["invoice_number"].map(irembo_amount))
@@ -204,9 +212,6 @@ def one_row_per_invoice(rows: pd.DataFrame, payments: pd.DataFrame) -> pd.DataFr
     has_ok = rows["invoice_number"].map(ok.groupby(rows["invoice_number"]).any())
     rows = rows.sort_values("Request Date", kind="stable")
     success = rows[ok[rows.index]]
-    ref = success["Cba Ref No"].fillna("").astype(str).str.strip()
-    resend = ref.ne("") & success.assign(_ref=ref).duplicated(subset=["invoice_number", "_ref"], keep="first")
-    success = success[~resend]
     first_try = rows[~has_ok[rows.index].astype(bool)].drop_duplicates(subset="invoice_number")
     return pd.concat([success, first_try]).sort_values("Request Date", kind="stable")
 
@@ -282,8 +287,15 @@ def review_reasons(rows: pd.DataFrame) -> pd.Series:
 # 7. WHICH ROWS GO IN THE PERIOD AND IN EACH TABLE (I&M uses the engine's default: by payment date)
 # =====================================================================================================================
 def in_period(rows, attempts, start, end) -> pd.Series:
-    """26/10/2026: a request belongs to the period of its Request Date (the bank date, Kigali time)."""
-    return (rows["Request Date"] >= start) & (rows["Request Date"] < end)
+    """26/10/2026: a request belongs to the period of its Request Date (the bank date, Kigali time).
+    13/11/2026 (decided by the team): a re-send (a SUCCESS with the same invoice and the same Cba Ref No) counts once
+    in the period, the earliest one in it. Only the rows of the period are compared: a debit first sent in an earlier
+    week and sent again this week counts in this week too."""
+    inside = (rows["Request Date"] >= start) & (rows["Request Date"] < end)
+    ref = rows["Cba Ref No"].fillna("").astype(str).str.strip()
+    sent = rows[inside & is_success(rows) & ref.ne("")].assign(_ref=ref).sort_values("Request Date", kind="stable")
+    again = sent.index[sent.duplicated(subset=["invoice_number", "_ref"], keep="first")]
+    return inside & ~rows.index.isin(again)
 
 
 def tables(rows, attempts, a, b) -> dict:

@@ -57,6 +57,16 @@ def test_a_value_that_is_not_an_invoice_number_is_not_sent(monkeypatch):
     assert C.check("../../etc") == "Not an IremboPay invoice"
 
 
+def test_an_invoice_that_can_still_be_paid_also_gives_its_currency(monkeypatch):
+    """13/11/2026: IremboPay gives the currency of an open invoice; a paid or expired one has none."""
+    monkeypatch.setattr(C.urllib.request, "urlopen",
+                        fake_http(200, {"success": True, "data": {"currency": "usd", "amount": 1.0}}))
+    assert C.check_details("886213126169") == ("Open, not paid yet", "USD")
+    monkeypatch.setattr(C.urllib.request, "urlopen",
+                        fake_http(400, {"success": False, "errors": [{"code": "BAD_INVOICES_PAID", "detail": "x"}]}))
+    assert C.check_details("886213126169") == ("Paid", "")
+
+
 def wait(checker, invoices, seconds=5):
     end = time.time() + seconds
     while checker.progress(invoices)[0] < len(invoices) and time.time() < end:
@@ -120,3 +130,13 @@ def test_rows_without_an_invoice_number_are_not_looked_up_and_do_not_block_the_p
     assert checker.progress(invoices) == (1, 1, 0)                    # done: the blank rows are not counted
     assert checker.answer("") == C.NO_INVOICE and checker.answer("nan") == C.NO_INVOICE
     assert calls == ["886213126169"]
+
+
+def test_checker_keeps_the_currency_of_an_open_invoice():
+    """13/11/2026: a lookup that answers (answer, currency); one that answers only the answer still works."""
+    checker = C.Checker(lookup=lambda inv: ("Open, not paid yet", "USD") if inv == "886213126169" else "Paid", pause=0)
+    invoices = ["886213126169", "886213126170"]
+    checker.add(invoices)
+    wait(checker, invoices)
+    assert checker.answer("886213126169") == "Open, not paid yet" and checker.currency("886213126169") == "USD"
+    assert checker.answer("886213126170") == "Paid" and checker.currency("886213126170") == ""

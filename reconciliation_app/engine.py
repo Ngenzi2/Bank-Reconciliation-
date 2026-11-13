@@ -206,6 +206,15 @@ def checkout_notes(rows: pd.DataFrame, whole: dict) -> pd.Series:
     return notes
 
 
+def currency_from_checkout(rows: pd.DataFrame, currencies: dict) -> pd.Series:
+    """13/11/2026 (CURRENCY_FROM_CHECKOUT, Ecobank): the Currency of each row - the invoice's own, as IremboPay's
+    checkout gives it, for a credit the payment file does not show as paid (pending, or not in the file); the
+    statement's otherwise. The checkout gives a currency only for an invoice that can still be paid."""
+    own = rows["invoice_number"].map(lambda i: currencies.get(str(i), "") if pd.notna(i) else "").fillna("")
+    use = own.astype(str).ne("") & rows["paid_at"].isna()
+    return rows["Currency"].where(~use, own)
+
+
 TABLE_NAMES = {"received": "Notification received", "pending": "Pending notification",
                "duplicate": "Duplicate payment"}
 
@@ -937,7 +946,8 @@ def apply_review(merged: pd.DataFrame, not_found: pd.DataFrame, payments: pd.Dat
     # NO_INVOICE_PENDING, which removes it from review entirely) but is counted as Pending in the meantime, not
     # left out of every table while nobody has looked at it yet - so it does not block the run either
     if option(bank, "NO_INVOICE_PENDING_REVIEWED", False):
-        no_invoice_keys = set(review.loc[~done & ~review["invoice_number"].map(has_invoice_number), "_key"])
+        real = review["invoice_number"].map(has_invoice_number).astype(bool)
+        no_invoice_keys = set(review.loc[~done & ~real, "_key"])
     else:
         no_invoice_keys = set()
     waiting = merged["_key"].isin(set(review.loc[~done, "_key"]) - no_invoice_keys) & current & to_review
@@ -1266,12 +1276,15 @@ class RunResult:
 
 def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare: bool = False,
         require_review: bool = True, bank=None, report_dir: Path | None = None,
-        previous_report: Path | None = None, checkout: dict | None = None) -> RunResult:
+        previous_report: Path | None = None, checkout: dict | None = None,
+        checkout_currency: dict | None = None) -> RunResult:
     """Reconcile the uploaded files for one bank and period, and write the report.
     report_dir: where the Excel is written (default output/; the app gives a temporary folder).
     previous_report: the report compared with (default: looked for in output/).
     checkout: {invoice: IremboPay checkout answer} of every invoice, looked up before the run (banks with
     CHECKOUT_ALL: Ecobank, BPR); kept in the report's Payment details ("IremboPay check").
+    checkout_currency: {invoice: currency} the same lookup gave (open invoices only); used by banks with
+    CURRENCY_FROM_CHECKOUT (Ecobank) for a credit not paid in the payment file.
     Steps: A payments  B statement  C match  D review  E SLA  F summary tables  G totals check  H comparison
     I report + run log."""
     bank = get_bank(bank)
@@ -1419,6 +1432,9 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
     has_invoice = rep["invoice_number"].notna()
     if checkout is not None:                               # what IremboPay's checkout said, before the run
         rep["IremboPay check"] = rep["invoice_number"].map(lambda i: checkout.get(str(i), "") if pd.notna(i) else "")
+    bank_currency = rep["Currency"].copy()                 # as the statement has it (kept in the statement sheet)
+    if checkout_currency and option(bank, "CURRENCY_FROM_CHECKOUT", False):
+        rep["Currency"] = currency_from_checkout(rep, checkout_currency)
     rep["times_on_statement"] = rep.groupby("invoice_number")["invoice_number"].transform("size")
     # the invoice is the unique identifier: an invoice credited more than once counts once (the credit IremboPay
     # recorded when the bank says which one, otherwise the first); the others are extra credits
@@ -1626,10 +1642,13 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
     whole = table_rows(start, end)
     rep["Report note"] = table_notes(rep, whole, bank)          # an invoice credited more than once: why, where
     rep["Report note"] = checkout_notes(rep, whole)              # pending, but paid in IremboPay since (checkout)
+    for i in rep.index[bank_currency.ne(rep["Currency"])]:       # 13/11/2026: the currency is IremboPay's own
+        why = f"Currency from IremboPay's checkout ({rep.at[i, 'Currency']}); the bank statement says {bank_currency[i]}"
+        rep.at[i, "Report note"] = f"{why}. {rep.at[i, 'Report note']}" if rep.at[i, "Report note"] else why
     detail = rep[[col for col in detail_cols if col in rep.columns]]
     sheets = {"Pending notification": detail[whole["pending"]].sort_values(paid_on),
               "Duplicate payment other channel": detail[whole["duplicate"]].sort_values(["payment_provider", paid_on]),
-              bank.STATEMENT_SHEET: rep[statement_cols + ["invoice_number"]
+              bank.STATEMENT_SHEET: rep.assign(Currency=bank_currency)[statement_cols + ["invoice_number"]
                                         + [c for c in option(bank, "STATEMENT_LINK_COLUMNS", []) if c in rep]
                                         + ["Source file"]]}
     if hasattr(bank, "extra_sheets"):
