@@ -310,3 +310,17 @@ def test_the_bank_cards_excel_is_ranked_and_styled():
                                                               [2, "I&M Bank", 99.85], [3, "Ecobank", 99.08]]
     assert ws["C5"].number_format == "0.00" and ws["B6"].font.b and ws["B6"].alignment.horizontal == "center"
     assert ws.max_row == 7                                               # no "All banks together" row
+
+
+def test_three_cards_shown_and_the_others_behind_the_arrows():
+    from services import dashboard_view as dv
+    now = {"processed": 100, "received": 98, "sla": 2, "pending": 1, "amounts": {"RWF": {"received": 5000.0}}}
+    fu = {"followed": True, "unit": "month", "open_money": "RWF 0",
+          "summary": {"total": 0, "resolved": 0, "open": 0, "overdue": 0, "by_type": {}}}
+    html = dv.kpi_cards(now, None, fu, per_view=3)                   # 6 cards: 2 pages of 3
+    assert html.count('class="car-i"') == 6 and html.count('type="radio"') == 2
+    assert html.count('title="Next"') == 1 and html.count('title="Previous"') == 1
+    assert "translateX(calc(-3 * (100% + 13px) / 3))" in html        # page 2 starts at the 4th card
+    every = dv.kpi_cards(now, None, fu)                              # the page's PDF: every card, no arrows
+    assert 'class="car-i"' not in every and every.count('class="dk-c"') == 6
+    assert 'class="car-i"' not in dv.kpi_cards(now, None, None, per_view=5)  # 5 cards fit: no arrows

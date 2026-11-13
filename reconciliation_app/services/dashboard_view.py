@@ -11,6 +11,7 @@ results that are good, red / amber for problems only.
 from __future__ import annotations
 
 import base64
+import hashlib
 import math
 from html import escape
 
@@ -217,9 +218,10 @@ def _arrow(now, before, good_up=True, points=False, fmt=lambda v: f"{v:,}"):
     return f'<span class="{"dk-g" if good else "dk-r"}">{"↗" if up else "↘"} {txt}</span> from {fmt(before)}'
 
 
-def kpi_cards(now: dict, before: dict | None, fu: dict | None = None) -> str:
+def kpi_cards(now: dict, before: dict | None, fu: dict | None = None, per_view: int | None = None) -> str:
     """AMOUNT (received; RWF and USD each in full, never added) · RATE (received notification ÷ processed
-    transaction) · TRANSACTIONS (processed) · SLA (% violated). With a comparison: the change; else what it is."""
+    transaction) · TRANSACTIONS (processed) · SLA (% violated). With a comparison: the change; else what it is.
+    per_view (12/11/2026): show that many cards, the others behind the ‹ › arrows (the page's PDF: every card)."""
     rec_amt = lambda t: {c: a.get("received", 0.0) for c, a in (t or {}).get("amounts", {}).items()}
     amt, amt_b = rec_amt(now), (rec_amt(before) if before else None)
     curs = [c for c in ("RWF", "USD") if c in amt] + [c for c in amt if c not in ("RWF", "USD")]
@@ -262,25 +264,55 @@ def kpi_cards(now: dict, before: dict | None, fu: dict | None = None) -> str:
             s = fu["summary"]
             # 30/10/2026: the money still to follow up is shown on the FOLLOW-UP card only, not on AMOUNT
             # 03/11/2026: no "% after follow-up" line on RECEIVED; the card shows the report's own rate only
-            red = " dk-red" if s["overdue"] else ""
+            # 12/11/2026: red when less than half is checked (not when an item is overdue)
+            red = " dk-red" if s["resolved"] * 2 < s["total"] else ""
             if s["total"]:
                 # 30/10/2026: "4 / 75" then "Checked", the open items per type, and the money still open
                 rows = "".join(f'<div><span>{t}</span><b>{s["by_type"][t][0]:,}</b></div>'
-                               for t in ("Pending", "Paid twice"))
+                               for t in fu.get("types", ("Pending", "Paid twice")))
                 sub = (f'Checked<div class="dk-fu">{rows}</div>'
                        + (f'{escape(fu["open_money"])} remaining' if s["open"] else "Nothing left to check"))
                 cards.append(("FOLLOW-UP", "fu", f'<span class="{red.strip()}">{s["resolved"]:,} / {s["total"]:,}'
                                                  f'</span>', sub))
             else:
                 cards.append(("FOLLOW-UP", "fu", '<span class="dk-msg">Nothing to check</span>',
-                              "No pending or paid-twice payment after the report"))
+                              "No pending payment after the report" if fu.get("types") == ("Pending",)
+                              else "No pending or paid-twice payment after the report"))
         else:
             cards.append(("FOLLOW-UP", "fu", f'<span class="dk-msg">Not tracked for this {escape(fu.get("unit", "period"))}</span>',
                           "We track what happened to pending and paid-twice payments after the report"))
-    return (f'{STYLE_D}<div class="dk" style="grid-template-columns:repeat({len(cards)},minmax(0,1fr))">' + "".join(
-        f'<div class="dk-c"><div class="dk-h"><span>{label}</span>{KPI_ICON[ic]}</div>'
-        f'<div class="dk-v{" dk-v2" if "<br>" in big else ""}">{big}</div><div class="dk-s">{sub}</div></div>'
-        for label, ic, big, sub in cards) + "</div>")
+    html = ["".join(f'<div class="dk-c"><div class="dk-h"><span>{label}</span>{KPI_ICON[ic]}</div>'
+                    f'<div class="dk-v{" dk-v2" if "<br>" in big else ""}">{big}</div><div class="dk-s">{sub}</div></div>')
+            for label, ic, big, sub in cards]
+    if not per_view or len(cards) <= per_view:
+        return (f'{STYLE_D}<div class="dk" style="grid-template-columns:repeat({len(cards)},minmax(0,1fr))">'
+                + "".join(html) + "</div>")
+    return STYLE_D + carousel(html, per_view)
+
+
+def carousel(items: list, per_view: int) -> str:
+    """12/11/2026: `per_view` cards side by side, the next ones behind the ‹ › arrows, with dots for the pages. No
+    script (the page's HTML runs none): each page is a radio button, the arrows and the dots are its labels."""
+    n = len(items)
+    starts = sorted({min(i, n - per_view) for i in range(0, n, per_view)})        # the first card of each page
+    key = "car" + hashlib.md5("".join(items).encode()).hexdigest()[:8]     # its own names on the page
+    radios = "".join(f'<input type="radio" name="{key}" id="{key}-{p}" class="car-r"{" checked" if p == 0 else ""}>'
+                     for p in range(len(starts)))
+    css = "".join(
+        f"#{key}-{p}:checked~.car-v .car-t{{transform:translateX(calc(-{s} * (100% + 13px) / {per_view}))}}"
+        f"#{key}-{p}:checked~.car-n .car-p{p}{{display:flex}}"
+        f"#{key}-{p}:checked~.car-d label[for={key}-{p}]{{background:{TEAL}}}"
+        for p, s in enumerate(starts))
+    arrows = "".join(
+        (f'<label for="{key}-{p - 1}" class="car-a car-l car-p{p}" title="Previous">‹</label>' if p else "")
+        + (f'<label for="{key}-{p + 1}" class="car-a car-rt car-p{p}" title="Next">›</label>' if p < len(starts) - 1 else "")
+        for p in range(len(starts)))
+    dots = "".join(f'<label for="{key}-{p}" title="Cards {s + 1}–{s + per_view} of {n}"></label>'
+                   for p, s in enumerate(starts))
+    track = "".join(f'<div class="car-i" style="flex:0 0 calc((100% - {13 * (per_view - 1)}px) / {per_view})">{c}</div>'
+                    for c in items)
+    return (f'<style>{css}</style><div class="car">{radios}<div class="car-v"><div class="car-t">{track}</div></div>'
+            f'<div class="car-n">{arrows}</div><div class="car-d">{dots}</div></div>')
 
 
 def lines(labels: list, series: list, partial: list | None = None, fill: bool = False) -> str:
@@ -664,8 +696,9 @@ def table_html(df: pd.DataFrame, bold: bool = False, decimals: int | None = None
         f'<td class="{"n" if isinstance(v, (int, float)) else ""}">'
         f'{escape(f"{v:,.{decimals}f}" if decimals is not None and isinstance(v, float) else f"{v:,.2f}" if isinstance(v, float) and not float(v).is_integer() else f"{v:,.0f}" if isinstance(v, (int, float)) else str(v))}</td>'
         for v in row) + "</tr>" for row in df.itertuples(index=False))
-    return (f'{STYLE_D}<table class="dt{" dt-b" if bold else ""}"><thead><tr>{head}</tr></thead><tbody>{body}</tbody>'
-            '</table>')
+    # 12/11/2026: in a frame as wide as its card, scrolled sideways when the table is wider (the Bank column stays)
+    return (f'{STYLE_D}<div class="dt-w"><table class="dt{" dt-b" if bold else ""}"><thead><tr>{head}</tr></thead>'
+            f'<tbody>{body}</tbody></table></div>')
 
 
 def card_page(title: str, sub: str, scope: str, period: str, body: str, made: str) -> str:
@@ -719,7 +752,19 @@ STYLE_D = f'''<style>
 .dt th{{text-align:left;font-weight:800;color:{MUT};border-bottom:1px solid #E1EEF0;padding:7px 8px}}
 .dt td{{border-bottom:1px solid #F0F4F5;padding:7px 8px}} .dt-b td{{font-weight:800}} .dt td.n{{text-align:right;font-variant-numeric:tabular-nums}}
 .dt th:not(:first-child){{text-align:right}} .dt th.g{{text-align:center;border-bottom:1px solid #C9DADD}}
+.dt-w{{max-width:100%;overflow-x:auto}} .dt td{{white-space:nowrap}}
+.dt-w .dt thead tr:first-child th:first-child,.dt-w .dt td:first-child{{position:sticky;left:0;background:#fff;z-index:1;box-shadow:inset -1px 0 0 #E1EEF0}}
+@media print{{.dt-w{{overflow:visible}}}}
 @media (max-width:1100px){{.dk{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}
+.car{{position:relative;font-family:"Nunito","Segoe UI",system-ui,sans-serif;color:{TEAL}}} .car-r{{display:none}}
+.car-v{{overflow:hidden;padding:2px 1px 4px}} .car-t{{display:flex;gap:13px;transition:transform .35s ease}}
+.car-i{{display:flex;min-width:0}} .car-i>.dk-c{{flex:1}}
+.car-a{{display:none;position:absolute;top:50%;transform:translateY(-60%);width:30px;height:30px;border-radius:50%;
+border:1px solid #D4E3E6;align-items:center;justify-content:center;font-size:22px;line-height:1;cursor:pointer;
+color:{TEAL};background:#fff;box-shadow:0 1px 3px rgba(18,50,57,.12);user-select:none}} .car-a:hover{{border-color:{TEAL}}}
+.car-l{{left:-15px}} .car-rt{{right:-15px}} .car-a{{z-index:2}}
+.car-d{{display:flex;justify-content:center;gap:7px;margin-top:9px}}
+.car-d label{{display:flex;width:8px;height:8px;border-radius:50%;background:#D4E3E6;cursor:pointer}}
 </style>'''
 
 

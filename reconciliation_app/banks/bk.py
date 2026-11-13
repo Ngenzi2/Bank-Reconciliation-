@@ -49,7 +49,8 @@ Matching a Transaction with IremboPay (the notebook's two steps)
     2. otherwise the invoice number is cut from the Narration, by Source (INVOICE_RULES); only a 12-digit number is
        kept (the notebook kept any 12 characters)
     Fix 3: a Transaction still not found goes to Exception Resolution (the notebook counted it as "other channels"),
-    except one with no invoice number at all: never reviewed, straight to Pending notification (05/11/2026).
+    except one with no invoice number at all: never reviewed, straight to "Not found (BK)" (11/11/2026; from 05/11
+    to 11/11 it went to Pending notification).
 
 The figures (Transactions only, except Processed)
     Processed transaction     every credit whose ValueDate is in the period (all types), each invoice once
@@ -57,7 +58,7 @@ The figures (Transactions only, except Processed)
                               fix 4: provider BK, or channel BANK_TRANSFER_BK (IremboPay records some BK transfers
                               under provider IREMBO)
     SLA violated              received, and the paid_at day is not the ValueDate day (0 days allowed by default)
-    Pending notification      a Transaction whose invoice is NEW in IremboPay, or one with no invoice number at all
+    Pending notification      a Transaction whose invoice is NEW in IremboPay
     Paid with other channels  a Transaction paid with another provider, payment_status not NEW
     An invoice credited twice: one credit counts (the one IremboPay recorded, else the first), like the other banks.
 
@@ -90,6 +91,7 @@ STATEMENT_SHEET = "BK statement"
 # the 5 Irembo collection accounts and their currency (the only accounts reconciled; 03/11/2026)
 ACCOUNTS = {"100081756273": "RWF", "100011044926": "RWF", "100081756467": "USD",
             "100081756548": "EUR", "100081756621": "GBP"}
+OPTIONAL_ACCOUNTS = {"100081756621"}     # 11/11/2026: GBP - no file only warns (the run is not stopped)
 
 COMPLETED_STATUSES = {"SETTLED", "PAID", "PAYOUT_INITIATED"}     # same as I&M
 PENDING_STATUSES = {"NEW"}               # received = every status but NEW (the notebook's rule)
@@ -309,7 +311,9 @@ _INVOICE = re.compile(r"^\d{12}$")
 
 def narration_invoice(rows: pd.DataFrame):
     """(invoice, rule) cut from the Narration, by Source (the notebook's 3 ways; MTN is cut the third way):
-        Bill payment sources (SLASH_SOURCES)  after the last "/", the first 12 characters
+        Bill payment sources (SLASH_SOURCES)  after the last "/", the first 12 characters; with no "/", after the
+                                              first "|" (11/11/2026: BK's October 2026 files: "BK YACU BILL PAYMENT
+                                              IREMBO | 886273324612 Irembo bill"). Sources: capitals not compared.
         Branch Teller                         after the last ":", the first 12 characters
         MTN Irembo payments                   after the first ":", spaces removed, the last 12 characters
     Only a 12-digit number is kept."""
@@ -317,9 +321,13 @@ def narration_invoice(rows: pd.DataFrame):
     narration = rows["Narration"].fillna("").astype(str)
     inv = pd.Series("", index=rows.index, dtype=object)
     rule = pd.Series("", index=rows.index, dtype=object)
-    slash = source.isin(SLASH_SOURCES) & narration.str.contains("/", regex=False)
+    bill = source.str.upper().isin({x.upper() for x in SLASH_SOURCES})
+    slash = bill & narration.str.contains("/", regex=False)
     inv[slash] = narration[slash].str.rsplit("/", n=1).str[1].str.strip().str[:12]
     rule[slash] = "Narration (after the last /)"
+    pipe = bill & ~slash & narration.str.contains("|", regex=False)          # 11/11/2026
+    inv[pipe] = narration[pipe].str.split("|", n=1).str[1].str.strip().str[:12]
+    rule[pipe] = "Narration (after |)"
     branch = source.eq("Branch Teller") & narration.str.contains(":", regex=False)
     inv[branch] = narration[branch].str.rsplit(":", n=1).str[1].str.strip().str[:12]
     rule[branch] = "Narration (after the last :)"
@@ -403,11 +411,10 @@ def received(rows: pd.DataFrame) -> pd.Series:
 
 
 def pending(rows: pd.DataFrame) -> pd.Series:
-    """Pending notification: a Transaction whose invoice is NEW in IremboPay, or a bill payment with no invoice number
-    at all (05/11/2026: the money is on the statement, IremboPay has no record of it - its notification is awaited)."""
+    """Pending notification: a Transaction whose invoice is NEW in IremboPay (11/11/2026: a bill payment with no
+    invoice number is not pending any more: it is in "Not found (BK)", see counted_not_reviewed)."""
     found = rows["found_in_irembopay"].astype(bool)
-    return _transaction(rows) & ((found & _status(rows).isin(PENDING_STATUSES))
-                                 | (~found & rows["invoice_number"].isna()))
+    return _transaction(rows) & found & _status(rows).isin(PENDING_STATUSES)
 
 
 def duplicate(rows: pd.DataFrame) -> pd.Series:
@@ -422,14 +429,14 @@ def in_period(rows, attempts, start, end) -> pd.Series:
     return (rows["CreditAmt"] > 0) & rows["ValueDate"].between(start, end, inclusive="left")
 
 
-NO_INVOICE = "Pending notification (no invoice number)"
+NO_INVOICE = "Not found (no invoice number)"
 
 
 def counted_not_reviewed(rows: pd.DataFrame) -> pd.Series:
     """(engine hook) Why a credit is counted in Processed but never matched nor reviewed ("" = handled normally):
     card payments, POS, bank transfers and their charges are not Irembo bill payments; a bill payment with no
     invoice number (nothing after "IREMBO :", reference not in IremboPay) is never reviewed (04/11/2026: nobody can
-    look it up) and goes straight to Pending notification (05/11/2026, see pending)."""
+    look it up) and goes straight to "Not found (BK)" (11/11/2026): counted in Processed, in no other table."""
     t = rows[TYPE].fillna("Transaction").astype(str)
     out = ("Not an Irembo bill payment (" + t + ")").where(t.ne("Transaction"), "")
     out[t.eq("Transaction") & rows["invoice_number"].isna()] = NO_INVOICE
@@ -445,7 +452,7 @@ def row_result(rows: pd.DataFrame) -> pd.Series:
         Second credit        another credit of an invoice already counted (not counted again)
         Not found            a bill payment whose invoice is not in IremboPay's file (decided in Exception Resolution;
                              what was decided is in review_status)
-        No invoice number    a bill payment with no invoice at all (straight to Pending notification)
+        No invoice number    a bill payment with no invoice at all (straight to Not found (BK), never reviewed)
         Not a bill payment   a card payment, POS, bank transfer, charge or cash deposit (counted, not checked)"""
     lost = rows["originally_not_found"] if "originally_not_found" in rows else ~rows["found_in_irembopay"]
     out = pd.Series("Matched", index=rows.index, dtype=object)
@@ -477,7 +484,8 @@ def review_reasons(rows: pd.DataFrame) -> pd.Series:
 
 def check_files(statements: list) -> tuple:
     """(days covered, lines, blocking): the files of each of the 5 accounts. An account with no file blocks the run
-    (the notebook always reconciles the 5); a day with no file only warns (a day may have had no movement)."""
+    (the notebook always reconciles the 5), but GBP (OPTIONAL_ACCOUNTS) only warns; a day with no file only warns (a
+    day may have had no movement)."""
     covered, lines, blocking = set(), [], []
     per_account = {}
     for f in statements:
@@ -491,8 +499,10 @@ def check_files(statements: list) -> tuple:
     for account, currency in ACCOUNTS.items():
         label = f"Account {account} ({currency})"
         if account not in per_account:
-            lines.append((False, f"{label}: no file added → upload its statement"))
-            blocking.append(f"{label}: no file added.")
+            lines.append((False, f"{label}: no file added → upload its statement"
+                                 + (" (optional: the report is made without it)" if account in OPTIONAL_ACCOUNTS else "")))
+            if account not in OPTIONAL_ACCOUNTS:
+                blocking.append(f"{label}: no file added.")
             continue
         gaps = sorted(every_day - per_account[account])
         if gaps:
@@ -526,7 +536,8 @@ def extra_sheets(rep, attempts, start, end, whole) -> dict:
         SLA violated (BK)    the SLA violated of the period, with Time diff and Charge applicable (notebook)
         Bank transfer (BK)   the Bank transfer and Bank transfer Charges credits of the period
         Other credits (BK)   every credit that is not an Irembo bill payment (counted in Processed, not checked)
-        Not found (BK)       the Transactions not found in IremboPay, with what the review decided
+        Not found (BK)       the Transactions not found in IremboPay, with what the review decided, and the ones
+                             with no invoice number (Reason "Not found (no invoice number)", never reviewed)
         Debits (BK)          the debits of the period, refunds included (not counted: not payments)"""
     stmt = ["Currency", "AccountNumber", "BookingDate", "ValueDate", "ProcessingDateTime", "Source", "OurReference",
             "Narration", "CreditAmt", TYPE]
@@ -537,10 +548,10 @@ def extra_sheets(rep, attempts, start, end, whole) -> dict:
                 "payment_channel", "name", "ValueDate", "paid_at", "Time diff", "Charge applicable"]
     others = rep[rep[TYPE].ne("Transaction")]
     transfers = others[others[TYPE].isin(["Bank transfer", "Bank transfer Charges"])]
-    lost = rep[_transaction(rep) & rep.get("originally_not_found", ~rep["found_in_irembopay"]).astype(bool)
-               & rep["invoice_number"].notna()]            # no invoice number: in Pending notification (05/11/2026)
+    # 11/11/2026: the ones with no invoice number too (never reviewed; Reason "Not found (no invoice number)")
+    lost = rep[_transaction(rep) & rep.get("originally_not_found", ~rep["found_in_irembopay"]).astype(bool)]
     lost_cols = stmt + ["invoice_number", FOUND_BY, "found_in_irembopay", "payment_status", "payment_provider",
-                        "review_status", "review_comment", "Source file"]
+                        "review_status", "review_comment", "Reason", "Source file"]
     debit = attempts[(attempts["CreditAmt"] <= 0) & attempts["ValueDate"].between(start, end, inclusive="left")].copy()
     debit[TYPE] = debit[TYPE].where(debit[TYPE].ne("Transaction"), "Debit")      # money out, not a bill payment
     debit_cols = ["Currency", "AccountNumber", "BookingDate", "ValueDate", "ProcessingDateTime", "Source",

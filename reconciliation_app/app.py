@@ -44,6 +44,7 @@ import re
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 from pathlib import Path
 
 import pandas as pd
@@ -60,7 +61,7 @@ APP_DIR = Path(__file__).resolve().parent
 # integrations/ and config.py are not reloaded: a connected Drive client and its error class must stay the same.
 RELOADED = ["services.app_settings", "pdf_report", "integrations.irembopay_checkout", "integrations.slack", "services.session_files",
             "services.report_history", "services.dashboard", "services.dashboard_view", "services.pay_files", "services.slack_message",
-            "services.facts_cache", "services.followup"]
+            "services.facts_cache", "services.report_summary", "services.followup"]
 
 
 def _code_mtime():
@@ -97,7 +98,7 @@ from integrations import google_drive
 from integrations.google_drive import DriveClient, DriveError
 from integrations import irembopay_checkout, slack
 from services import (app_settings, dashboard, dashboard_view, drive_statements, facts_cache, folder_picker,
-                      friendly, followup, pay_files, report_history, slack_message)
+                      friendly, followup, pay_files, report_history, report_summary, slack_message)
 from services.session_files import SessionFolder
 
 
@@ -1207,7 +1208,8 @@ def auto_delivery(res, mem):
         try:
             existing = report_history.existing_reports(client, root, bank, period)
             results = report_history.save_report(client, root, bank, period, files,
-                                                 "replace" if existing else "new", existing, only)
+                                                 "replace" if existing else "new", existing, only,
+                                                 session=state.session_folder)
         except DriveError as err:
             results = [report_history.SaveResult(f"{report_history.report_stem(bank, period)}.{ext}", False,
                                                  error=str(err)) for ext in files]
@@ -1327,7 +1329,8 @@ def save_to_drive_card(mem, skey="drive_save"):
 
     def upload(mode, existing, only=None):
         with irembo_loading("Saving to Google Drive…"):
-            new = report_history.save_report(client, root, bank, period, files, mode, existing, only)
+            new = report_history.save_report(client, root, bank, period, files, mode, existing, only,
+                                             session=state.session_folder)
         results = {r.name: r for r in status.get("results", [])}
         results.update({r.name: r for r in new})
         state.history_index = None                      # Report History lists Drive again
@@ -2097,7 +2100,8 @@ def dashboard_facts(client, root):
     """The facts of every monthly report on Drive (first version) -> (facts to use, [problems]). Each report's facts
     are kept for the session and on this computer (services/facts_cache.py, output/.dashboard_facts.pkl, keyed by the
     report's Drive ID and last-modified date): only a new or replaced report is downloaded and read again; several
-    are downloaded at the same time."""
+    are downloaded at the same time. 11/11/2026: a report with its summary file (services/report_summary.py, a few
+    KB) is read from it; the others are read from their Excel and their summary is written (next time: fast)."""
     cached = state.get("history_index")
     if not cached or cached[0] != root:
         with irembo_loading("Reading the reports on Google Drive…", "Reconciliation Reports"):
@@ -2115,22 +2119,40 @@ def dashboard_facts(client, root):
             if key(r) in stored:
                 cache[key(r)] = facts_cache.attach(stored[key(r)], r)
         todo = [r for r in todo if key(r) not in cache]
-    if todo:                                             # 2. the others: downloaded together, then read
+    found, fresh = {}, {}
+    if todo:                                             # 2. their summary files on Drive (a few KB each)
+        summaries = {(f.folder, f.name): f for f in state.history_index[1].others
+                     if f.name.endswith(report_summary.SUFFIX)}
+        found = {r.file_id: summaries[(r.folder, report_summary.name_for(r.name))] for r in todo
+                 if (r.folder, report_summary.name_for(r.name)) in summaries}
+        if found:
+            with irembo_loading(f"Reading {len(found)} report summar{'ies' if len(found) > 1 else 'y'} from Google "
+                                "Drive…"):
+                small = report_history.download_many(client, [SimpleNamespace(file_id=f.id) for f in found.values()])
+            for r in todo:
+                if r.file_id in found:
+                    facts = report_summary.from_bytes(small.get(found[r.file_id].id), r)
+                    if facts is not None:
+                        cache[key(r)] = fresh[key(r)] = facts
+        todo = [r for r in todo if key(r) not in cache]
+    if todo:                                             # 3. the others: downloaded together, then read
         n = len(todo)
         ld = irembo_loading(f"Reading {n} report{'s' if n > 1 else ''} from Google Drive…").__enter__()
         data = report_history.download_many(client, todo, done=lambda i: ld.update(f"Downloading · {i} of {n}"))
-        fresh = {}
         for i, r in enumerate(todo, 1):
             try:
                 if isinstance(data.get(r.file_id), Exception):
                     raise data[r.file_id]
                 cache[key(r)] = fresh[key(r)] = report_history.read_drive_facts(client, r, state.session_folder,
                                                                                 data.get(r.file_id))
+                old = found.get(r.file_id)                   # its summary, for next time (catch-up; never an error)
+                report_summary.write(client, r.parent, r.name, cache[key(r)], r.md5, replace_id=old.id if old else None)
             except Exception as err:                    # 02/11/2026: any bad report is left out, never a crash
                 msg = friendly_error(err, "Reading this report")
                 cache[key(r)] = msg if msg.startswith(r.name) else f"{r.name}: {msg}"   # tried again next time
             ld.update(f"Reading · {i} of {n}")
         ld.__exit__(None, None, None)
+    if fresh:
         facts_cache.save(DASH_CACHE, fresh, keep=[key(r) for r in records])
     facts = [f for r in records if isinstance(cache.get(key(r)), list) for f in cache[key(r)]]
     return dashboard.combine(facts), [cache[key(r)] for r in records if isinstance(cache.get(key(r)), str)]
@@ -2349,13 +2371,14 @@ def dashboard_page():
         pass
     p_end = dashboard.period_end(dashboard.period_key(pd.Timestamp(last if last is not None else first), kind), kind)
     fu_days = int(SETTINGS["followup"]["days"])
-    fu_here = followup.in_period(fu_items, first, p_end, banks)
+    # 12/11/2026: the dashboard's FOLLOW-UP card counts the pending payments only; the Follow-up page keeps both
+    fu_here = [i for i in followup.in_period(fu_items, first, p_end, banks) if i["type"] == "Pending"]
     fu_sum = followup.summary(fu_here, fu_dec, days=fu_days)
     # 28/10/2026: every saved report is followed up (no start date any more)
     fu = {"followed": True, "summary": fu_sum, "open_money": followup.money(fu_sum["open_amount"]),
-          "unit": kinds[kind].lower()}
-    kpis = dashboard_view.kpi_cards(now, before, fu)
-    st.html(kpis)
+          "unit": kinds[kind].lower(), "types": ("Pending",)}
+    kpis = dashboard_view.kpi_cards(now, before, fu)                       # the page's PDF: every card
+    st.html(dashboard_view.kpi_cards(now, before, fu, per_view=3))          # 12/11/2026: 3 cards, ‹ › for the others
 
     child = dashboard.children(facts, kind, first, last, cur, banks)
     labels = [c["label"] for c in child]
@@ -2817,9 +2840,16 @@ def followup_page():
     if not items:
         st.caption(f"No pending or paid-twice item paid in {period_txt}.")
         return
-    sm = followup.summary(items, decisions, days=days)
-    cards = [("OPEN", f"{sm['open']:,}", f"{sm['by_type']['Pending'][0]:,} pending · {sm['by_type']['Paid twice'][0]:,} "
-                                         "paid twice"),
+    # 12/11/2026: the cards follow the Type and Bank chosen below (read from the last run: the filters are drawn
+    # after the cards); "Show" is left out, so CHECKED still says how many of them are checked
+    banks_here = sorted({i["bank"] for i in items}, key=lambda c: list(engine.BANKS).index(c) if c in engine.BANKS else 99)
+    kinds_now = state.get("fu_type") or "All"
+    pick_now = state.get("fu_bank") if state.get("fu_bank") in banks_here else "All"
+    scope = [i for i in items if (kinds_now == "All" or i["type"] == kinds_now) and (pick_now == "All" or i["bank"] == pick_now)]
+    sm = followup.summary(scope, decisions, days=days)
+    open_by = " · ".join(f"{sm['by_type'][t][0]:,} {t.lower()}" for t in ("Pending", "Paid twice")
+                         if kinds_now in ("All", t))
+    cards = [("OPEN", f"{sm['open']:,}", open_by),
              ("AMOUNT OPEN", followup.money(sm["open_amount"]).replace(" · ", "<br>"), "still to follow up"),
              ("CHECKED", f"{sm['resolved']:,} of {sm['total']:,}",
               f"{sm['resolved'] / sm['total'] * 100:.0f}% checked after the report" if sm["total"] else ""),
@@ -2833,7 +2863,6 @@ def followup_page():
     f1, f2, f3 = st.columns([1.4, 1.4, 2.2])
     show = f1.segmented_control("Show", ["Open", "Resolved", "All"], default="Open", key="fu_show") or "Open"
     kinds = f2.segmented_control("Type", ["All", "Pending", "Paid twice"], default="All", key="fu_type") or "All"
-    banks_here = sorted({i["bank"] for i in items}, key=lambda c: list(engine.BANKS).index(c) if c in engine.BANKS else 99)
     pick = f3.selectbox("Bank", ["All"] + banks_here, key="fu_bank",
                         format_func=lambda c: "All banks" if c == "All" else engine.bank_name(c))
     rows = [i for i in items
