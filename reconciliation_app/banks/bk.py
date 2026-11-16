@@ -8,8 +8,10 @@ and BPR are not used or changed.
 The BK statement (the files BK sends for each Irembo collection account, .csv or .xlsx)
     - daily:   IREMBO_<account>_STMT_<YYYYMMDD>_<sent>_1.csv/xlsx
     - monthly: IREMBO_ACCOUNT_<account>_MONTHLY_STMT_<MONTH>_<YEAR>_<sent>.xlsx
-    - the file name is never used (05/11/2026): the days a file covers are the dates INSIDE it - the H1 row (the
-      statement's start), the BookingDate and ValueDate of every movement
+    - monthly since September 2026: IREMBO_MONTHLY_<account>_STMT_<MONTH>_<YEAR>_<sent>.csv, 17 columns: no Source
+      (16/11/2026: it is read from the start of the Narration, narration_source)
+    - the file name is never used for the days (05/11/2026): the days a file covers are the dates INSIDE it - the H1
+      row (the statement's start), the BookingDate and ValueDate of every movement
     - 18 columns: RowNum, RECTYPE, Currency, AccountNumber, BookingDate, ValueDate, ProcessingDateTime,
       TransactionType, TheirReference, Source, OurReference, DebitAcct, CreditAcct, CreditAmt, DebitAmt, Narration,
       ApiId, Balance. They are found by NAME (some files write them in capitals, in another order, or call them
@@ -17,7 +19,10 @@ The BK statement (the files BK sends for each Irembo collection account, .csv or
     - RECTYPE: H1BKI = opening balance, D1BKIGRW = a movement, F1BKI = closing balance. Only the D1 rows are
       movements (fix 1: the notebook counted H1/F1 too).
     - one file = one account = one currency; only the 5 Irembo collection accounts are accepted (ACCOUNTS).
-    - a file opened and saved in Excel loses the long numbers (1.00E+11): it is refused with a plain message.
+    - a file opened and saved in Excel loses the long numbers (1.00E+11). 16/11/2026: when its name still has the
+      whole account number (and it is that number, rounded), the file is read with the account of its name; its
+      ProcessingDateTime is lost (shown empty; the SLA uses the ValueDate). Otherwise it is refused with a plain
+      message.
 
 The type of each row (the notebook's 7 rules + 3 added on 05/11/2026, in order; the last rule that fits wins; no
 rule = Transaction)
@@ -91,7 +96,9 @@ STATEMENT_SHEET = "BK statement"
 # the 5 Irembo collection accounts and their currency (the only accounts reconciled; 03/11/2026)
 ACCOUNTS = {"100081756273": "RWF", "100011044926": "RWF", "100081756467": "USD",
             "100081756548": "EUR", "100081756621": "GBP"}
-OPTIONAL_ACCOUNTS = {"100081756621"}     # 11/11/2026: GBP - no file only warns (the run is not stopped)
+# no file only warns, the run is not stopped: GBP (11/11/2026); 16/11/2026 the second RWF account too (it has
+# almost no payments: 2 credits in August 2026; its September 2026 statement was not in the files BK sent)
+OPTIONAL_ACCOUNTS = {"100081756621", "100011044926"}
 
 COMPLETED_STATUSES = {"SETTLED", "PAID", "PAYOUT_INITIATED"}     # same as I&M
 PENDING_STATUSES = {"NEW"}               # received = every status but NEW (the notebook's rule)
@@ -110,8 +117,8 @@ COLUMNS = {
 _ALL = ["RowNum", "RECTYPE", "Currency", "AccountNumber", "BookingDate", "ValueDate", "ProcessingDateTime",
         "TransactionType", "TheirReference", "Source", "OurReference", "DebitAcct", "CreditAcct", "CreditAmt",
         "DebitAmt", "Narration", "ApiId", "Balance"]
-_NEEDED = ["RECTYPE", "Currency", "AccountNumber", "BookingDate", "ValueDate", "Source", "OurReference", "CreditAmt",
-           "DebitAmt", "Narration"]
+_NEEDED = ["RECTYPE", "Currency", "AccountNumber", "BookingDate", "ValueDate", "OurReference", "CreditAmt",
+           "DebitAmt", "Narration"]              # 16/11/2026: not Source (BK's new export has none: narration_source)
 # a column name with its case, spaces and "_" removed -> its name here (other spellings seen on BK files)
 _NAMES = {re.sub(r"[^a-z]", "", c.lower()): c for c in _ALL}
 _NAMES.update({"recordnum": "RowNum", "accountcurrency": "Currency", "accountno": "AccountNumber",
@@ -171,6 +178,21 @@ def _days(values: pd.Series) -> pd.Series:
     return out.astype("datetime64[ns]")
 
 
+def _rounded(text: str, account: str) -> bool:
+    """True when `text` is the account number as Excel leaves a long number: '1.00082E+11' (a .csv saved from Excel)
+    or '100082000000' (the .xlsx), for account '100081756273' - the same number, rounded to the digits kept."""
+    try:
+        value = float(text)
+    except ValueError:
+        return False
+    kept = re.sub(r"\D", "", re.split(r"e", text, flags=re.I)[0])
+    if not re.search(r"e", text, flags=re.I):
+        kept = kept.rstrip("0")
+    if not kept or len(kept) >= len(account):              # every digit is there: it is another account
+        return False
+    return float(round(int(account), len(kept) - len(account))) == value
+
+
 def _table(content, name: str, excel_engine):
     """The file as text cells, with the header row found (the first row that has RECTYPE)."""
     data = io.BytesIO(content) if isinstance(content, (bytes, bytearray)) else content
@@ -206,6 +228,10 @@ def read_statement(content: bytes, name: str, excel_engine=None):
         raise ValueError(f"{name}: this is not a BK statement (no H1 / D1 / F1 rows).")
 
     accounts = set(_code(body.loc[rectype.str.match(r"^(H1|D1|F1)"), "AccountNumber"])) - {""}
+    if accounts and not accounts & set(ACCOUNTS):          # 16/11/2026: maybe rounded by Excel (1.00082E+11)
+        named = [n for n in set(re.findall(r"(?<!\d)\d{12}(?!\d)", name)) if all(_rounded(a, n) for a in accounts)]
+        if len(named) == 1:                                # the file's name still has the whole number
+            accounts = set(named)
     if any(re.search(r"E\+?\d", a, flags=re.I) for a in accounts):
         raise ValueError(f"{name}: the account number reads {sorted(accounts)[0]}: the file was opened and saved in "
                          "Excel, which changes the long numbers. Upload the file as downloaded from BK.")
@@ -223,9 +249,13 @@ def read_statement(content: bytes, name: str, excel_engine=None):
         raise ValueError(f"{name}: account {account} ({ACCOUNTS[account]}) is a {ACCOUNTS[account]} account, but "
                          f"the file says {currency}.")
 
+    no_source = "Source" not in data.columns
     for col in [c for c in _ALL if c not in data.columns]:
         data[col] = ""
     data = data[_ALL].copy()
+    # 16/11/2026: no Source column (BK's export since September 2026), or a Source an Excel lookup left as "#N/A"
+    from_narration = pd.Series(True, index=data.index) if no_source else data["Source"].str.startswith("#")
+    data.loc[from_narration, "Source"] = narration_source(data.loc[from_narration, "Narration"])
     data["Currency"] = currency
     data["AccountNumber"] = account
     value = _days(data["ValueDate"])
@@ -273,6 +303,27 @@ def row_types(rows: pd.DataFrame) -> pd.Series:
     out[narration.str.contains("SWIFT Payment - Charges", regex=False)] = "Bank transfer Charges"   # fix 2
     out[narration.str.contains("AGENT REFUND", regex=False)] = "Refund"
     return out
+
+
+def narration_source(narration: pd.Series) -> pd.Series:
+    """16/11/2026: the Source of a row read from its Narration, for a file without a Source column (BK's monthly
+    export since September 2026) and for a Source an Excel lookup left as "#N/A". The Narration starts with the
+    channel, before the first ":" or "|" ("BK YACU BILL PAYMENT IREMBO | 886273324612 Irembo bill"):
+        a Source the rules know           its usual spelling (capitals and double spaces aside)
+        a cash deposit at a branch        Branch Teller ("Cash Deposit : ...", "Cash Deposit-Foreign Currency : ...":
+                                          in the files of July and August 2026 every one of them is Branch Teller)
+        a card purchase advice            Card Purchase Advices
+        a cheque deposit                  In-House Cheques
+        anything else                     the start of its Narration, as it is
+    Checked on the files of July and August 2026 (385,000 rows, which have a Source): every credit gets the same
+    type as with its real Source."""
+    start = (narration.fillna("").astype(str).str.split(r"[:|]", n=1, regex=True).str[0]
+             .str.replace(r"\s+", " ", regex=True).str.strip())
+    known = {s.upper(): s for s in SLASH_SOURCES + BANK_TRANSFER_SOURCES + MORE_BANK_TRANSFER_SOURCES
+             + ["E- commerce purchase", "VISA SETTLEMENT", "Branch Teller"]}
+    known.update({"CASH DEPOSIT": "Branch Teller", "CASH DEPOSIT-FOREIGN CURRENCY": "Branch Teller",
+                  "PURCHASE-SETTLEMENT ADVICES": "Card Purchase Advices", "CHEQUE DEPOSIT": "In-House Cheques"})
+    return start.str.upper().map(known).fillna(start)
 
 
 def clean_statement(statement: pd.DataFrame) -> pd.DataFrame:
@@ -484,8 +535,8 @@ def review_reasons(rows: pd.DataFrame) -> pd.Series:
 
 def check_files(statements: list) -> tuple:
     """(days covered, lines, blocking): the files of each of the 5 accounts. An account with no file blocks the run
-    (the notebook always reconciles the 5), but GBP (OPTIONAL_ACCOUNTS) only warns; a day with no file only warns (a
-    day may have had no movement)."""
+    (the notebook always reconciles the 5), but GBP and the second RWF account (OPTIONAL_ACCOUNTS) only warn; a day
+    with no file only warns (a day may have had no movement)."""
     covered, lines, blocking = set(), [], []
     per_account = {}
     for f in statements:

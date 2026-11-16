@@ -144,7 +144,43 @@ def test_xlsx_statement_is_read():
 ])
 def test_a_wrong_file_is_refused_with_a_plain_message(account, currency, words):
     with pytest.raises(e.ReconError, match=words):
-        read(statement(ROWS[:2], account=account, currency=currency))
+        read(statement(ROWS[:2], account=account, currency=currency), name="statement.csv")
+
+
+def test_an_excel_damaged_file_is_read_with_the_account_of_its_name():
+    """16/11/2026: BK's September 2026 files were saved from Excel: the account reads 1.00082E+11 (100082000000 in
+    the .xlsx) and the Source of some rows is "#N/A". The name still has the whole account number: the file is read
+    with it, and such a Source is read from the Narration."""
+    name = f"IREMBO_MONTHLY_{RWF}_STMT_SEPTEMBER_2026_202610061423.csv"
+    damaged = statement(ROWS[:2], account="1.00082E+11").replace(f",{YACU},".encode(), b",#N/A,", 1)
+    f = read(damaged, name=name)
+    data = bk.clean_statement(f.data)
+    assert f.balances["account"] == RWF and f.currency == "RWF" and set(data["AccountNumber"]) == {RWF}
+    assert data["Source"].tolist() == ["BK Yacu Bill Payment IREMBO", YACU]          # the first one was "#N/A"
+    assert data["_narration_invoice"].tolist() == ["886000000001", "886000000002"]
+    assert read(statement(ROWS[:2], account="100082000000"), name=name).balances["account"] == RWF   # as the .xlsx has it
+    with pytest.raises(e.ReconError, match="opened and saved in Excel"):
+        read(damaged, name="statement.csv")                                          # no account in the name
+    with pytest.raises(e.ReconError, match="is a USD account"):
+        read(damaged, name=name.replace(RWF, USD))                                   # another account's name
+
+
+def test_a_statement_without_source_column_gives_the_same_types_and_invoices():
+    """16/11/2026: BK's monthly export since September 2026 has capital names and no Source column: the Source is
+    read from the start of the Narration, and every row gets the type and the invoice it has with a Source."""
+    table = pd.read_csv(io.BytesIO(statement(ROWS)), header=None, dtype=str, keep_default_na=False)
+    table = table.drop(columns=list(table.loc[0]).index("Source"))
+    table.loc[0] = [{"RowNum": "RECORDNUM", "Currency": "ACCOUNT_CURRENCY"}.get(h, h.upper()) for h in table.loc[0]]
+    new = bk.clean_statement(read(table.to_csv(header=False, index=False).encode()).data)
+    old = bk.clean_statement(read(statement(ROWS)).data)
+    assert len(table.columns) == 17 and len(new) == len(old) == len(ROWS)
+    assert new[bk.TYPE].tolist() == old[bk.TYPE].tolist()
+    assert new["_narration_invoice"].tolist() == old["_narration_invoice"].tolist()
+    assert new.loc[2, "Source"] == "Branch Teller" and new.loc[11, "Source"] == "IB Account transfer"
+    assert bk.narration_source(pd.Series(["Incoming  Trsf frm local banks | A NAME", "Cash Deposit-Foreign Currency : 1/2",
+                                          "Bill Payment Irembo | 886273324612 Irembo bill", "MTN Push to Bank : x"])
+                               ).tolist() == ["Incoming Trsf frm local banks", "Branch Teller", "Bill Payment IREMBO",
+                                              "MTN Push to Bank"]
 
 
 def test_a_file_that_is_not_a_bk_statement_is_refused():
@@ -321,9 +357,10 @@ def test_every_collection_account_needs_a_file():
     files = [read(statement(ROWS)), e.read_payment_file("p.csv", payments(PAYS), "BK")]
     chk = e.check_period(e.make_period("day", "2026-08-03"), files, "BK", today="2026-11-04")
     assert any(RWF in t and ok for ok, t in chk.lines)
-    assert sum("no file added" in b for b in chk.blocking) == 3          # the 3 other accounts (not GBP)
-    assert not any("100081756621" in b for b in chk.blocking)           # 11/11/2026: no GBP file only warns
-    assert any("100081756621" in t and "optional" in t and not ok for ok, t in chk.lines)
+    assert sum("no file added" in b for b in chk.blocking) == 2          # USD and EUR
+    for account in ("100081756621", "100011044926"):                    # GBP (11/11/2026) and the second RWF account
+        assert not any(account in b for b in chk.blocking)              # (16/11/2026): no file only warns
+        assert any(account in t and "optional" in t and not ok for ok, t in chk.lines)
 
 
 def test_the_invoice_after_a_bar_in_the_narration_is_found():
@@ -337,3 +374,21 @@ def test_the_invoice_after_a_bar_in_the_narration_is_found():
     inv, rule = bk.narration_invoice(rows)
     assert list(inv) == ["886273324612", "876273903802", ""]               # not a bill payment: not cut
     assert rule[0] == "Narration (after |)"
+
+
+def test_a_bk_credit_keeps_the_currency_of_its_account(tmp_path):
+    """16/11/2026: the checkout's currency is not used for BK (decided the same day). Invoice 7 is not in the
+    IremboPay file and the checkout says USD, but the money is in the RWF account: it stays RWF."""
+    files = [read(statement(ROWS)), e.read_payment_file("p.csv", payments(PAYS), "BK")]
+    review = e.run(tmp_path, WEEK, files, bank="BK", report_dir=tmp_path / "r").review.copy()
+    for c in e.EDIT_COLS:
+        review[c] = review[c].fillna("").astype(str)
+    seven = review["invoice_number"].eq("886000000007")
+    review.loc[seven, ["Reviewed (Yes/No)", "Report table", "payment_status"]] = ["Yes", "Pending notification", "NEW"]
+    e.save_decisions(tmp_path, WEEK, review, "BK")
+    plain = e.run(tmp_path, WEEK, files, bank="BK", report_dir=tmp_path / "r", require_review=False)
+    res = e.run(tmp_path, WEEK, files, bank="BK", report_dir=tmp_path / "r", require_review=False,
+                checkout_currency={"886000000007": "USD"})
+    assert res.sheets[e.details_sheet("BK")].set_index("OurReference").loc["FTCM7", "Currency"] == "RWF"
+    assert counts(res, "Pending notifications") == counts(plain, "Pending notifications")
+    assert counts(res, "Pending notifications")["USD"] == 0
