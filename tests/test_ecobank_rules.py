@@ -180,6 +180,9 @@ def test_currency_from_checkout_only_for_a_credit_not_paid_in_the_file():
     rows = pd.DataFrame({"invoice_number": ["A", "B", "C", None], "Currency": ["RWF"] * 4,
                          "paid_at": pd.to_datetime(["2026-10-27 10:00", None, None, None])})
     assert engine.currency_from_checkout(rows, {"A": "USD", "B": "USD"}).tolist() == ["RWF", "USD", "RWF", "RWF"]
+    # 16/11/2026: only a currency the bank reports is used (Bank of Africa: RWF only)
+    assert engine.currency_from_checkout(rows, {"B": "USD"}, allowed=["RWF"]).tolist() == ["RWF"] * 4
+    assert engine.currency_from_checkout(rows, {"B": "USD"}, allowed=["RWF", "USD"]).tolist()[1] == "USD"
 
 
 def _made_up_week(tmp_path, more=(), **kw):

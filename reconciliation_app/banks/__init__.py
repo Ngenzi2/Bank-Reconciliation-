@@ -104,8 +104,10 @@ OPTIONAL = {
     "NO_INVOICE_PENDING": "True: a credit with no invoice number goes straight to Pending notification (not reviewed)",
     "NO_INVOICE_PENDING_REVIEWED": "True: a credit with no invoice number is counted as Pending straight away, but "
                                    "(unlike NO_INVOICE_PENDING) stays in Exception Resolution for a person to check",
-    "CURRENCY_FROM_CHECKOUT": "True: a credit not paid in the payment file takes its currency from IremboPay's "
-                              "checkout (when it gives one), not from the statement (Ecobank)",
+    "CURRENCY_FROM_CHECKOUT": "True: a credit not paid in the payment file takes the currency IremboPay's checkout "
+                              "gives (when it gives one and the bank reports that currency), not the statement's "
+                              "(Ecobank) or the file name's (BPR); a currency chosen in the review stays. Not for "
+                              "a bank whose statement currency is its account's (I&M, BK)",
     "DAY_AFTER_RECOMMENDED": "True to recommend (never require) the statement of the day after the period",
     "SLA_UNIT": "'minutes' when the SLA setting is in minutes (default: days)",
     "SLA_DEFAULT": "the SLA setting before anyone changes it (default 0)",

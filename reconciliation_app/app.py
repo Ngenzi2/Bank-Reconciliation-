@@ -1031,11 +1031,11 @@ def run_reconciliation(acc):
             if prev_info is None:
                 raise engine.ReconError(f"No {bank.NAME} report found for {prev.name}. " + (problem or ""))
             prev_file = previous_file(prev, prev_info, session)
-        checkout, currencies = None, None
+        checkout = None
         if engine.option(bank, "CHECKOUT_ALL", False):     # Ecobank, BPR: every invoice through the checkout first
             checkout = checkout_all(engine.statement_invoices(acc, bank))
-            checker = irembopay_checker()                  # 13/11/2026: and the currency it gave (open invoices)
-            currencies = {i: checker.currency(i) for i in checkout if checker.currency(i)}
+        # 13/11/2026: the currency the checkout gave (open invoices); used by Ecobank and BPR (CURRENCY_FROM_CHECKOUT)
+        currencies = irembopay_checker().currencies()
         res = engine.run(BASE_DIR, period, acc, sla_days=sla_days, compare=compare, bank=bank,
                          report_dir=session.private(), previous_report=prev_file, checkout=checkout,
                          checkout_currency=currencies)

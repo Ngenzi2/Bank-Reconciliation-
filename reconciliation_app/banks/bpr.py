@@ -21,8 +21,9 @@ Rules
       only decides which period's review it appears in. When the same credit (BANK_REFERENCE + amount) is also in a
       file with VALUE_DATE, only that copy is kept.
     - Currency = the IremboPay currency of the invoice; a credit not in the IremboPay file (DOC ID unknown, or no DOC
-      ID): from the file name ("USD" in it = USD), changeable in the review. Credits without DOC ID never stop the
-      reconciliation. The IremboPay check of step 5 looks a DOC ID not in the file
+      ID): from the file name ("USD" in it = USD), changeable in the review. 16/11/2026: when IremboPay's checkout
+      gives the invoice's currency (an invoice that can still be paid), the report uses it instead of the file
+      name's, unless the reviewer chose one. Credits without DOC ID never stop the reconciliation. The IremboPay check of step 5 looks a DOC ID not in the file
       up on IremboPay's checkout: "Paid" -> Paid with other channel (confirmed by the reviewer).
     - IremboPay payment_provider BPR_RW is BPR, and so is BPR (bank transfer, 27/10/2026); a credit IremboPay shows
       under another provider goes to review.
@@ -98,6 +99,9 @@ MISSING_DAYS_BLOCK = False               # days with no statement are shown, Run
 REVERSE_CHECK = True                     # step 3: IremboPay BPR_RW payments that are on no statement
 CHECKOUT_ALL = True                      # 26/10/2026: every invoice goes through IremboPay's checkout before the run
 CURRENCY_FROM_IREMBOPAY = True           # the currency of a credit = the IremboPay currency of its invoice
+CURRENCY_FROM_CHECKOUT = True            # 16/11/2026: a credit not paid in the payment file takes the currency
+                                         # IremboPay's checkout gives (an open invoice), before the file name's; a
+                                         # currency the reviewer chooses still wins
 ALL_PROVIDER_REFERENCES = True           # keep every IremboPay transaction's provider_reference (credited again)
 NO_INVOICE_PENDING = True                # a credit with no invoice number (not found): Pending notification, not reviewed
 ALWAYS_REVIEW_COLUMNS = ["Cancelled by"]    # ... unless it was cancelled by a debit: that one is still reviewed

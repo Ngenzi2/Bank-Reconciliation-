@@ -16,8 +16,8 @@ Ecobank and BPR every invoice is checked before the run), so the page stays usab
 (HTTP 429) or is busy (5xx), the lookup waits and tries again (1, 2, then 4 seconds). Each invoice is looked up once
 per browser session.
 
-13/11/2026: for an invoice that can still be paid, IremboPay also gives its currency (Checker.currency). Ecobank's
-report uses it for a credit the payment file does not show as paid (CURRENCY_FROM_CHECKOUT, engine.py).
+13/11/2026: for an invoice that can still be paid, IremboPay also gives its currency (Checker.currency). The report
+of Ecobank and BPR uses it for a credit the payment file does not show as paid (CURRENCY_FROM_CHECKOUT, engine.py).
 """
 from __future__ import annotations
 
@@ -152,6 +152,11 @@ class Checker:
         """The invoice's currency as IremboPay gave it ("" when it did not: only an open invoice has one)."""
         with self._lock:
             return self._currency.get(str(invoice).strip(), "")
+
+    def currencies(self) -> dict:
+        """{invoice: currency} of every invoice looked up so far that IremboPay gave a currency for."""
+        with self._lock:
+            return dict(self._currency)
 
     def progress(self, invoices) -> tuple[int, int, int]:
         """(checked, total, could not check) for these invoices (rows without an invoice number are left out)."""

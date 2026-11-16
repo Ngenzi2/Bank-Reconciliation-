@@ -206,12 +206,21 @@ def checkout_notes(rows: pd.DataFrame, whole: dict) -> pd.Series:
     return notes
 
 
-def currency_from_checkout(rows: pd.DataFrame, currencies: dict) -> pd.Series:
-    """13/11/2026 (CURRENCY_FROM_CHECKOUT, Ecobank): the Currency of each row - the invoice's own, as IremboPay's
-    checkout gives it, for a credit the payment file does not show as paid (pending, or not in the file); the
-    statement's otherwise. The checkout gives a currency only for an invoice that can still be paid."""
+def currency_from_checkout(rows: pd.DataFrame, currencies: dict, chosen=(), allowed=None) -> pd.Series:
+    """CURRENCY_FROM_CHECKOUT (Ecobank 13/11/2026, BPR 16/11/2026): the Currency of each row - the invoice's own,
+    as IremboPay's checkout gives it, for a credit the payment file does not show as paid (pending, or not in the
+    file); the one it has otherwise. The checkout gives a currency only for an invoice that can still be paid.
+    Not for I&M and BK (decided 16/11/2026): their statement currency is the currency of the account the money
+    is in.
+    chosen: the review keys whose currency the reviewer set (a chosen currency, a corrected invoice): kept.
+    allowed: the currencies the bank reports (CURRENCIES); another one is not used (the credit would be in no
+    currency's row of the tables)."""
     own = rows["invoice_number"].map(lambda i: currencies.get(str(i), "") if pd.notna(i) else "").fillna("")
     use = own.astype(str).ne("") & rows["paid_at"].isna()
+    if allowed is not None:
+        use &= own.isin(list(allowed))
+    if len(chosen) and "_key" in rows:
+        use &= ~rows["_key"].isin(set(chosen))
     return rows["Currency"].where(~use, own)
 
 
@@ -1283,8 +1292,8 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
     previous_report: the report compared with (default: looked for in output/).
     checkout: {invoice: IremboPay checkout answer} of every invoice, looked up before the run (banks with
     CHECKOUT_ALL: Ecobank, BPR); kept in the report's Payment details ("IremboPay check").
-    checkout_currency: {invoice: currency} the same lookup gave (open invoices only); used by banks with
-    CURRENCY_FROM_CHECKOUT (Ecobank) for a credit not paid in the payment file.
+    checkout_currency: {invoice: currency} IremboPay's checkout gave (open invoices only); used by banks with
+    CURRENCY_FROM_CHECKOUT (Ecobank, BPR) for a credit not paid in the payment file.
     Steps: A payments  B statement  C match  D review  E SLA  F summary tables  G totals check  H comparison
     I report + run log."""
     bank = get_bank(bank)
@@ -1434,7 +1443,10 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
         rep["IremboPay check"] = rep["invoice_number"].map(lambda i: checkout.get(str(i), "") if pd.notna(i) else "")
     bank_currency = rep["Currency"].copy()                 # as the statement has it (kept in the statement sheet)
     if checkout_currency and option(bank, "CURRENCY_FROM_CHECKOUT", False):
-        rep["Currency"] = currency_from_checkout(rep, checkout_currency)
+        text = lambda col: (review[col].fillna("").astype(str).str.strip() if col in review
+                            else pd.Series("", index=review.index))
+        by_reviewer = review.loc[text(CURRENCY_CHOSEN).ne("") | text("Correct invoice number").ne(""), "_key"]
+        rep["Currency"] = currency_from_checkout(rep, checkout_currency, set(by_reviewer), bank.CURRENCIES)
     rep["times_on_statement"] = rep.groupby("invoice_number")["invoice_number"].transform("size")
     # the invoice is the unique identifier: an invoice credited more than once counts once (the credit IremboPay
     # recorded when the bank says which one, otherwise the first); the others are extra credits
@@ -1642,13 +1654,15 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
     whole = table_rows(start, end)
     rep["Report note"] = table_notes(rep, whole, bank)          # an invoice credited more than once: why, where
     rep["Report note"] = checkout_notes(rep, whole)              # pending, but paid in IremboPay since (checkout)
+    no_own = option(bank, "CURRENCY_FROM_IREMBOPAY", False)      # BPR: the statement has no currency of its own
+    before = "the file name gave" if no_own else "the bank statement says"
     for i in rep.index[bank_currency.ne(rep["Currency"])]:       # 13/11/2026: the currency is IremboPay's own
-        why = f"Currency from IremboPay's checkout ({rep.at[i, 'Currency']}); the bank statement says {bank_currency[i]}"
+        why = f"Currency from IremboPay's checkout ({rep.at[i, 'Currency']}); {before} {bank_currency[i]}"
         rep.at[i, "Report note"] = f"{why}. {rep.at[i, 'Report note']}" if rep.at[i, "Report note"] else why
     detail = rep[[col for col in detail_cols if col in rep.columns]]
     sheets = {"Pending notification": detail[whole["pending"]].sort_values(paid_on),
               "Duplicate payment other channel": detail[whole["duplicate"]].sort_values(["payment_provider", paid_on]),
-              bank.STATEMENT_SHEET: rep.assign(Currency=bank_currency)[statement_cols + ["invoice_number"]
+              bank.STATEMENT_SHEET: (rep if no_own else rep.assign(Currency=bank_currency))[statement_cols + ["invoice_number"]
                                         + [c for c in option(bank, "STATEMENT_LINK_COLUMNS", []) if c in rep]
                                         + ["Source file"]]}
     if hasattr(bank, "extra_sheets"):

@@ -140,3 +140,4 @@ def test_checker_keeps_the_currency_of_an_open_invoice():
     wait(checker, invoices)
     assert checker.answer("886213126169") == "Open, not paid yet" and checker.currency("886213126169") == "USD"
     assert checker.answer("886213126170") == "Paid" and checker.currency("886213126170") == ""
+    assert checker.currencies() == {"886213126169": "USD"}
