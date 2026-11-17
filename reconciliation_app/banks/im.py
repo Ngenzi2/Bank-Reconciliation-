@@ -37,6 +37,10 @@ PROVIDER = "I_M"                  # payment_provider of this bank in the IremboP
 CURRENCIES = ["RWF", "USD"]       # one statement per currency
 FILE_TYPES = ["xls", "xlsx"]      # statement files accepted in the upload box
 STATEMENT_SHEET = "I&M statement" # name of the statement sheet in the report
+# 16/11/2026 (like BK): every credit with its IremboPay payment is in "Matched details"; "Payment details" holds
+# the IremboPay payment file's own rows of the period
+DETAILS_SHEET = "Matched details"
+IREMBOPAY_SHEET = "Payment details"
 
 # IremboPay statuses that count as paid
 COMPLETED_STATUSES = {"SETTLED", "PAID", "PAYOUT_INITIATED"}
