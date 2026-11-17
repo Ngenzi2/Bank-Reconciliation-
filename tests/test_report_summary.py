@@ -104,3 +104,74 @@ def test_a_summary_that_cannot_be_written_never_fails_the_save(monkeypatch):
 
 def test_the_summary_is_not_a_report_in_the_listing():
     assert report_history.parse_name(report_summary.name_for(XLSX)) is None
+    assert report_history.parse_name(report_summary.bank_name("IM")) is None
+
+
+# ---- one file per bank (13/11/2026) ---------------------------------------------------------------------------------
+class Drive(FakeDrive):
+    """FakeDrive that can also be read; refuse_replace: a file made by another account cannot be replaced."""
+    refuse_replace = False
+
+    def download(self, fid, mime="", http=None, as_xlsx=False):
+        return self.files[fid][1]
+
+    def upload(self, parent, name, data, mime, replace_id=None, http=None):
+        if replace_id and self.refuse_replace:
+            raise DriveError(f"{name}: not available to this app")
+        return super().upload(parent, name, data, mime, replace_id, http)
+
+
+def bank_files(drive):
+    return [(fid, d) for fid, (n, d, _) in drive.files.items() if n == report_summary.bank_name("IM")]
+
+
+def test_the_bank_file_holds_every_report_and_new_ones_are_added():
+    drive = Drive()
+    assert report_summary.update_bank(drive, "folder", "IM", {"a|1": facts()}) is not None
+    assert report_summary.update_bank(drive, "folder", "IM", {"b|1": facts()[:1]}) is not None
+    (fid, data), = bank_files(drive)                                      # one file, replaced: both reports in it
+    saved = report_summary.bank_from_bytes(data)
+    assert set(saved) == {"a|1", "b|1"}
+    back = report_summary.facts_of(saved["a|1"], Rec())
+    assert [(f.kind, f.counts, f.amounts, f.merchants) for f in back] == \
+           [(f.kind, {m: {c: int(n) for c, n in v.items()} for m, v in f.counts.items()},
+             {m: {c: float(a) for c, a in v.items()} for m, v in f.amounts.items()},
+             None if f.merchants is None else {k: (int(n), a) for k, (n, a) in f.merchants.items()}) for f in facts()]
+    assert all(isinstance(f.record, Rec) for f in back)
+
+    report_summary.update_bank(drive, "folder", "IM", {"c|1": facts()}, keep=["b|1", "c|1"])   # a|1: no longer on Drive
+    assert set(report_summary.bank_from_bytes(bank_files(drive)[0][1])) == {"b|1", "c|1"}
+    assert report_summary.update_bank(drive, "", "IM", {"d|1": facts()}) is None               # no folder: nothing
+
+
+def test_a_bank_file_of_another_version_or_a_broken_one_is_not_used(monkeypatch):
+    drive = Drive()
+    report_summary.update_bank(drive, "folder", "IM", {"a|1": facts()})
+    data = bank_files(drive)[0][1]
+    assert report_summary.bank_from_bytes(b"not json") == {} and report_summary.bank_from_bytes(None) == {}
+    assert report_summary.facts_of([{"bank": "IM"}], Rec()) is None
+    monkeypatch.setattr(facts_cache, "VERSION", facts_cache.VERSION + 1)
+    assert report_summary.bank_from_bytes(data) == {}
+
+
+def test_a_bank_file_that_cannot_be_replaced_gets_a_second_one_with_everything():
+    drive = Drive()
+    report_summary.update_bank(drive, "folder", "IM", {"a|1": facts()})
+    drive.refuse_replace = True                                           # written by another account
+    assert report_summary.update_bank(drive, "folder", "IM", {"b|1": facts()}) is not None
+    files = bank_files(drive)
+    assert len(files) == 2
+    assert set(report_summary.bank_from_bytes(files[1][1])) == {"a|1", "b|1"}
+
+
+def test_saving_a_report_adds_it_to_its_bank_file(monkeypatch):
+    monkeypatch.setattr(report_history, "facts_from_bytes", lambda record, data, session: facts())
+    bank, period = engine.get_bank("IM"), engine.make_period("month", "2026-09-01")
+    drive = Drive()
+    results = report_history.save_report(drive, "root", bank, period, {"xlsx": b"excel", "pdf": b"pdf"},
+                                         session=object())
+    xlsx = next(r.file for r in results if r.name.endswith(".xlsx"))
+    record = report_history._record(xlsx, report_history.parse_name(xlsx.name))
+    (fid, data), = bank_files(drive)
+    assert drive.files[fid][2] == "root/I&M Bank"                         # in the bank's folder
+    assert set(report_summary.bank_from_bytes(data)) == {facts_cache.key(record)}

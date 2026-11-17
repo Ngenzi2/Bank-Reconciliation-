@@ -6,8 +6,9 @@ from services import dashboard, facts_cache, report_history
 
 
 class Rec:
-    def __init__(self, fid, modified="2026-10-01T10:00:00Z", name="IM_recon_summary_01-09-2026_to_30-09-2026.xlsx"):
-        self.file_id, self.modified, self.name = fid, modified, name
+    def __init__(self, fid, modified="2026-10-01T10:00:00Z", name="IM_recon_summary_01-09-2026_to_30-09-2026.xlsx",
+                mime=""):
+        self.file_id, self.modified, self.name, self.mime = fid, modified, name, mime
 
 
 def fact():
@@ -42,7 +43,7 @@ def test_download_many_without_parallel_connections():
         def thread_http(self):
             return None
 
-        def download(self, fid, http=None):
+        def download(self, fid, mime="", http=None, as_xlsx=False):
             if fid == "bad":
                 raise report_history.DriveError("not found")
             return fid.encode()
@@ -56,7 +57,22 @@ def test_download_many_with_an_older_client_goes_one_by_one():
         def thread_http(self):
             return object()
 
-        def download(self, fid):
+        def download(self, fid, mime="", as_xlsx=False):
             return fid.encode()
     out = report_history.download_many(OldClient(), [Rec("x"), Rec("y")])
     assert out == {"x": b"x", "y": b"y"}
+
+
+def test_download_many_reads_a_file_known_by_its_id_only():
+    """13/11/2026: the Dashboard downloads a report's summary file knowing only its Drive ID (no mime)."""
+    from types import SimpleNamespace
+
+    class Client:
+        def thread_http(self):
+            return object()
+
+        def download(self, fid, mime="", http=None, as_xlsx=False):
+            return f"{fid}|{mime}".encode()
+    two = [SimpleNamespace(file_id="s1"), SimpleNamespace(file_id="s2")]
+    assert report_history.download_many(Client(), two) == {"s1": b"s1|", "s2": b"s2|"}          # at the same time
+    assert report_history.download_many(Client(), two[:1]) == {"s1": b"s1|"}                    # one by one

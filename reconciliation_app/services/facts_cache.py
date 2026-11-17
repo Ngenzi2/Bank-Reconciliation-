@@ -20,7 +20,7 @@ import pickle
 import uuid
 from pathlib import Path
 
-VERSION = 2                     # 2: weekly reports and their days, the rules of 26/10/2026
+VERSION = 4                     # 4: a notebook-made report's own merchant table is read too
 
 
 def key(record) -> str:

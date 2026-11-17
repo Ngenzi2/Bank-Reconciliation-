@@ -345,3 +345,35 @@ def test_a_bpr_bank_transfer_is_bpr(tmp_path):
     assert t["Duplicate Payment"]["Total"] == 0 and t["Overall notifications received by Irembo"]["Total"] == 5
     d = res.sheets["Matched details"].set_index("BANK_REFERENCE")
     assert d.loc["FT4", "payment_provider"] == "BPR" and d.loc["FT4", "sla_status"] == "SLA violated"   # 3 days later
+
+
+def test_a_doc_id_not_in_irembopay_takes_the_checkout_currency_when_there_is_one(tmp_path):
+    """16/11/2026: a credit not in the IremboPay file, in a file whose name says RWF: IremboPay's checkout says the
+    invoice is USD, so the report counts it under USD; a currency the reviewer chooses still wins."""
+    rows = [("2026-08-03", "FT1", "SZ1", "886000000088", "2026-08-03 10:00:00", 0, 750)]
+    files = [read(statement(rows), "aug 3 rwf.xlsx"), e.read_payment_file("p.csv", payments(PAYS), "BPR")]
+    kw = dict(sla_days=1, bank="BPR", report_dir=tmp_path / "r", checkout={"886000000088": "Open, not paid yet"},
+              checkout_currency={"886000000088": "USD"})
+    res = e.run(tmp_path, AUG, files, **kw)
+    assert res.stopped_for_review and res.review["Currency"].iloc[0] == "RWF"      # the review still shows the file's
+    review = res.review.copy()
+    review["Reviewed (Yes/No)"], review["Report table"], review["payment_status"] = "Yes", "Pending notification", "NEW"
+    e.save_decisions(tmp_path, AUG, review, "BPR")
+    res = e.run(tmp_path, AUG, files, **kw)
+    pending = res.sheets["Pending notification"]
+    assert pending["Currency"].tolist() == ["USD"] and pending["CREDIT"].tolist() == [750]
+    assert pending["Report note"].iloc[0].startswith("Currency from IremboPay's checkout (USD); the file name gave RWF")
+    assert res.sheets["BPR statement"]["Currency"].tolist() == ["USD"]             # BPR has no currency of its own
+    t = e.counts_of(res.blocks[-1][2])
+    assert t["Pending notifications"]["USD"] == 1 and t["Pending notifications"]["RWF"] == 0
+    assert t["Overall processed payments"]["Total"] == 1 == (t["Overall notifications received by Irembo"]["Total"]
+                                                             + t["Pending notifications"]["Total"]
+                                                             + t["Duplicate Payment"]["Total"])
+
+    review["Currency (chosen)"] = "RWF"                                            # the reviewer says RWF: kept
+    e.save_decisions(tmp_path, AUG, review, "BPR")
+    res = e.run(tmp_path, AUG, files, **kw)
+    assert res.sheets["Pending notification"]["Currency"].tolist() == ["RWF"]
+
+    plain = e.run(tmp_path / "b", AUG, files, sla_days=1, bank="BPR", report_dir=tmp_path / "r")   # no checkout: as before
+    assert plain.review["Currency"].iloc[0] == "RWF"
