@@ -199,12 +199,12 @@ def test_currency_from_irembopay_and_sla_in_whole_minutes(tmp_path):
     main = res.blocks[-1][2]
     usd = main["Overall processed payments"]
     assert int(usd.loc[usd["Currency"] == "USD", "Number of Transactions"].iloc[0]) == 1      # FT7: USD from IremboPay
-    late = res.sheets["Payment details"].set_index("BANK_REFERENCE")["sla_status"]
+    late = res.sheets["Matched details"].set_index("BANK_REFERENCE")["sla_status"]
     assert late["FT1"] == "On time"          # paid 10:00:40 -> minute 10:00 = VALUE_DATE
     assert late["FT7"] == "On time"          # 15:01 vs 15:00: 1 minute allowed
     assert late["FT2"] == "SLA violated"     # 11:02 vs 11:00: 2 minutes
     res0 = run(tmp_path / "zero", require_review=False, sla=0)
-    assert res0.sheets["Payment details"].set_index("BANK_REFERENCE")["sla_status"]["FT7"] == "SLA violated"
+    assert res0.sheets["Matched details"].set_index("BANK_REFERENCE")["sla_status"]["FT7"] == "SLA violated"
 
 
 def test_credits_without_invoice_go_straight_to_pending(tmp_path):
@@ -231,7 +231,7 @@ def test_processed_is_every_credit_on_the_statement_each_invoice_once(tmp_path):
     assert t["Overall notifications received by Irembo"]["Total"] == 4         # FT1 FT2 FT6 FT7
     assert t["Duplicate Payment"]["Total"] == 1 and t["Pending notifications"]["Total"] == 1     # FT4 / FT3
     assert t["SLA Violated"]["Total"] == 1                                     # FT2
-    details = res.sheets["Payment details"].set_index("BANK_REFERENCE")
+    details = res.sheets["Matched details"].set_index("BANK_REFERENCE")
     assert bool(details.loc["FT5", "is_extra_credit"]) and not bool(details.loc["FT6", "is_extra_credit"])
     assert "FT3" in res.sheets["Pending notification"]["BANK_REFERENCE"].tolist()
 
@@ -324,7 +324,7 @@ def test_a_credit_without_doc_id_is_found_only_when_irembopay_has_it(tmp_path):
     review["Reviewed (Yes/No)"] = "Yes"
     e.save_decisions(tmp_path / "base", AUG, review, "BPR")
     done = run(tmp_path, rows=rows, pays=pays)
-    det = done.sheets["Payment details"].set_index("BANK_REFERENCE")
+    det = done.sheets["Matched details"].set_index("BANK_REFERENCE")
     assert det.loc["TT26226M0NPS", ["invoice_number", "Currency", "sla_status"]].tolist() == ["886000000101", "USD", "On time"]
     assert bool(det.loc["TT26226M0NPS", "notification_received"]) and bool(det.loc["FT30", "notification_received"])
     assert det.loc["FT20", bpr.FOUND_BY] == "DESCRIPTION = provider_reference" and pd.isna(det.loc["FT40", "invoice_number"])
@@ -343,5 +343,5 @@ def test_a_bpr_bank_transfer_is_bpr(tmp_path):
     res = run(tmp_path / "b", pays=pays, require_review=False)
     t = e.counts_of(res.blocks[-1][2])
     assert t["Duplicate Payment"]["Total"] == 0 and t["Overall notifications received by Irembo"]["Total"] == 5
-    d = res.sheets["Payment details"].set_index("BANK_REFERENCE")
+    d = res.sheets["Matched details"].set_index("BANK_REFERENCE")
     assert d.loc["FT4", "payment_provider"] == "BPR" and d.loc["FT4", "sla_status"] == "SLA violated"   # 3 days later
