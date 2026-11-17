@@ -272,7 +272,7 @@ def test_payment_details_holds_the_irembopay_rows_and_matched_details_every_cred
     assert list(pay.columns) == list(e.read_payment_file("p.csv", payments(PAYS), "BK").data.columns)   # its columns
     assert "886000000005" in set(pay["invoice_number"])                  # paid in the week (MTN), on the statement
     assert "CreditAmt" not in pay and len(res.sheets["Matched details"]) == 12      # every credit of the week
-    assert e.details_sheet("BK", sheets) == "Matched details" and e.details_sheet("IM") == "Payment details"
+    assert e.details_sheet("BK", sheets) == "Matched details" and e.details_sheet("IM") == "Matched details"
     assert e.details_sheet("BK", ["Payment details"]) == "Payment details"         # a BK report made before
 
 
