@@ -40,6 +40,10 @@ FILE_TYPES = ["xlsx", "xls", "csv"]
 DRIVE_STATEMENTS = "ecobank_statements_folder_id"   # 26/10/2026: step 2 can read the statements from this Drive
                                                     # folder (drive_settings.toml), picked by the days inside them
 STATEMENT_SHEET = "Ecobank statement"
+# 16/11/2026 (like BK): every credit with its IremboPay payment is in "Matched details"; "Payment details" holds
+# the IremboPay payment file's own rows of the period
+DETAILS_SHEET = "Matched details"
+IREMBOPAY_SHEET = "Payment details"
 
 # IremboPay statuses
 COMPLETED_STATUSES = {"SETTLED", "PAID", "PAYOUT_INITIATED"}
