@@ -60,6 +60,10 @@ PROVIDERS = {PROVIDER, *PROVIDER_ALIASES}
 CURRENCIES = ["RWF", "USD"]               # taken from IremboPay (the statement has no currency)
 FILE_TYPES = ["xlsx", "xls"]
 STATEMENT_SHEET = "BPR statement"
+# 16/11/2026 (like BK): every credit with its IremboPay payment is in "Matched details"; "Payment details" holds
+# the IremboPay payment file's own rows of the period
+DETAILS_SHEET = "Matched details"
+IREMBOPAY_SHEET = "Payment details"
 
 COMPLETED_STATUSES = {"SETTLED", "PAID", "PAYOUT_INITIATED"}     # same as I&M
 # pending = not paid yet: payment_status NEW (20/10/2026: "expired" is not a payment status - an expired
