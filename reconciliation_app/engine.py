@@ -454,14 +454,23 @@ def week_name(period: "Period", short: bool = False) -> str:
 HOLIDAYS: dict = {}                       # Timestamp -> name
 
 
+_HOLIDAYS_SET = [None]                  # the list HOLIDAYS was last made from (the app sets it on every click)
+
+
 def set_holidays(holidays) -> None:
     """holidays: [{"date": "2026-04-06", "name": "Easter Monday"}, ...] (or (date, name) pairs)."""
+    pairs = [(h.get("date"), h.get("name", "")) if isinstance(h, dict) else tuple(h) for h in holidays or []]
+    if pairs == _HOLIDAYS_SET[0]:
+        return
     HOLIDAYS.clear()
-    for h in holidays or []:
-        date, name = (h.get("date"), h.get("name", "")) if isinstance(h, dict) else h
-        day = pd.to_datetime(date, errors="coerce")
+    for date, name in pairs:
+        try:
+            day = pd.Timestamp(datetime.date.fromisoformat(str(date)[:10]))
+        except ValueError:
+            day = pd.to_datetime(date, errors="coerce")
         if pd.notna(day):
             HOLIDAYS[pd.Timestamp(day).normalize()] = str(name or "Holiday")
+    _HOLIDAYS_SET[0] = pairs
 
 
 def is_working_day(day) -> bool:
@@ -791,6 +800,18 @@ def load_store(base_dir: Path, bank=None) -> pd.DataFrame:
     path = store_path(base_dir)
     if not path.exists():
         return pd.DataFrame(columns=STORE_COLS)
+    stat = path.stat()                       # 17/11/2026: read again only when the file has changed (every click
+    seen = (str(path), stat.st_mtime_ns, stat.st_size)       # of the app shows the decisions in the side panel)
+    if _STORE_CACHE.get("key") != seen:
+        _STORE_CACHE.update(key=seen, store=_read_store(path))
+    store = _STORE_CACHE["store"].copy()
+    return store if bank is None else store[store["bank"].eq(get_bank(bank).CODE)]
+
+
+_STORE_CACHE = {}
+
+
+def _read_store(path: Path) -> pd.DataFrame:
     store = pd.read_csv(path, dtype=str).fillna("")
     for c in STORE_COLS:
         if c not in store.columns:
@@ -804,8 +825,7 @@ def load_store(base_dir: Path, bank=None) -> pd.DataFrame:
             if parts.shape[1] == 3:                                            # invoice may itself contain "|"
                 store.loc[rows, "key"] = (parts[0] + "|" + parts[1] + "||"
                                           + store.loc[rows, "invoice_number"].astype(str).str.strip())
-    store = store[STORE_COLS]
-    return store if bank is None else store[store["bank"].eq(get_bank(bank).CODE)]
+    return store[STORE_COLS]
 
 
 def _write_store(base_dir: Path, store: pd.DataFrame, what="save again"):
@@ -928,6 +948,79 @@ def review_rows(base_dir: Path, period: Period, not_found: pd.DataFrame, bank=No
     return review, int(from_key.sum() + from_inv.sum())
 
 
+def one_payment_per_invoice(payments: pd.DataFrame) -> pd.DataFrame:
+    """One IremboPay row per invoice: the successful transaction, else the latest one."""
+    p = payments.assign(_successful=payments["transaction_status"].astype(str).str.upper().eq("SUCCESSFUL"))
+    return (p.sort_values(["invoice_number", "_successful", "created_at"], ascending=[True, False, False])
+            .drop_duplicates("invoice_number", keep="first").drop(columns="_successful").reset_index(drop=True))
+
+
+# what IremboPay's checkout says decides a credit the payment file does not have: (Report table, payment_status)
+CHECK_DECIDES = {"Paid": ("Paid with other channel", ""), "Expired": ("Pending notification", "NEW"),
+                 "Open, not paid yet": ("Pending notification", "NEW")}
+
+
+def rule_decisions(review: pd.DataFrame, payments: pd.DataFrame, bank=None, answers=None):
+    """17/11/2026: what the agreed rules (CLAUDE.md) decide for the review rows whose Report table is still empty, so
+    a person only confirms them (Reviewed = Yes); a choice already made is never replaced. In order:
+        cancelled by a debit                 Exclude (a reversal is not a payment)
+        a second credit of an invoice        left for a person
+        no invoice number                    Pending notification, NEW
+        in the IremboPay file (found)        paid through this bank: Notification received; paid another way: Paid
+                                             with other channel; not paid: Pending notification (the SLA column is
+                                             never filled: a row with no VALUE_DATE stays "Cannot check")
+        not in the file, IremboPay checkout  Paid: Paid with other channel; Expired / Open: Pending notification
+        anything else                        left for a person (not an IremboPay invoice, could not check)
+    review: the Exception Resolution table (engine.review_rows); payments: the IremboPay rows; answers: {invoice:
+    checkout answer}. Returns (review with the decisions filled, [(what, how many, Report table)])."""
+    bank = get_bank(bank)
+    out = review.copy()
+    text = lambda col: (out[col].astype(object).where(out[col].notna(), "").astype(str).str.strip() if col in out
+                        else pd.Series("", index=out.index))
+    reason, table = text("Reason"), text("Report table")
+    inv = text("invoice_number").where(lambda s: ~s.isin(["None", "nan", "<NA>"]), "")
+    wanted = set(inv[inv.ne("")])                 # (a BK month: 96,000 IremboPay rows for a few hundred in review)
+    pay = one_payment_per_invoice(payments[payments["invoice_number"].astype(str).isin(wanted)]).set_index("invoice_number")
+    found = inv.ne("") & inv.isin(set(pay.index))
+    paid_at = pd.Series(pd.NaT, index=out.index, dtype="datetime64[ns]")
+    provider = pd.Series("", index=out.index, dtype=object)
+    if found.any():
+        paid_at[found] = pd.to_datetime(inv[found].map(pay["paid_at"]), errors="coerce")
+        provider[found] = inv[found].map(pay["payment_provider"]).fillna("").astype(str)
+    ours = provider.isin(bank_providers(bank))
+    answer = inv.map(answers or {}).fillna("")
+
+    todo = table.isin(["", "—"])
+    summary = []
+
+    def decide(mask, label, choice, status="", comment=""):
+        mask = mask & todo
+        if not mask.any():
+            return
+        out.loc[mask, "Report table"] = choice
+        if status:
+            out.loc[mask, "payment_status"] = status
+        if isinstance(comment, pd.Series) or comment:
+            empty = mask & text("Comment").eq("")
+            out.loc[empty, "Comment"] = comment if isinstance(comment, str) else comment[empty]
+        todo[mask] = False
+        summary.append((label, int(mask.sum()), choice))
+
+    cancelled = reason.str.extract(r"(?i)cancelled by the debit (\S+)", expand=False)
+    decide(cancelled.notna(), "cancelled by a debit", "Exclude",
+           comment="Cancelled by the debit " + cancelled.fillna("") + ": not a payment")
+    todo &= ~reason.str.startswith("Invoice credited again")
+    decide(~inv.map(has_invoice_number).astype(bool), "no invoice number", "Pending notification", "NEW",
+           comment="No invoice number")
+    decide(found & paid_at.notna() & ours, f"paid through {bank.NAME} in IremboPay", "Notification received")
+    decide(found & paid_at.notna() & ~ours, "paid another way in IremboPay", "Paid with other channel")
+    decide(found & paid_at.isna(), "in IremboPay, not paid yet", "Pending notification", "NEW")
+    for said, (choice, status) in CHECK_DECIDES.items():
+        decide(~found & answer.eq(said), f"IremboPay check: {said.lower()}", choice, status,
+               comment="Invoice expired (IremboPay checkout)" if said == "Expired" else "")
+    return out, summary
+
+
 def apply_review(merged: pd.DataFrame, not_found: pd.DataFrame, payments: pd.DataFrame, review: pd.DataFrame,
                  bank=None):
     """Apply the review decisions to the matched rows (same logic in the app and the notebook).
@@ -940,7 +1033,14 @@ def apply_review(merged: pd.DataFrame, not_found: pd.DataFrame, payments: pd.Dat
     to_review = merged["_to_review"] if "_to_review" in merged else merged["originally_not_found"]
     choose_currency = option(bank, "CURRENCY_FROM_IREMBOPAY", False)
     for c in ("review_status", "review_table", "review_comment", "sla_override"):
-        merged[c] = ""
+        merged[c] = pd.Series("", index=merged.index, dtype=object)
+    # 17/11/2026: a text column read from a file cannot be changed in place - each decision below copied it whole
+    # (a BK month: 98,000 rows, 2,000 changes: 8 seconds); while the decisions are applied the columns they change
+    # are plain Python text, then put back as they were
+    kept_types = {c: merged[c].dtype for c in merged.columns
+                  if pd.api.types.is_string_dtype(merged[c]) and merged[c].dtype != object}
+    for c in kept_types:
+        merged[c] = merged[c].astype(object)
     merged["_key"] = key_of(merged, bank)
     pay_by_invoice = payments.set_index("invoice_number")
     payment_fields = [c for c in payments.columns if c != "invoice_number"]
@@ -1063,6 +1163,8 @@ def apply_review(merged: pd.DataFrame, not_found: pd.DataFrame, payments: pd.Dat
         if sla in ("yes", "y", "no", "n"):
             merged.loc[rows, "sla_override"] = "SLA violated" if sla.startswith("y") else "On time"
     merged["paid_at"] = pd.to_datetime(merged["paid_at"], errors="coerce")
+    for c, dtype in kept_types.items():
+        merged[c] = merged[c].astype(dtype)
     if counts.get("Currency to choose"):
         messages.append(("warning", f"{counts['Currency to choose']} credit(s) marked reviewed have no currency (not in "
                                     "IremboPay): choose it in the Currency column, then save again."))
@@ -1092,21 +1194,21 @@ def read_report_counts(path: Path, sheet: str, bank=None):
     different count (every payment Irembo's checkout logged, not the ones it shows as paid) - approved 2026-10-27,
     found while wiring up "Compare with previous period" against the notebooks' reports."""
     bank = get_bank(bank)
-    wb = load_workbook(path, data_only=True)
+    wb = _Book(path)
     try:
         if sheet not in wb.sheetnames:
             raise ReconError(f"{path.name}: this report has no {sheet} sheet.")
         ws = wb[sheet]
         heading = ws.cell(1, 1).value or ""
         counts = {}
-        for row in ws.iter_rows(min_row=1, max_row=min(ws.max_row, 30)):
-            for c in row:
-                if c.value in TABLE_TITLES and c.value != "Overall notifications received by Irembo" and c.value not in counts:
+        for r in range(1, min(ws.max_row, 30) + 1):
+            for col, value in enumerate(ws.rows[r - 1], start=1):
+                if value in TABLE_TITLES and value != "Overall notifications received by Irembo" and value not in counts:
                     vals = {}
                     for i, cur in enumerate(bank.CURRENCIES + ["Total"]):
-                        v = ws.cell(c.row + 2 + i, c.column + 1).value
+                        v = ws.cell(r + 2 + i, col + 1).value
                         vals[cur] = int(v) if isinstance(v, (int, float)) else 0
-                    counts[c.value] = vals
+                    counts[value] = vals
         if "Pending notifications" not in counts:
             pending = _notebook_sheet_counts(wb, "Pending notification", bank.CURRENCIES)
             counts["Pending notifications"] = ({"Total" if pd.isna(c) else c: int(n) for c, n in
@@ -1142,13 +1244,13 @@ def save_uploaded_report(base_dir: Path, period: Period, name: str, content: byt
     tmp.parent.mkdir(parents=True, exist_ok=True)
     tmp.write_bytes(content)
     try:
-        wb = load_workbook(tmp, read_only=True)
+        wb = _Book(tmp)
         sheets = set(wb.sheetnames)
         wb.close()
         mine = get_bank(bank)
         made_here = [kind for kind, sheet in SUMMARY_SHEET.items() if sheet in sheets]
         if made_here and is_no_transaction_report(tmp, period):  # a No-Transaction Report of this bank and period
-            wb = load_workbook(tmp, read_only=True, data_only=True)
+            wb = _Book(tmp)
             ws = wb[SUMMARY_SHEET[period.report_type]]
             title, dates = str(ws.cell(1, 1).value or ""), str(ws.cell(2, 1).value or "")
             wb.close()
@@ -1322,9 +1424,7 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
         refs = (payments.assign(_r=payments["provider_reference"].fillna("").astype(str).str.strip())   # credits it
                 .groupby("invoice_number")["_r"].agg(lambda r: "|".join(sorted(set(r) - {""}))))       # recorded)
         payments["_provider_refs"] = payments["invoice_number"].map(refs).fillna("")
-    payments["_successful"] = payments["transaction_status"].astype(str).str.upper().eq("SUCCESSFUL")
-    payments = (payments.sort_values(["invoice_number", "_successful", "created_at"], ascending=[True, False, False])
-                .drop_duplicates("invoice_number", keep="first").drop(columns="_successful").reset_index(drop=True))
+    payments = one_payment_per_invoice(payments)
 
     # ---- B. bank statement: all files together, repeated rows dropped (by default the period is set by the
     #         payment date); some banks keep one row per invoice ----
@@ -1701,15 +1801,21 @@ def report_figures(blocks: list) -> dict:
             "currencies": [(c, pc[c], rc.get(c, 0)) for c in pc if pc[c] or rc.get(c, 0)]}
 
 
-def statement_invoices(files: list, bank=None) -> list:
+def statement_invoices(files: list, bank=None, period: Period | None = None) -> list:
     """Every invoice number of the uploaded statements (found the way the run finds them: BPR also by its references
-    in the IremboPay file), for the checkout check made before the run (CHECKOUT_ALL)."""
+    in the IremboPay file), for the checkout check made before the run (CHECKOUT_ALL). period (17/11/2026): only
+    the credits whose bank date is in it, a day either side (the statements added often cover weeks before it -
+    Ecobank: 31 days -, and only the period's credits are in the report); a row with no readable date is kept."""
     bank = get_bank(bank)
     statements = [f.data for f in files if f.kind == "bank"]
     pays = [f.data for f in files if f.kind == "payments"]
     if not statements:
         return []
     rows = bank.clean_statement(pd.concat(statements, ignore_index=True))
+    if period is not None and bank.COLUMNS["payment_date"] in rows:
+        day = pd.to_datetime(rows[bank.COLUMNS["payment_date"]], errors="coerce")
+        near = day.isna() | ((day >= period.start - pd.Timedelta(days=1)) & (day < period.end + pd.Timedelta(days=1)))
+        rows = rows[near]
     if hasattr(bank, "find_invoices") and pays:
         rows = bank.find_invoices(rows, pd.concat(pays, ignore_index=True))
     return sorted({str(i) for i in rows["invoice_number"].dropna() if str(i).strip()})
@@ -1755,7 +1861,11 @@ def recent_runs(base_dir: Path, n: int = 8, bank=None) -> pd.DataFrame:
     if not log.exists():
         return pd.DataFrame()
     try:
-        runs = pd.read_csv(log, dtype=str).fillna("")
+        stat = log.stat()                    # 17/11/2026: read again only when a run was added
+        seen = (str(log), stat.st_mtime_ns, stat.st_size)
+        if _RUNS_CACHE.get("key") != seen:
+            _RUNS_CACHE.update(key=seen, runs=pd.read_csv(log, dtype=str).fillna(""))
+        runs = _RUNS_CACHE["runs"].copy()
         if "bank" not in runs.columns:
             runs["bank"] = "IM"
         runs.loc[runs["bank"].eq(""), "bank"] = "IM"
@@ -1764,6 +1874,9 @@ def recent_runs(base_dir: Path, n: int = 8, bank=None) -> pd.DataFrame:
         return runs.tail(n).iloc[::-1].reset_index(drop=True)
     except Exception:
         return pd.DataFrame()
+
+
+_RUNS_CACHE = {}
 
 
 # =====================================================================================================================
@@ -2033,7 +2146,7 @@ def previous_column(period: Period) -> str:
 
 def is_no_transaction_report(path: Path, period: Period) -> bool:
     """True when the report is a No-Transaction Report (its summary sheet has a 'Reconciliation status' row)."""
-    wb = load_workbook(path, data_only=True)
+    wb = _Book(path)
     try:
         sheet = SUMMARY_SHEET[period.report_type]
         ws = wb[sheet] if sheet in wb.sheetnames else None
@@ -2047,7 +2160,7 @@ def read_previous_counts(path: Path, period: Period, bank=None) -> dict:
     a standard report (its first summary block), or a No-Transaction Report (its one table)."""
     bank = get_bank(bank)
     sheet = SUMMARY_SHEET[period.report_type]
-    wb = load_workbook(path, data_only=True)
+    wb = _Book(path)
     try:
         ws = wb[sheet] if sheet in wb.sheetnames else None
         no_tx = ws is not None and any(ws.cell(r, 1).value == "Reconciliation status" for r in range(1, ws.max_row + 1))
@@ -2282,7 +2395,7 @@ def _right_col(ws, row: int, col: int, title: str):
 def read_merchant_counts(path: Path, sheet: str) -> dict:
     """{(merchant, currency): transactions} of the first Payment per merchant table of a summary sheet; {} when
     the report has none (made before 12/10/2026): the comparison then says N/A."""
-    wb = load_workbook(path, data_only=True)
+    wb = _Book(path)
     try:
         if sheet not in wb.sheetnames:
             return {}
@@ -2307,14 +2420,50 @@ class _Grid:
     """A summary sheet read once in read-only mode, kept in memory: ws.cell(row, col).value and ws.max_row as with
     openpyxl, without loading the whole workbook (the Payment details sheet is large). Same values, much faster."""
 
-    def __init__(self, ws):
-        self.rows = [list(r) for r in ws.iter_rows(values_only=True)]
+    def __init__(self, ws=None, rows=None):
+        self.rows = rows if rows is not None else [list(r) for r in ws.iter_rows(values_only=True)]
         self.max_row = len(self.rows)
 
     def cell(self, row: int, column: int) -> _Cell:
         if 1 <= row <= len(self.rows) and 1 <= column <= len(self.rows[row - 1]):
             return _Cell(self.rows[row - 1][column - 1])
         return _Cell(None)
+
+    def __getitem__(self, row: int) -> list:
+        return [_Cell(v) for v in self.rows[row - 1]] if 1 <= row <= len(self.rows) else []
+
+
+class _Book:
+    """A saved report opened to read its values (17/11/2026): wb.sheetnames, wb[sheet] (a _Grid), wb.close(), like
+    openpyxl. With calamine a sheet is read only when asked for: a BK report is 5 to 75 MB, and openpyxl took from
+    20 seconds to minutes to open one just for its summary sheet; calamine takes well under a second. openpyxl's
+    read-only mode when calamine is not installed."""
+
+    def __init__(self, path: Path):
+        self._grids, self._cal, self._wb = {}, None, None
+        if EXCEL_ENGINE == "calamine":
+            from python_calamine import CalamineWorkbook
+            self._cal = CalamineWorkbook.from_filelike(io.BytesIO(Path(path).read_bytes()))   # no file left open
+            self.sheetnames = list(self._cal.sheet_names)
+        else:
+            self._wb = load_workbook(path, data_only=True, read_only=True)
+            self.sheetnames = self._wb.sheetnames
+
+    def __getitem__(self, name: str) -> _Grid:
+        if name not in self._grids:
+            if self._cal is not None:
+                rows = self._cal.get_sheet_by_name(name).to_python(skip_empty_area=False)
+                self._grids[name] = _Grid(rows=[[None if v == "" else v for v in r] for r in rows])
+            else:
+                self._grids[name] = _Grid(self._wb[name])
+        return self._grids[name]
+
+    def close(self):
+        if self._cal is not None:
+            self._cal.close()
+        if self._wb is not None:
+            self._wb.close()
+        self._grids.clear()
 
 
 def read_report(path: Path, count_reviewed: bool = True) -> dict:
@@ -2327,13 +2476,13 @@ def read_report(path: Path, count_reviewed: bool = True) -> dict:
     kind = path.parent.name if path.parent.name in SUMMARY_SHEET else "month"
     code = report_bank(path)
     currencies = BANKS[code].CURRENCIES if code in BANKS else []
-    wb = load_workbook(path, data_only=True, read_only=True)     # read only: the summary sheets are copied to memory
+    wb = _Book(path)                                              # only the sheets asked for are read
     try:
         blocks, reconciled_on, merchants = [], "", {}
         for sheet in ("Summary-Daily", "Summary-Weekly", "Summary-Monthly"):
             if sheet not in wb.sheetnames:
                 continue
-            ws = _Grid(wb[sheet])
+            ws = wb[sheet]
             stamp = str(ws.cell(*RECONCILED_CELL).value or "") or str(ws.cell(RECONCILED_CELL[0],
                                                                                   RECONCILED_CELL[1] + 1).value or "")
             if stamp.startswith(RECONCILED_LABEL):
@@ -2377,11 +2526,11 @@ def read_report(path: Path, count_reviewed: bool = True) -> dict:
         not_found = 0                                             # rows that went through the review
         details = details_sheet(code, wb.sheetnames)
         if count_reviewed and details in wb.sheetnames:
-            ws = wb[details]
-            headers = list(next(ws.iter_rows(min_row=1, max_row=1, values_only=True), ()))
+            rows = wb[details].rows
+            headers = list(rows[0]) if rows else []
             if "review_status" in headers:
                 col = headers.index("review_status")
-                not_found = sum(1 for row in ws.iter_rows(min_row=2, values_only=True) if len(row) > col and row[col])
+                not_found = sum(1 for row in rows[1:] if len(row) > col and row[col])
     finally:
         wb.close()
     if not blocks:
@@ -2529,7 +2678,7 @@ def read_notebook_report(path: Path, bank, period: Period) -> dict:
     approved 2026-11-03). No "reconciled on" stamp, no "needs a look" count - the notebooks do not keep those."""
     bank = get_bank(bank)
     sheet = SUMMARY_SHEET[period.report_type]
-    wb = load_workbook(path, data_only=True)
+    wb = _Book(path)
     try:
         if sheet not in wb.sheetnames:
             raise ReconError(f"{path.name}: not a report the notebooks made (no {sheet} sheet).")

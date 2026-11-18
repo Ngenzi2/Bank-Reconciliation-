@@ -496,6 +496,8 @@ def read_drive_report(client, file_id: str, name: str, session, mime: str = "") 
     path = session.file(p["kind"], f"{p['code']}{engine.REPORT_SUFFIX}{p['label']}.xlsx")
     try:
         path.write_bytes(data)
-        return {"report": engine.read_report(path, count_reviewed=False), "xlsx": data, "pdf": pdf_report.report_pdf(path)}
+        report = engine.read_report(path, count_reviewed=False)       # read once: the PDF is made from it too
+        return {"report": report, "xlsx": data,
+                "pdf": pdf_report.build_pdf(report, made=pd.Timestamp(path.stat().st_mtime, unit="s"))}
     finally:
         session.remove(path)

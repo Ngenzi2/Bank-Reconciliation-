@@ -4,9 +4,12 @@ THE DASHBOARD'S FIGURES, REMEMBERED ON THIS COMPUTER BETWEEN SESSIONS
 Reading a report from Google Drive takes seconds (download + open); its figures never change while the file is the
 same. So the figures of each report are kept in output/.dashboard_facts.pkl (output/ stays on this computer, like
 the review decisions), keyed by the report's Drive file ID and its last-modified date: a new or replaced report is
-read again from Drive, the others are not. The figures are always those of the report on Drive.
+read again from Drive, the others are not. The figures are always those of the report on Drive. A report that cannot
+be shown (e.g. not made by this app) is kept with its message (17/11/2026): it is not downloaded again until it
+changes on Drive.
 
-    load(path)              {key: [facts]} (empty when there is no file, it cannot be read, or VERSION changed)
+    load(path)              {key: [facts] or message} (empty when there is no file, it cannot be read, or VERSION
+                            changed)
     save(path, entries)     add / replace entries and drop those of reports no longer on Drive (keep = their keys)
     key(record)             "<file id>|<modified>"
 
@@ -41,8 +44,8 @@ def save(path: Path, entries: dict, keep=None) -> None:
     keep: the keys of the reports now on Drive (the others are dropped). A failure to write is not an error: the
     dashboard still works, it just reads from Drive next time."""
     data = load(path)
-    for k, facts in entries.items():
-        data[k] = [dataclasses.replace(f, record=None) for f in facts]
+    for k, facts in entries.items():          # 17/11/2026: a report that cannot be shown: its message (text)
+        data[k] = facts if isinstance(facts, str) else [dataclasses.replace(f, record=None) for f in facts]
     if keep is not None:
         data = {k: v for k, v in data.items() if k in set(keep)}
     # 02/11/2026: a name of its own (uuid): two saves at the same time never write into the same file
@@ -56,6 +59,7 @@ def save(path: Path, entries: dict, keep=None) -> None:
         tmp.unlink(missing_ok=True)
 
 
-def attach(facts: list, record) -> list:
-    """The stored facts with the current Drive record of their report."""
-    return [dataclasses.replace(f, record=record) for f in facts]
+def attach(facts, record):
+    """The stored facts with the current Drive record of their report (a message, for a report that cannot be
+    shown, as it is)."""
+    return facts if isinstance(facts, str) else [dataclasses.replace(f, record=record) for f in facts]

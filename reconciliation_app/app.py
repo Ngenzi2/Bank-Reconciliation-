@@ -61,7 +61,7 @@ APP_DIR = Path(__file__).resolve().parent
 # integrations/ and config.py are not reloaded: a connected Drive client and its error class must stay the same.
 RELOADED = ["services.app_settings", "pdf_report", "integrations.irembopay_checkout", "integrations.slack", "services.session_files",
             "services.report_history", "services.dashboard", "services.dashboard_view", "services.pay_files", "services.slack_message",
-            "services.facts_cache", "services.report_summary", "services.followup"]
+            "services.facts_cache", "services.report_summary", "services.followup", "services.read_cache"]
 
 
 def _code_mtime():
@@ -98,7 +98,7 @@ from integrations import google_drive
 from integrations.google_drive import DriveClient, DriveError
 from integrations import irembopay_checkout, slack
 from services import (app_settings, dashboard, dashboard_view, drive_statements, facts_cache, folder_picker,
-                      friendly, followup, pay_files, report_history, report_summary, slack_message)
+                      friendly, followup, pay_files, read_cache, report_history, report_summary, slack_message)
 from services.session_files import SessionFolder
 
 
@@ -108,6 +108,7 @@ from services.session_files import SessionFolder
 # the "Bank Reconciliation" folder (output/ is created inside it); IM_RECON_BASE is only used for testing
 BASE_DIR = Path(os.environ.get("IM_RECON_BASE", Path(__file__).resolve().parent.parent))
 DASH_CACHE = BASE_DIR / "output" / ".dashboard_facts.pkl"     # the dashboard's figures, kept on this computer
+FILE_DAYS = BASE_DIR / "output" / ".file_days.pkl"            # the days each file covers (services/read_cache.py)
 FOLLOWUP_CACHE = BASE_DIR / "output" / ".followup_items.pkl"   # the follow-up items of each report, the same way
 BRAND = "#123239"          # IremboPay dark teal
 ACCENT = "#99E378"         # IremboPay green
@@ -801,6 +802,7 @@ state.setdefault("step", 1)
 if state.step > len(STEPS):            # 27/10/2026: steps were combined (a session still on an old later step)
     state.step = len(STEPS)
 state.setdefault("files", {})            # digest -> engine.UploadedFile (in memory only)
+state.setdefault("unopened", {})         # digest -> (name, content, kind): known to be outside the period, not opened
 state.setdefault("read_errors", [])      # files that could not be read
 state.setdefault("uploader_round", 0)
 state.setdefault("result", None)
@@ -916,13 +918,39 @@ def local_time(value):
     return t.tz_convert(datetime.now().astimezone().tzinfo).tz_localize(None)
 
 
+# ---- the Drive listings (17/11/2026): kept 10 minutes for every session, so opening the app again, or another tab,
+#      does not list Drive again; Refresh, and saving a report, list it again at once
+@st.cache_data(ttl=600, show_spinner=False, max_entries=8)
+def _listed_reports(root: str, _client):
+    return report_history.drive_index(_client, root)
+
+
+@st.cache_data(ttl=600, show_spinner=False, max_entries=8)
+def _listed_files(folder: str, types: tuple, _client):
+    return _client.list_files(folder, list(types))
+
+
+def list_reports(client, root):
+    """The reports in Reconciliation Reports on Drive (report_history.drive_index), listed at most every 10 minutes."""
+    return _listed_reports(root, client)
+
+
+def forget_listings():
+    """Drive is listed again the next time (after a save, or Refresh)."""
+    state.history_index = None
+    _listed_reports.clear()
+    _listed_files.clear()
+
+
 # ---- the run: the report is made in the session's temporary folder, kept in memory, and the file deleted at once
 def drive_index_cached(client, root, fresh=False):
     """The list of Reconciliation Reports on Drive, made once and reused (Report History and "Compare" share it),
     so changing the bank or the month does not list Drive again. Saving a report clears it."""
     cached = state.get("history_index")
+    if fresh:
+        _listed_reports.clear()
     if fresh or not cached or cached[0] != root:
-        state.history_index = (root, report_history.drive_index(client, root))
+        state.history_index = (root, list_reports(client, root))
         state.history_index_at = pd.Timestamp.now()
     return state.history_index[1]
 
@@ -1033,7 +1061,7 @@ def run_reconciliation(acc):
             prev_file = previous_file(prev, prev_info, session)
         checkout = None
         if engine.option(bank, "CHECKOUT_ALL", False):     # Ecobank, BPR: every invoice through the checkout first
-            checkout = checkout_all(engine.statement_invoices(acc, bank))
+            checkout = checkout_all(engine.statement_invoices(acc, bank, period))
         # 13/11/2026: the currency the checkout gave (open invoices); used by Ecobank and BPR (CURRENCY_FROM_CHECKOUT)
         currencies = irembopay_checker().currencies()
         res = engine.run(BASE_DIR, period, acc, sla_days=sla_days, compare=compare, bank=bank,
@@ -1219,7 +1247,7 @@ def auto_delivery(res, mem):
         old = {r.name: r for r in (state.get("drive_save") or {}).get("results", [])} if only else {}
         old.update({r.name: r for r in results})
         state.drive_save = {"results": list(old.values())}
-        state.history_index = None                      # Reports and the Dashboard list Drive again
+        forget_listings()                               # Reports and the Dashboard list Drive again
 
     if not done.get("save_tried"):
         with irembo_loading("Saving the report to Google Drive…"):
@@ -1336,7 +1364,7 @@ def save_to_drive_card(mem, skey="drive_save"):
                                              session=state.session_folder)
         results = {r.name: r for r in status.get("results", [])}
         results.update({r.name: r for r in new})
-        state.history_index = None                      # Report History lists Drive again
+        forget_listings()                               # Report History lists Drive again
         state[skey] = {"mode": mode, "existing": existing, "results": list(results.values())}
         state.drive_just_saved = True                   # the saved note is shown once, then fades out
         if len(results) == len(files) and all(r.ok for r in results.values()):   # every file confirmed
@@ -1458,7 +1486,7 @@ def irembopay_from_drive(pay_types):
     if state.get("drive_pay_folder") != folder or state.get("drive_pay_list") is None:
         try:
             with irembo_loading("Listing the IremboPay files on Google Drive…"):
-                state.drive_pay_list = client.list_files(folder, pay_types)
+                state.drive_pay_list = _listed_files(folder, tuple(pay_types), client)
             state.drive_pay_folder = folder
         except DriveError as err:
             state.drive_pay_list = None
@@ -1531,6 +1559,7 @@ def irembopay_from_drive(pay_types):
                             help="List the files in IremboPay File again")
     if refresh:
         state.drive_pay_list = None
+        _listed_files.clear()
         st.rerun()
     if add:
         try:
@@ -1583,7 +1612,7 @@ def statements_from_drive(end):
         got = job["result"]
         state.drive_stmt_key, state.drive_stmt_info = key, got
         new = [(name, content, "bank") for name, content in got.files
-               if engine.file_digest(content) not in state.files]
+               if engine.file_digest(content) not in state.files and engine.file_digest(content) not in state.unopened]
     got = state.drive_stmt_info
     # 26/10/2026: no block with the number of statements (the files added are listed below); only a problem shows
     if got.errors:
@@ -1604,9 +1633,28 @@ def side_head(icon, title, count=None):
 
 
 # ---- uploaded files
+def read_file(name, content, kind):
+    """One file read for this bank (services/read_cache.py: a file read before is not read again)."""
+    reader = engine.read_bank_file if kind == "bank" else engine.read_payment_file
+    return read_cache.read(name, content, kind, bank, reader, FILE_DAYS)
+
+
 def accepted_files():
-    """Files accepted for the current period (duplicates and files outside the period are left out)."""
-    acc, rej = [], []
+    """Files accepted for the current period (duplicates and files outside the period are left out). 17/11/2026: a
+    file already known to be outside the period is not opened (services/read_cache.py); it is opened as soon as a
+    period needs it."""
+    rej = []
+    for digest, (name, content, kind) in list(state.unopened.items()):
+        reason = read_cache.outside(name, content, kind, bank, period, FILE_DAYS, digest)
+        if reason:
+            rej.append(reason)
+            continue
+        del state.unopened[digest]
+        try:
+            state.files[digest] = read_file(name, content, kind)
+        except engine.ReconError as err:
+            state.read_errors.append(str(err))
+    acc = []
     for f in state.files.values():
         reason = engine.accept_file(period, f, acc, bank)
         if reason:
@@ -2110,7 +2158,7 @@ def dashboard_facts(client, root):
     cached = state.get("history_index")
     if not cached or cached[0] != root:
         with irembo_loading("Reading the reports on Google Drive…", "Reconciliation Reports"):
-            state.history_index = (root, report_history.drive_index(client, root))
+            state.history_index = (root, list_reports(client, root))
             state.history_index_at = pd.Timestamp.now()
     # the monthly and the weekly reports (27/10/2026: a week with a weekly report uses it; a month with no monthly
     # report yet, e.g. October, shows its weeks)
@@ -2169,7 +2217,9 @@ def dashboard_facts(client, root):
                 report_summary.write(client, r.parent, r.name, cache[key(r)], r.md5, replace_id=old.id if old else None)
             except Exception as err:                    # 02/11/2026: any bad report is left out, never a crash
                 msg = friendly_error(err, "Reading this report")
-                cache[key(r)] = msg if msg.startswith(r.name) else f"{r.name}: {msg}"   # tried again next time
+                cache[key(r)] = msg if msg.startswith(r.name) else f"{r.name}: {msg}"
+                if not isinstance(err, DriveError):     # 17/11/2026: the report itself: not read again until it
+                    fresh[key(r)] = cache[key(r)]       # changes (a download problem is tried again next time)
             ld.update(f"Reading · {i} of {n}")
         ld.__exit__(None, None, None)
     # 5. into the bank's file: the reports read another way; a bank with no file yet gets every report known here
@@ -2334,7 +2384,8 @@ def dashboard_page():
                       help="Also offer the periods whose reports are not all saved (e.g. a week that "
                            "starts in a month with no report). Off: only complete periods.")
             if st.button("🔄 Refresh", key="dash_refresh", width="stretch", help="Read the reports on Google Drive again"):
-                state.history_index, state.dash_facts = None, {}
+                forget_listings()
+                state.dash_facts = {}
                 if state.get("drive") is not None:
                     state.drive.forget_folders()
                 st.rerun()
@@ -2786,7 +2837,7 @@ def followup_data(client, root, refresh: bool = False):
     cached = state.get("history_index")
     if refresh or not cached or cached[0] != root:
         with irembo_loading("Reading the reports on Google Drive…", "Reconciliation Reports"):
-            state.history_index = (root, report_history.drive_index(client, root))
+            state.history_index = (root, list_reports(client, root))
             state.history_index_at = pd.Timestamp.now()
     reports = followup.latest_reports(state.history_index[1].records, start)
     cache = state.setdefault("fu_items", {})
@@ -3001,7 +3052,7 @@ if PAGE == "reports":
     client, problem, index = None, "", None
     if on_drive:
         if t3.button("🔄 Refresh", key="history_refresh", width="stretch", help="List Google Drive again"):
-            state.history_index = None
+            forget_listings()
         client, problem = drive_client()
         root = config.load().reports_root_folder_id
         if client is None or not root:
@@ -3011,7 +3062,7 @@ if PAGE == "reports":
             if not cached or cached[0] != root:
                 try:
                     with irembo_loading("Reading the reports on Google Drive…", "Reconciliation Reports"):
-                        state.history_index = (root, report_history.drive_index(client, root))
+                        state.history_index = (root, list_reports(client, root))
                         state.history_index_at = pd.Timestamp.now()
                 except DriveError as err:
                     problem, state.history_index = str(err), None
@@ -3503,9 +3554,17 @@ def _fmt_when(v) -> str:
     return f"{t:%d/%m/%Y}" if t == t.normalize() else f"{t:%d/%m/%Y %H:%M}"
 
 
-# what an answer fills in an empty Report table cell: (Report table, payment status in the report; "" = the usual)
-CHECK_FILL = {"Paid": ("Paid with other channel", ""), "Expired": ("Pending notification", "NEW"),
-              "Open, not paid yet": ("Pending notification", "NEW")}     # "Not an IremboPay invoice": left empty
+def review_payments() -> pd.DataFrame:
+    """The IremboPay rows of the files added (for the decisions filled in Exception Resolution), joined once per set
+    of files."""
+    pays = [f for f in accepted_files()[0] if f.kind == "payments"]
+    key = tuple(sorted(f.digest for f in pays))
+    if state.get("review_payments_key") != key:
+        cols = ["invoice_number", "paid_at", "payment_provider", "transaction_status", "created_at"]
+        state.review_payments = (pd.concat([f.data[[c for c in cols if c in f.data]] for f in pays], ignore_index=True)
+                                 if pays else pd.DataFrame(columns=cols))
+        state.review_payments_key = key
+    return state.review_payments
 
 
 # =====================================================================================================================
@@ -3793,14 +3852,20 @@ if state.step == 1 and not state.get("no_tx_preview") and STEP1_UPLOAD:     # �
             with irembo_loading("Reading the files…"):
                 for name, content, kind in new:
                     digest = engine.file_digest(content)
-                    if digest in state.files:
+                    if digest in state.files or digest in state.unopened:
                         state.read_errors.append(f"{name}: the same file was already added.")
                         continue
+                    if read_cache.outside(name, content, kind, bank, period, FILE_DAYS, digest):
+                        state.unopened[digest] = (name, content, kind)         # known: not for this period
+                        continue
                     try:
-                        if kind == "bank":
-                            state.files[digest] = engine.read_bank_file(name, content, bank)
-                        else:
-                            state.files[digest] = engine.read_payment_file(name, content, bank)
+                        f = read_file(name, content, kind)
+                        if engine.accept_file(period, f, [], bank):      # not for this period: its rows are not kept
+                            read_cache.forget(content, kind, bank)       # (a BK month: 100,000 rows a file); it is
+                            state.unopened[digest] = (name, content, kind)   # read again if a period needs it
+                            continue
+                        state.files[digest] = f
+                        if kind == "payments":
                             state.toast = f"IremboPay file added: {name}"      # a short pop-up after the reload
                     except engine.ReconError as err:
                         state.read_errors.append(str(err))
@@ -3862,6 +3927,7 @@ if state.step == 1 and not state.get("no_tx_preview") and STEP1_UPLOAD:     # �
                     accepted_ids = {f.digest for f in acc}
                     for digest in [d for d in state.files if d not in accepted_ids]:
                         state.files.pop(digest)         # files outside the period
+                    state.unopened = {}                 # (and those known to be, not opened)
                     state.read_errors = []              # wrong files and files added twice
                     st.rerun()
     has_bank = any(f.kind == "bank" for f in acc)
@@ -3992,36 +4058,24 @@ elif state.step == 3:     # Reconcile & Exception Resolution
                 # ---- every bank: what IremboPay's checkout says about each invoice, looked up in the background and only
                 #      shown (read only, never saved, never fills a decision): the reviewer concludes
                 checking = bank.CODE in CHECKOUT_BANKS
+                answers = {}
                 if checking:
                     checker = irembopay_checker()
                     invoices = table["invoice_number"].fillna("").astype(str).tolist()
                     checker.add(invoices)
                     table[CHECK_COL] = [checker.answer(i) for i in invoices]
+                    answers = dict(zip(invoices, table[CHECK_COL]))
                     shown = shown[:shown.index("invoice_number") + 1] + [CHECK_COL] + shown[shown.index("invoice_number") + 1:]
                     checkout_progress(checker, invoices)
-                    # the empty Report table cells are filled from the answer (a choice already made, by you or from an
-                    # earlier decision, is never replaced; you can change any row before saving)
-                    filled = {}
-                    empty = table["Report table"].fillna("").astype(str).str.strip().eq("")
-                    # only invoices IremboPay's payment file does not have: a credit found but sent to check (BPR: another
-                    # provider, credited again) is decided by the reviewer, never filled from "Paid"
-                    known = {str(i) for f in state.files.values() if f.kind == "payments" for i in f.data["invoice_number"]}
-                    empty &= ~table["invoice_number"].astype(str).isin(known)
-                    for idx, answer in table[CHECK_COL].items():
-                        if empty[idx] and answer in CHECK_FILL:
-                            choice, status = CHECK_FILL[answer]
-                            table.loc[idx, "Report table"] = choice
-                            if status:
-                                table.loc[idx, "payment_status"] = status
-                            # "expired" is not a payment status: the invoice stays NEW, the expiry is a note
-                            if answer == "Expired" and not str(table.loc[idx, "Comment"] or "").strip():
-                                table.loc[idx, "Comment"] = "Invoice expired (IremboPay checkout)"
-                            filled[answer] = filled.get(answer, 0) + 1
-                    if filled:
-                        st.caption("Filled from the IremboPay check: " + " · ".join(
-                            f"{n:,} {a.lower()} → {CHECK_FILL[a][0]}"
-                            + (" (NEW, note: invoice expired)" if a == "Expired" else "")
-                            for a, n in filled.items()) + ". Not an IremboPay invoice: left for you to decide.")
+                # 17/11/2026: the empty Report table cells are filled with what the agreed rules decide
+                # (engine.rule_decisions: IremboPay's own record, the checkout's answer, no invoice number, a reversal);
+                # a choice already made is never replaced, and every row can still be changed before saving
+                table, filled = engine.rule_decisions(table, review_payments(), bank, answers)
+                left = int(table["Report table"].fillna("").astype(str).str.strip().eq("").sum())
+                if filled or left:
+                    st.caption("Filled automatically, check and confirm: " + (" · ".join(
+                        f"{n:,} {what} → {choice}" for what, n, choice in filled) or "nothing")
+                        + (f". Left for you to decide: {left:,}" if left else "") + ".")
                 # ---- "Mark all as reviewed": Reviewed = Yes on every row at once (a row set by hand stays as it is)
                 all_key = f"review_all_{bank.CODE}_{period.store_key}"
                 m1, m2 = st.columns([1, 3], vertical_alignment="center")
@@ -4091,14 +4145,14 @@ elif state.step == 3:     # Reconcile & Exception Resolution
                     # an invoice credited more than once (BPR): the extra credits in a table of their own, each next to
                     # the credit the report counted (its bank reference, agent reference and value date)
                     ref_col, desc_col = bank.COLUMNS["reference"], bank.COLUMNS["description"]
-                    stmt = {}
-                    for f in state.files.values():
-                        if f.kind == "bank" and ref_col in f.data:
-                            for r, d, v in zip(f.data[ref_col], f.data.get(desc_col, ""), f.data.get(paid_col, "")):
-                                if pd.isna(r) or not str(r).strip():          # a row with no bank reference
-                                    continue
-                                stmt.setdefault(str(r).strip(), ("" if pd.isna(d) else str(d), v))
                     counted = reason.str.extract(r"the (?:credit|request) counted is (\S+)", expand=False).fillna("")
+                    stmt, needed = {}, set(counted) - {""}
+                    for f in state.files.values():                  # only the rows of those references (a BK month
+                        if f.kind == "bank" and ref_col in f.data:  # has 650,000 statement rows)
+                            hit = f.data[f.data[ref_col].astype(str).str.strip().isin(needed)]
+                            for r, d, v in zip(hit[ref_col], hit.get(desc_col, [""] * len(hit)),
+                                               hit.get(paid_col, [""] * len(hit))):
+                                stmt.setdefault(str(r).strip(), ("" if pd.isna(d) else str(d), v))
                     table["_c_ref"] = counted
                     table["_c_desc"] = [stmt.get(r, ("", ""))[0] for r in counted]
                     table["_c_when"] = [_fmt_when(stmt.get(r, ("", ""))[1]) for r in counted]
@@ -4314,7 +4368,7 @@ elif state.step == 4:     # Report & Export
     if c1.button("← Back", width="stretch"):
         go(3)                                   # back to Reconcile & Exception Resolution (one step since 27/10/2026)
     if c3.button("🔄  New report", width="stretch"):
-        state.files, state.read_errors, state.result = {}, [], None
+        state.files, state.unopened, state.read_errors, state.result = {}, {}, [], None
         state.customize = state.cr_preview = False
         state.report_mem = state.drive_save = None          # the report leaves memory (it is on Drive if saved)
         state.session_folder.clear()                        # only this session's own temporary folder
