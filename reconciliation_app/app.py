@@ -1977,10 +1977,13 @@ if not viewing and PAGE == "reconciliation":
 
 # 27/10/2026: another page was chosen - the old page is hidden and the IremboPay loader shows until the new one is
 # drawn (page_loader.empty() at the end of each page)
+# 18/11/2026: every page (the old page is hidden while the loader shows: never two pages mixed)
 PAGE_LOADING = {"dashboard": ("Loading the dashboard…", "Reading the saved reports"),
                 "reports": ("Loading the reports…", "Listing the reports on Google Drive"),
-                "followup": ("Loading the follow-up…", "Reading the reports and the decisions")}   # the other
-# pages are drawn at once (no Drive to read)
+                "followup": ("Loading the follow-up…", "Reading the reports and the decisions"),
+                "reconciliation": ("Loading the reconciliation…", ""),
+                "banks": ("Loading the bank management…", ""),
+                "settings": ("Loading the settings…", "")}
 page_loader = st.empty()
 PAGE_LOADER = {"on": False}
 
@@ -2789,6 +2792,8 @@ def followup_data(client, root, refresh: bool = False):
             state.history_index = (root, report_history.drive_index(client, root))
             state.history_index_at = pd.Timestamp.now()
     reports = followup.latest_reports(state.history_index[1].records, start)
+    if state.get("fu_items_version") != followup.CACHE_VERSION:     # 18/11/2026: items read by an older version of
+        state.fu_items, state.fu_items_version = {}, followup.CACHE_VERSION   # the app (still open): read again
     cache = state.setdefault("fu_items", {})
     key = facts_cache.key
     todo = [r for r in reports if key(r) not in cache]
@@ -2876,46 +2881,91 @@ def followup_page():
     # 12/11/2026: the cards follow the Type and Bank chosen below (read from the last run: the filters are drawn
     # after the cards); "Show" is left out, so CHECKED still says how many of them are checked
     banks_here = sorted({i["bank"] for i in items}, key=lambda c: list(engine.BANKS).index(c) if c in engine.BANKS else 99)
-    kinds_now = state.get("fu_type") or "All"
+    kinds_now = state.get("fu_type", "Pending") or "All"     # 18/11/2026: Pending until another is chosen
     pick_now = state.get("fu_bank") if state.get("fu_bank") in banks_here else "All"
     scope = [i for i in items if (kinds_now == "All" or i["type"] == kinds_now) and (pick_now == "All" or i["bank"] == pick_now)]
+    # 17/11/2026: the pending items can be chosen by what IremboPay says now (the background check below), once every
+    # invoice of the Type and Bank chosen is checked; the cards follow that choice too
+    checker = irembopay_checker()
+    # "No invoice number" when it has none; 18/11/2026: an invoice still open shows as NEW (its IremboPay status)
+    says = lambda i: {"Open, not paid yet": "NEW"}.get(checker.answer(i["invoice"]), checker.answer(i["invoice"]))
+    pend = [i["invoice"] for i in scope if i["type"] == "Pending" and i["invoice"]]
+    checker.add(pend)
+    checked, to_check, _ = checker.progress(pend)
+    answers = sorted({says(i) for i in scope if i["type"] == "Pending"}) if checked == to_check else []
+    says_now = state.get("fu_says") if kinds_now == "Pending" and state.get("fu_says") in answers else "All"
+    if says_now != "All":
+        scope = [i for i in scope if says(i) == says_now]
     sm = followup.summary(scope, decisions, days=days)
     open_by = " · ".join(f"{sm['by_type'][t][0]:,} {t.lower()}" for t in ("Pending", "Paid twice")
                          if kinds_now in ("All", t))
-    cards = [("OPEN", f"{sm['open']:,}", open_by),
-             ("AMOUNT OPEN", followup.money(sm["open_amount"]).replace(" · ", "<br>"), "still to follow up"),
-             ("CHECKED", f"{sm['resolved']:,} of {sm['total']:,}",
-              f"{sm['resolved'] / sm['total'] * 100:.0f}% checked after the report" if sm["total"] else ""),
-             ("OVERDUE", f"{sm['overdue']:,}", f"open for more than {days} days · oldest {sm['oldest']} days")]
+    # 18/11/2026: two words on the page: "Pending" (no decision recorded yet) and "Resolved" (a decision saved)
+    cards = [("PENDING", f"{sm['open']:,}", open_by),
+             ("AMOUNT PENDING", followup.money(sm["open_amount"]).replace(" · ", "<br>"), "still to follow up"),
+             ("RESOLVED", f"{sm['resolved']:,} of {sm['total']:,}",
+              f"{sm['resolved'] / sm['total'] * 100:.0f}% resolved after the report" if sm["total"] else ""),
+             ("OVERDUE", f"{sm['overdue']:,}", f"pending for more than {days} days · oldest {sm['oldest']} days")]
     st.html(dashboard_view.STYLE_D + '<div class="dk">' + "".join(
         f'<div class="dk-c"><div class="dk-h"><span>{a}</span></div><div class="dk-v{" dk-v2" if "<br>" in b else ""}'
         f'{" dk-red" if a == "OVERDUE" and sm["overdue"] else ""}">{b}</div><div class="dk-s">{c}</div></div>'
         for a, b, c in cards) + "</div>")
+    # 18/11/2026: the follow-up's progress, as a success: completed (a decision) and remaining, the same items as the
+    # cards (period, Type, Bank, IremboPay says); the money received later after all; per bank
+    done = [(i, decisions[i["key"]]["decision"]) for i in scope if decisions.get(i["key"], {}).get("decision")]
+    later = [i for i, d in done if d == "Received later"]
+    received = {c: sum(i["amount"] for i in later if i["currency"] == c)
+                for c in sorted({i["currency"] for i in later}, key=lambda c: (c != "RWF", c))}
+    per_bank = {}
+    for i in scope:
+        d, n = per_bank.get(i["bank"], (0, 0))
+        per_bank[i["bank"]] = (d + 1, n) if decisions.get(i["key"], {}).get("decision") else (d, n + 1)
+    by_bank = sorted(((engine.bank_name(b), d, n) for b, (d, n) in per_bank.items()), key=lambda r: (-(r[1] + r[2]), r[0]))
+    label = " · ".join(v for v in (period_txt[:1].upper() + period_txt[1:], kinds_now if kinds_now != "All" else "",
+                                   says_now if says_now != "All" else "",
+                                   engine.bank_name(pick_now) if pick_now != "All" else "All banks") if v)
+    st.html(dashboard_view.followup_progress(sm["resolved"], sm["total"], received, sm["open_amount"], by_bank, label))
 
     # ---- the list: filters, then one row per item (the decision and the comment can be changed)
-    f1, f2, f3 = st.columns([1.4, 1.4, 2.2])
-    show = f1.segmented_control("Show", ["Open", "Resolved", "All"], default="Open", key="fu_show") or "Open"
-    kinds = f2.segmented_control("Type", ["All", "Pending", "Paid twice"], default="All", key="fu_type") or "All"
+    f1, f2, f4, f3 = st.columns([1.4, 1.4, 1.5, 1.7])
+    show = f1.segmented_control("Show", ["Pending", "Resolved", "All"], default="Pending",
+                                key="fu_view2") or "Pending"
+    kinds = f2.segmented_control("Type", ["All", "Pending", "Paid twice"], default="Pending", key="fu_type") or "All"
+    status = "All"
+    if kinds == "Pending" and checked < to_check:              # the choice comes once every invoice is checked
+        f4.selectbox("IremboPay says", [f"Checking… {checked} of {to_check}"], key="fu_says_wait", disabled=True,
+                     help="Available when the IremboPay check is done")
+    elif kinds == "Pending":
+        status = f4.selectbox("IremboPay says", ["All"] + answers, key="fu_says",
+                              help="What IremboPay's checkout says now about each pending invoice")
     pick = f3.selectbox("Bank", ["All"] + banks_here, key="fu_bank",
                         format_func=lambda c: "All banks" if c == "All" else engine.bank_name(c))
     rows = [i for i in items
-            if (show == "All" or (show == "Open") == (not decisions.get(i["key"], {}).get("decision")))
-            and (kinds == "All" or i["type"] == kinds) and (pick == "All" or i["bank"] == pick)]
+            if (show == "All" or (show == "Pending") == (not decisions.get(i["key"], {}).get("decision")))
+            and (kinds == "All" or i["type"] == kinds) and (pick == "All" or i["bank"] == pick)
+            and (status == "All" or says(i) == status)]
+    # 18/11/2026: 🔍 Search (below the table): the rows holding the text (invoice, reference, merchant, amount, ...)
+    query = str(state.get("fu_search") or "").strip().lower()
+    if query:
+        rows = [i for i in rows if query in " ".join(str(v) for v in (
+            i["invoice"], i["reference"], i["merchant"], f'{i["amount"]:.0f}', engine.bank_name(i["bank"]), i["type"],
+            says(i) if i["type"] == "Pending" else "", decisions.get(i["key"], {}).get("comment", ""), i["report"])).lower()]
     if not rows:
-        st.caption("Nothing in this view.")
+        st.caption(f"Nothing in this view{f' with “{query}”' if query else ''}.")
+        if query and st.button("Clear the search", icon=":material/close:", key="fu_search_clear"):
+            state.fu_search = ""                   # the search box is under the table, not drawn when it is empty
+            st.rerun()
     else:
-        # IremboPay checkout, in the background: a pending invoice that is now Paid is suggested "Received later"
-        checker = irembopay_checker()
-        pend = [i["invoice"] for i in rows if i["type"] == "Pending" and i["invoice"]]
-        checker.add(pend)
+        # IremboPay checkout, in the background (started above): a pending invoice now Paid is suggested "Received later"
         table = pd.DataFrame([{
             "_key": i["key"],
             "Status": ("✅ Resolved" if decisions.get(i["key"], {}).get("decision")
-                       else f"{'🔴' if followup.days_open(i) > days else '🟡'} Open {followup.days_open(i)} days"),
+                       else f"{'🔴' if followup.days_open(i) > days else '🟡'} Pending · {followup.days_open(i)} days"),
             "Bank": engine.bank_name(i["bank"]), "Type": i["type"], "Invoice": i["invoice"] or "(no invoice)",
+            "Bank reference": i["reference"],               # 17/11/2026: the statement's own reference of the credit
             "Amount": i["amount"], "Currency": i["currency"],
-            "Paid on": i["paid_on"].date() if i["paid_on"] is not None else None, "Merchant": i["merchant"],
-            "IremboPay says": checker.answer(i["invoice"]) if i["type"] == "Pending" and i["invoice"] else "",
+            "Channel": i.get("channel", ""),        # 18/11/2026: the bank statement's channel of the credit
+            "Value date": i["paid_on"].date() if i["paid_on"] is not None else None, "Merchant": i["merchant"],
+            "IremboPay says": says(i) if i["type"] == "Pending" else "",      # the same words as the filter
             "Decision": decisions.get(i["key"], {}).get("decision", ""),
             "Comment": decisions.get(i["key"], {}).get("comment", ""),
             "Decided by": (lambda x: f"{x.get('by', '')} · {x.get('at', '')}" if x else "")(decisions.get(i["key"])),
@@ -2927,19 +2977,31 @@ def followup_page():
         if suggest.any():
             st.caption(f"💡 {int(suggest.sum())} pending invoice(s) are now **Paid** in IremboPay: "
                        "\"Received later\" is filled in for you. Check them, then Save.")
-        DASH = "—"                                       # "still open" in the Decision column
+        DASH = "—"                                       # no decision yet, in the Decision column
         options = [DASH] + sorted({d for v in followup.DECISIONS.values() for d in v})
         table["Decision"] = table["Decision"].replace("", DASH)
-        edited = st.data_editor(
-            table.drop(columns="_key"), hide_index=True, width="stretch", key=f"fu_editor_{period_txt}_{show}_{kinds}_{pick}",
+        # 18/11/2026: the table's own icons are hidden; Download and Search are buttons below it
+        st.markdown('<style>.st-key-fu_table [data-testid="stElementToolbar"] {display: none;}</style>',
+                    unsafe_allow_html=True)
+        edited = st.container(key="fu_table").data_editor(
+            table.drop(columns="_key"), hide_index=True, width="stretch",
+            key=f"fu_editor_{period_txt}_{show}_{kinds}_{status}_{pick}_{query}",
             disabled=[c for c in table.columns if c not in ("Decision", "Comment", "_key")],
             column_config={
                 "Amount": st.column_config.NumberColumn("Amount", format="localized"),
-                "Paid on": st.column_config.DateColumn("Paid on", format="DD/MM/YYYY"),
+                "Value date": st.column_config.DateColumn(          # 17/11/2026: the bank's date (was "Paid on")
+                    "Value date", format="DD/MM/YYYY",
+                    help="The date the bank received the payment (Ecobank: Request Date)"),
                 "Decision": st.column_config.SelectboxColumn(
                     "Decision", options=options, width="medium",
                     help="Pending: Received later · Refunded · Not an Irembo payment. Paid twice: Refunded · "
-                         "Kept / used for another invoice · Bank error reversed. Empty = still open."),
+                         "Kept / used for another invoice · Bank error reversed. — = no decision yet."),
+                "Bank reference": st.column_config.TextColumn(
+                    "Bank reference", help="The credit's reference on the bank statement: I&M Tran Id · Ecobank Cba "
+                                           "Ref No · BOA Ref no · BPR BANK_REFERENCE · BK OurReference"),
+                "Channel": st.column_config.TextColumn(
+                    "Channel", help="The channel on the bank statement: I&M and BPR from the description · Ecobank "
+                                    "Source Channel · BOA from the description · BK Source"),
                 "Comment": st.column_config.TextColumn("Comment", width="medium"),
                 "IremboPay says": st.column_config.TextColumn("IremboPay says", help="IremboPay checkout, now")})
         edited["_key"] = table["_key"].values
@@ -2953,10 +3015,11 @@ def followup_page():
                 changes[new["_key"]] = {"decision": dec, "comment": com}
         for b in bad:
             st.error(b, icon="⚠️")
-        c1, c2 = st.columns([1, 3])
+        c1, c3, c4, _ = st.columns([1.6, 1, 1, 2.4])
         if c1.button(f"💾 Save {len(changes)} decision{'s' if len(changes) != 1 else ''}", type="primary",
                      key="fu_save", disabled=not changes or bool(bad), width="stretch",
-                     help="Saved on Google Drive, next to the reports: everyone sees the same"):
+                     help="Your decisions are saved only when you click Save. They are shared on Google Drive "
+                          f"(\"{followup.STORE_NAME}\" in Reconciliation Reports): everyone sees the same"):
             try:
                 with irembo_loading("Saving on Google Drive…"):
                     state.fu_decisions = followup.save_decisions(client, root, changes, current_user())
@@ -2964,14 +3027,22 @@ def followup_page():
                 st.rerun()
             except DriveError as err:
                 st.error(str(err), icon="⚠️")
-        c2.caption("Your decisions are saved only when you click Save. They are shared on Google Drive "
-                   f"(\"{followup.STORE_NAME}\" in Reconciliation Reports).")
-
-    # ---- the reminder: sent when someone clicks (the app cannot send on its own)
-    with st.container(border=True):
-        st.markdown('<div class="card-title">📣 Follow-up reminder</div>', unsafe_allow_html=True)
-        slack_send_card(followup.reminder_text(items, decisions, days), f"follow-up {pd.Timestamp.now():%Y-%m-%d}",
-                        None, key="fu_slack", drive_hint=False, label="📣 Send follow-up reminder")
+        # the Excel in the success rate's style (dashboard_view.ranked_xlsx), in the table's order, without a rank
+        sheet = edited.drop(columns="_key").assign(Decision=lambda d: d["Decision"].replace(DASH, ""))
+        view = " · ".join(v for v in (show, kinds if kinds != "All" else "", status if status != "All" else "",
+                                      engine.bank_name(pick) if pick != "All" else "All banks",
+                                      f"search “{query}”" if query else "") if v)
+        out = dashboard_view.ranked_xlsx(sheet, f"Follow-up · {period_txt}",
+                                         f"{view} · {len(sheet):,} items · made {pd.Timestamp.now():%d/%m/%Y %H:%M}",
+                                         None, "Follow-up", rank=False)
+        c3.download_button("Download", out, icon=":material/download:", width="stretch", key="fu_download",
+                           file_name=f"Follow-up {period_txt} {pd.Timestamp.now():%Y-%m-%d}.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           help="The rows shown, as an Excel file")
+        with c4.popover("Search", icon=":material/search:", width="stretch", help="Show only the rows holding a text"):
+            st.text_input("Search", key="fu_search", placeholder="Invoice, bank reference, merchant, amount…",
+                          label_visibility="collapsed")
+    # 18/11/2026: no Slack follow-up reminder on this page any more
 
 
 if PAGE == "followup":
@@ -3407,9 +3478,11 @@ def settings_page():
 
 if PAGE == "banks":
     bank_management_page()
+    page_loader.empty()
     st.stop()
 if PAGE == "settings":
     settings_page()
+    page_loader.empty()
     st.stop()
 
 
