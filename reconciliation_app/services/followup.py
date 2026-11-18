@@ -32,7 +32,7 @@ STORE_NAME = "Follow-up decisions.json"
 DECISIONS = {"Pending": ["Received later", "Refunded", "Not an Irembo payment"],
              "Paid twice": ["Refunded", "Kept / used for another invoice", "Bank error reversed"]}
 SHEETS = {"Pending notification": "Pending", "Duplicate payment other channel": "Paid twice"}
-CACHE_VERSION = 1
+CACHE_VERSION = 3                     # 2 (17/11/2026): each item keeps its IremboPay status; 3 (18/11): its channel
 
 
 def _text(v) -> str:
@@ -41,8 +41,9 @@ def _text(v) -> str:
 
 
 def items_from_report(path: Path, record, bank_code: str) -> list:
-    """[{key, bank, type, invoice, reference, amount, currency, paid_on, merchant, provider, report, reported}] of
-    one saved Excel report: the rows of its Pending notification and Duplicate payment sheets."""
+    """[{key, bank, type, invoice, reference, amount, currency, paid_on, merchant, provider, status, channel,
+    report, reported}] of one saved Excel report: the rows of its Pending notification and Duplicate payment sheets.
+    channel (18/11/2026): the bank statement's channel of the credit (the bank's channel(), as in the review)."""
     bank = engine.get_bank(bank_code)
     c = bank.COLUMNS
     try:
@@ -58,7 +59,11 @@ def items_from_report(path: Path, record, bank_code: str) -> list:
         df = sheets.get(sheet)
         if df is None or df.empty:
             continue
-        for _, r in df.iterrows():
+        try:
+            channels = bank.channel(df).astype(str) if hasattr(bank, "channel") else pd.Series("", index=df.index)
+        except Exception:                               # a report without the statement column it needs
+            channels = pd.Series("", index=df.index)
+        for n, r in df.iterrows():
             inv, ref = _text(r.get("invoice_number")), _text(r.get(c["reference"])) if c.get("reference") else ""
             amount = pd.to_numeric(r.get(c["amount"]), errors="coerce")
             amount = 0.0 if pd.isna(amount) else float(amount)
@@ -68,8 +73,18 @@ def items_from_report(path: Path, record, bank_code: str) -> list:
                         "currency": _text(r.get("Currency")) or bank.CURRENCIES[0],
                         "paid_on": None if pd.isna(paid_on) else pd.Timestamp(paid_on).normalize(),
                         "merchant": _text(r.get("name")), "provider": _text(r.get("payment_provider")),
+                        "status": status_of(r), "channel": _text(channels.get(n)),
                         "report": record.name, "reported": reported.normalize()})
     return out
+
+
+def status_of(row) -> str:
+    """The item's IremboPay status in the report (17/11/2026): its payment_status (NEW, EXPIRED, ...); EXPIRED when
+    the review found the invoice expired (it is then kept as NEW with that note); "None" when IremboPay has none
+    (not in IremboPay's file, or no invoice number)."""
+    if "expired" in _text(row.get("review_status")).lower():
+        return "EXPIRED"
+    return _text(row.get("payment_status")).upper() or "None"
 
 
 def latest_reports(records: list, start) -> list:
