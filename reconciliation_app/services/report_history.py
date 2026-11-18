@@ -20,8 +20,8 @@ them again; it uses integrations/google_drive.py for every Drive call and engine
     local_records()      older reports still in output/ (listed only; never copied)
     find_previous()      the latest saved report of a period (for "Compare with previous period")
     read_drive_summary() the figures of a saved report (for the Reports Dashboard; no PDF is made)
-    read_drive_facts()   the dashboard's figures of a saved Excel report (facts_from_bytes: also for its summary file,
-                         services/report_summary.py, written next to the Excel when it is saved)
+    read_drive_facts()   the dashboard's figures of a saved Excel report (facts_from_bytes: also when it is saved, for
+                         its bank's summary file, services/report_summary.py)
     bank_summary_folder() where a bank's own summary file is kept (one file per bank, 13/11/2026)
 """
 from __future__ import annotations
@@ -191,8 +191,8 @@ def save_report(client, root_id: str, bank, period, files: dict, mode: str = "ne
           'version'  save next to them as _v<N>
     only: the names to (re)try (a retry after a failure). Returns one SaveResult per file; ok only when Drive
     confirmed it. Nothing is deleted on Drive.
-    session: the session's temporary folder; with it, once Drive confirmed the Excel, its summary for the dashboard
-    is written next to it (11/11/2026, write_summary: never a failure of the save)."""
+    session: the session's temporary folder; with it, once Drive confirmed the Excel, its figures are added to its
+    bank's summary file for the dashboard (write_summary: never a failure of the save)."""
     stem = report_stem(bank, period)
     existing = existing or []
     if mode == "version":
@@ -233,25 +233,20 @@ def save_report(client, root_id: str, bank, period, files: dict, mode: str = "ne
 
 
 def write_summary(client, folder_id: str, xlsx_file: DriveFile, data: bytes, session, root_id: str = "") -> bool:
-    """The dashboard's summary of an Excel report just saved (services/report_summary.py), next to it; a summary
-    already there is replaced. True when Drive confirmed it; False (nothing raised) otherwise: the dashboard then
-    reads the Excel. root_id (13/11/2026): the report is also added to its bank's own summary file."""
+    """The dashboard's figures of an Excel report just saved, added to its bank's summary file (18/11/2026: the only
+    summary; no file next to the report any more). True when Drive confirmed it; False (nothing raised) otherwise:
+    the dashboard then reads the Excel once and adds it."""
     from services import facts_cache, report_summary
     p = parse_name(xlsx_file.name)
-    if not p:
+    if not p or not root_id:
         return False
     try:
         record = _record(xlsx_file, p)
         facts = facts_from_bytes(record, data, session)
-        old = client.list_children(folder_id, name=report_summary.name_for(xlsx_file.name))
     except Exception:
         return False
-    done = report_summary.write(client, folder_id, xlsx_file.name, facts, xlsx_file.md5,
-                                replace_id=old[0].id if old else None) is not None
-    if root_id:
-        report_summary.update_bank(client, bank_summary_folder(client, root_id, p["code"]), p["code"],
-                                   {facts_cache.key(record): facts})
-    return done
+    return report_summary.update_bank(client, bank_summary_folder(client, root_id, p["code"]), p["code"],
+                                      {facts_cache.key(record): facts}) is not None
 
 
 def bank_summary_folder(client, root_id: str, code: str) -> str:
