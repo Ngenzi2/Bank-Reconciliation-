@@ -603,6 +603,7 @@ def extra_sheets(rep, attempts, start, end, whole) -> dict:
     transfers = others[others[TYPE].isin(["Bank transfer", "Bank transfer Charges"])]
     # 11/11/2026: the ones with no invoice number too (never reviewed; Reason "Not found (no invoice number)")
     lost = rep[_transaction(rep) & rep.get("originally_not_found", ~rep["found_in_irembopay"]).astype(bool)]
+    lost = lost.assign(found_in_irembopay=False)      # 16/11/2026: not in IremboPay's file (the review is in review_status)
     lost_cols = stmt + ["invoice_number", FOUND_BY, "found_in_irembopay", "payment_status", "payment_provider",
                         "review_status", "review_comment", "Reason", "Source file"]
     debit = attempts[(attempts["CreditAmt"] <= 0) & attempts["ValueDate"].between(start, end, inclusive="left")].copy()

@@ -100,7 +100,8 @@ def option(bank, name, default):
     return getattr(get_bank(bank), name, default)
 
 
-DETAILS_SHEET = "Payment details"          # every credit with its IremboPay payment (BK: "Matched details")
+DETAILS_SHEET = "Payment details"          # every credit with its IremboPay payment (16/11/2026: every bank names
+                                           # it "Matched details"; this is the name in the reports made before)
 
 
 def details_sheet(bank=None, sheetnames=None) -> str:
@@ -1759,7 +1760,11 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
     for i in rep.index[bank_currency.ne(rep["Currency"])]:       # 13/11/2026: the currency is IremboPay's own
         why = f"Currency from IremboPay's checkout ({rep.at[i, 'Currency']}); {before} {bank_currency[i]}"
         rep.at[i, "Report note"] = f"{why}. {rep.at[i, 'Report note']}" if rep.at[i, "Report note"] else why
-    detail = rep[[col for col in detail_cols if col in rep.columns]]
+    # 16/11/2026: found_in_irembopay in the report is the match itself (the statement's invoice is in IremboPay's
+    # file), before the review; the review's decision is in review_status. The tables use the reviewed value
+    shown = (rep.assign(found_in_irembopay=~rep["originally_not_found"].astype(bool)) if "originally_not_found" in rep
+             else rep)
+    detail = shown[[col for col in detail_cols if col in shown.columns]]
     sheets = {"Pending notification": detail[whole["pending"]].sort_values(paid_on),
               "Duplicate payment other channel": detail[whole["duplicate"]].sort_values(["payment_provider", paid_on]),
               bank.STATEMENT_SHEET: (rep if no_own else rep.assign(Currency=bank_currency))[statement_cols + ["invoice_number"]

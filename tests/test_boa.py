@@ -64,7 +64,7 @@ def read(content, name="Account_history_test.xlsx"):
 def run_september(tmp_path, rows=ROWS, pays=PAYS):
     files = [read(statement(rows)), e.read_payment_file("Payment details.csv", payments(pays), "BOA")]
     res = e.run(tmp_path / "base", SEP, files, require_review=False, bank="BOA", report_dir=tmp_path / "r")
-    return res, res.sheets["Payment details"].set_index("Ref no", drop=False)
+    return res, res.sheets["Matched details"].set_index("Ref no", drop=False)
 
 
 # ---- reading the statement ------------------------------------------------------------------------------------------
@@ -123,7 +123,7 @@ def test_files_without_the_row_number_or_the_balance_are_read(tmp_path, without)
     res2 = e.run(tmp_path / "b2", SEP, [read(statement(ROWS, without=without)),
                                          e.read_payment_file("Payment details.csv", payments(PAYS), "BOA")],
                  require_review=False, bank="BOA", report_dir=tmp_path / "r2")
-    assert res2.sheets["Payment details"].shape[0] == res.sheets["Payment details"].shape[0]
+    assert res2.sheets["Matched details"].shape[0] == res.sheets["Matched details"].shape[0]
 
 
 def test_without_the_row_number_a_broken_balance_is_still_refused():
@@ -211,7 +211,7 @@ def test_matching_september(tmp_path):
 def test_report_holds_credits_only(tmp_path):
     res, _ = run_september(tmp_path)
     assert set(res.sheets) == {"Pending notification", "Duplicate payment other channel", "BOA statement",
-                               "Payment details"}                               # the same sheets as I&M
+                               "Matched details", "Payment details"}            # the same sheets as I&M
     assert (res.sheets["BOA statement"]["Credit"] > 0).all()
 
 
@@ -233,7 +233,7 @@ def test_report_files_are_written(tmp_path):
     from openpyxl import load_workbook
     sheets = load_workbook(res.report_file, read_only=True).sheetnames
     assert sheets[:2] == ["Summary-Weekly", "Summary-Monthly"]
-    assert {"BOA statement", "Payment details"} <= set(sheets) and "Excluded bank rows" not in sheets
+    assert {"BOA statement", "Matched details", "Payment details"} <= set(sheets) and "Excluded bank rows" not in sheets
     assert e.report_pdf(res.report_file)[:4] == b"%PDF"
     assert e.read_report(res.report_file)["bank"] == "Bank of Africa"
 
@@ -295,3 +295,12 @@ def test_an_extra_credit_goes_to_review_next_to_the_credit_counted(tmp_path):
     assert reasons["S00009"] == "Invoice credited again: the credit counted is S00008"
     assert "S00008" not in reasons
     assert bool(d.loc["S00009", "is_extra_credit"]) and not bool(d.loc["S00008", "is_extra_credit"])
+
+
+def test_payment_details_is_the_irembopay_file_and_matched_details_the_credits(tmp_path):
+    # 16/11/2026, every bank like BK: "Matched details" = the credits with their IremboPay payment, "Payment details"
+    # = the IremboPay file's own rows (its columns, nothing from the bank); a report made before is still read
+    res, d = run_september(tmp_path)
+    pay = res.sheets["Payment details"]
+    assert "Credit" not in pay and {"invoice_number", "paid_at"} <= set(pay) and len(pay) > 0
+    assert e.details_sheet("BOA", ["Summary-Monthly", "Payment details"]) == "Payment details"

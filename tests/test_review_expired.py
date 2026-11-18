@@ -50,7 +50,7 @@ def run_with_decisions(tmp_path, bank, decide):
     review = decide(review)
     e.save_decisions(base, period, review, bank)
     res = e.run(base, period, acc, require_review=True, bank=bank, report_dir=tmp_path / "r2")
-    details = res.sheets["Payment details"]
+    details = res.sheets["Matched details"]
     return review, res, details
 
 
@@ -125,7 +125,7 @@ def test_ecobank_other_channel_decision_counts_once_in_the_reconciled_month(tmp_
     month = next(b for b in res.blocks if b[0] == "Summary-Monthly")[2]["Duplicate Payment"]
     total = int(month[month["Currency"].isna()]["Number of Transactions"].iloc[0])
     # 26/10/2026: only the requests Ecobank answered SUCCESS are processed, each invoice once, by Request Date
-    det = res.sheets["Payment details"]
+    det = res.sheets["Matched details"]
     decided = det["review_status"].eq("Paid with other channel")
     counted = det[decided & det["Cba Rsp Code"].astype(str).eq("000") & ~det["is_extra_credit"].astype(bool)]
     assert len(counted) == counted["invoice_number"].nunique()
@@ -195,3 +195,27 @@ def test_an_excluded_row_stays_in_the_statement_with_a_comment(tmp_path):
     assert total("Overall processed payments") == len(kept)           # the excluded rows are in no table
     for sheet in ("Pending notification", "Duplicate payment other channel"):
         assert not res.sheets[sheet]["review_status"].eq(e.EXCLUDED).any()
+
+
+def test_found_in_irembopay_is_the_match_before_the_review(tmp_path):
+    # 16/11/2026: the report's found_in_irembopay says whether the statement's invoice is in IremboPay's file; the
+    # review does not change it (its decision is in review_status), the tables still count the review
+    def decide(review):
+        review["Reviewed (Yes/No)"] = "Yes"
+        review["Report table"] = "Paid with other channel"
+        return review
+    review, res, details = run_with_decisions(tmp_path, "ECO", decide)
+    reviewed = details["review_status"].eq("Paid with other channel")
+    not_matched = (reviewed & ~details["found_in_irembopay"].astype(bool)    # put in a table by the review only
+                   & details["Cba Rsp Code"].map(ecobank._code).eq("000"))    # (a request refused: in no table)
+    assert not_matched.any()                                                 # (the others matched, sent to review
+    other = res.sheets["Duplicate payment other channel"]                    # for another reason)
+    assert set(details.loc[not_matched].index) <= set(other.index)           # still counted where the review put them
+
+
+def test_a_redone_report_counts_the_review_again():
+    from services.regenerate import found_after_review
+    found = pd.Series([False, False, True, False, True, False])
+    status = pd.Series(["Paid with other channel", "Pending notification (invoice expired)", "Failed notification",
+                        "", "", "Matched to invoice 123"])
+    assert found_after_review(found, status).tolist() == [True, True, False, False, True, True]

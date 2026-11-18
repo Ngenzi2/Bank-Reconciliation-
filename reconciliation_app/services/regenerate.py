@@ -1,8 +1,8 @@
 """
 REDO A SAVED REPORT WITH THE CURRENT RULES (26/10/2026) - FROM THE REPORT ITSELF
 ================================================================================
-A saved report keeps every credit of its period in its "Payment details" sheet: the statement columns, what IremboPay
-said (found, provider, status, paid_at), the SLA, and the decisions of Exception Resolution (review_status). Its five
+A saved report keeps every credit of its period in its "Matched details" sheet ("Payment details" in a report made
+before 16/11/2026): the statement columns, what IremboPay said (found, provider, status, paid_at), the SLA, and the decisions of Exception Resolution (review_status). Its five
 summary tables can therefore be computed again with the current rules without the original bank and IremboPay files:
 
     Processed   every credit of the period (Ecobank: every request answered SUCCESS, Cba Rsp Code 000), each invoice once
@@ -43,6 +43,17 @@ def _bool(series) -> pd.Series:
     return series.astype(str).str.strip().str.lower().isin(["true", "1", "yes"])
 
 
+FOUND_BY_REVIEW = ("Notification received", "Pending notification", "Paid with other channel", "Resolved manually",
+                   "Matched to invoice")
+
+
+def found_after_review(found: pd.Series, status: pd.Series) -> pd.Series:
+    """found_in_irembopay as the app counts it: the match (16/11/2026: what a report keeps), then the review's
+    decision read from review_status (a report made before kept this already: the same result)."""
+    s = status.fillna("").astype(str)
+    return found.mask(s.str.startswith(FOUND_BY_REVIEW), True).mask(s.str.startswith("Failed notification"), False)
+
+
 def _details(path: Path, bank) -> pd.DataFrame:
     c = bank.COLUMNS
     name = engine.details_sheet(bank, pd.ExcelFile(path, engine=engine.EXCEL_ENGINE).sheet_names)
@@ -54,6 +65,9 @@ def _details(path: Path, bank) -> pd.DataFrame:
         d[col] = _bool(d[col]) if col in d else False
     d["invoice_number"] = d["invoice_number"].where(d["invoice_number"].astype(str).str.strip().ne("")
                                                     & d["invoice_number"].notna(), None)
+    if "review_status" in d:
+        d["_found_match"] = d["found_in_irembopay"]                              # written back as it was
+        d["found_in_irembopay"] = found_after_review(d["found_in_irembopay"], d["review_status"])
     d["review_table"] = d["review_status"].map(_review_table) if "review_status" in d else ""
     for col in ("payment_provider", "payment_status", "sla_status", "name"):
         if col not in d:
@@ -181,6 +195,8 @@ def redo(path: Path, bank_code: str, kind: str, start: pd.Timestamp, out_path: P
     paid_on = bank.COLUMNS["payment_date"]
     rep["Report note"] = engine.table_notes(rep, whole, bank)     # an invoice credited more than once: why, where
     detail = rep.drop(columns=["review_table"])
+    if "_found_match" in detail:                  # 16/11/2026: the report keeps the match itself, not the review
+        detail = detail.assign(found_in_irembopay=detail["_found_match"]).drop(columns="_found_match")
     try:
         statement = pd.read_excel(path, sheet_name=bank.STATEMENT_SHEET, engine=engine.EXCEL_ENGINE)
     except Exception:
@@ -190,8 +206,9 @@ def redo(path: Path, bank_code: str, kind: str, start: pd.Timestamp, out_path: P
     if statement is not None:
         sheets[bank.STATEMENT_SHEET] = statement
     sheets[engine.details_sheet(bank)] = detail
-    irembopay = getattr(bank, "IREMBOPAY_SHEET", None)       # BK: the IremboPay rows are kept as they were
-    if irembopay:
+    irembopay = getattr(bank, "IREMBOPAY_SHEET", None)       # the IremboPay rows are kept as they were
+    # 16/11/2026: only from a report that has them (made before, its "Payment details" is the matched credits)
+    if irembopay and engine.details_sheet(bank, pd.ExcelFile(path, engine=engine.EXCEL_ENGINE).sheet_names) != irembopay:
         try:
             sheets[irembopay] = pd.read_excel(path, sheet_name=irembopay, dtype={"invoice_number": str},
                                               engine=engine.EXCEL_ENGINE)
