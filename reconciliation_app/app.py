@@ -2150,14 +2150,51 @@ def _delta(ch, *, pct=True, lower_is_better=False, points=False):
     return f'<span class="{"dash-up" if good else "dash-down"}">{"▲" if up else "▼"} {text}</span>'
 
 
+SUMMARY_LOG = BASE_DIR / "output" / "summary_tidy.log"     # what the dashboard moved to the Drive bin (18/11/2026)
+
+
+def tidy_summaries(client, bank_files: list, records: list):
+    """18/11/2026, once per session (with the banks' files): a bank with several copies of its summary file is tidied
+    (report_summary.update_bank: its keeper's app merges them into its own; anyone else's app moves its own copies to
+    the Drive bin), and this account's old per-report summaries (<report>.summary.json) go to the bin. Only those
+    two kinds of files are touched, and only the ones this account made; each move is noted in
+    output/summary_tidy.log. Never an error: what Drive refuses is tried again next time."""
+    copies = {}
+    for f in bank_files:
+        copies.setdefault((f.parent, f.name), []).append(f)
+    old = [f for f in state.history_index[1].others if f.name.endswith(report_summary.OLD_SUFFIX)
+           and not f.name.endswith(report_summary.BANK_SUFFIX)]
+    several = {k: v for k, v in copies.items() if len(v) > 1 and k[0]}
+    if not several and not old:
+        return
+    done = []
+    with irembo_loading("Tidying the summaries on Google Drive…"):
+        for (parent, name), files in several.items():           # the keeper merges; the others bin their own
+            code = name[:-len(report_summary.BANK_SUFFIX)]
+            report_summary.update_bank(client, parent, code, {},
+                                       keep=[facts_cache.key(r) for r in records if r.bank == code])
+            left = {f.id for f in client.list_children(parent, name=name) if f.name == name}
+            gone = sum(f.id not in left for f in files)
+            if gone:
+                done += [f"{name} ({files[0].folder}): {gone} cop{'y' if gone == 1 else 'ies'} to the bin, "
+                         f"{len(left)} left"]
+        done += [f"to the bin: {n}" for n in report_summary.trash_old(client, old)]
+    if done:
+        try:
+            SUMMARY_LOG.parent.mkdir(parents=True, exist_ok=True)
+            with open(SUMMARY_LOG, "a", encoding="utf-8") as fh:
+                fh.writelines(f"{pd.Timestamp.now():%Y-%m-%d %H:%M} {current_user() or 'unknown'}: {d}\n" for d in done)
+        except OSError:
+            pass
+
+
 def dashboard_facts(client, root):
     """The facts of every monthly report on Drive (first version) -> (facts to use, [problems]). Each report's facts
     are kept for the session and on this computer (services/facts_cache.py, output/.dashboard_facts.pkl, keyed by the
     report's Drive ID and last-modified date): only a new or replaced report is downloaded and read again; several
-    are downloaded at the same time. 11/11/2026: a report with its summary file (services/report_summary.py, a few
-    KB) is read from it; the others are read from their Excel and their summary is written (next time: fast).
-    13/11/2026: before that, the banks' own summary files (one per bank, every report of the bank) are read; a
-    report read another way is added to its bank's file."""
+    are downloaded at the same time. 18/11/2026: the banks' summary files (services/report_summary.py, one per bank,
+    every report of the bank) are read once per session; a report not in them is read from its Excel and added to
+    its bank's file (no summary file per report any more)."""
     cached = state.get("history_index")
     if not cached or cached[0] != root:
         with irembo_loading("Reading the reports on Google Drive…", "Reconciliation Reports"):
@@ -2175,38 +2212,27 @@ def dashboard_facts(client, root):
             if key(r) in stored:
                 cache[key(r)] = facts_cache.attach(stored[key(r)], r)
         todo = [r for r in todo if key(r) not in cache]
-    found, fresh = {}, {}
-    if todo:                                             # 2. the banks' summary files on Drive (one per bank)
+    fresh = {}
+    # 2. the banks' summary files on Drive (one per bank), read once per session: what they hold, and which reports
+    #    are not in them yet (added below)
+    shared = state.get("bank_shared") if state.get("bank_shared_root") == root else None
+    if shared is None:
         bank_files = sorted((f for f in state.history_index[1].others if f.name.endswith(report_summary.BANK_SUFFIX)),
                             key=lambda f: f.modified)
+        shared = {}
         if bank_files:
             with irembo_loading("Reading the banks' summaries from Google Drive…"):
                 got = report_history.download_many(client, [SimpleNamespace(file_id=f.id) for f in bank_files])
-            shared = {}
-            for f in bank_files:                         # the newest file of a bank last
+            for f in bank_files:                         # the newest copy of a bank last
                 shared.update(report_summary.bank_from_bytes(got.get(f.id)))
-            for r in todo:
-                facts = report_summary.facts_of(shared[key(r)], r) if key(r) in shared else None
-                if facts is not None:
-                    cache[key(r)] = fresh[key(r)] = facts
-        todo = [r for r in todo if key(r) not in cache]
-    missing = list(todo)                                 # not in their bank's file: added to it below
-    if todo:                                             # 3. their own summary files on Drive (a few KB each)
-        summaries = {(f.folder, f.name): f for f in state.history_index[1].others
-                     if f.name.endswith(report_summary.SUFFIX)}
-        found = {r.file_id: summaries[(r.folder, report_summary.name_for(r.name))] for r in todo
-                 if (r.folder, report_summary.name_for(r.name)) in summaries}
-        if found:
-            with irembo_loading(f"Reading {len(found)} report summar{'ies' if len(found) > 1 else 'y'} from Google "
-                                "Drive…"):
-                small = report_history.download_many(client, [SimpleNamespace(file_id=f.id) for f in found.values()])
-            for r in todo:
-                if r.file_id in found:
-                    facts = report_summary.from_bytes(small.get(found[r.file_id].id), r)
-                    if facts is not None:
-                        cache[key(r)] = fresh[key(r)] = facts
-        todo = [r for r in todo if key(r) not in cache]
-    if todo:                                             # 4. the others: downloaded together, then read
+        state.bank_shared, state.bank_shared_root = shared, root
+        tidy_summaries(client, bank_files, records)
+    for r in todo:
+        facts = report_summary.facts_of(shared[key(r)], r) if shared.get(key(r)) else None
+        if facts is not None:
+            cache[key(r)] = fresh[key(r)] = facts
+    todo = [r for r in todo if key(r) not in cache]
+    if todo:                                             # 3. the others: downloaded together, then read
         n = len(todo)
         ld = irembo_loading(f"Reading {n} report{'s' if n > 1 else ''} from Google Drive…").__enter__()
         data = report_history.download_many(client, todo, done=lambda i: ld.update(f"Downloading · {i} of {n}"))
@@ -2216,8 +2242,6 @@ def dashboard_facts(client, root):
                     raise data[r.file_id]
                 cache[key(r)] = fresh[key(r)] = report_history.read_drive_facts(client, r, state.session_folder,
                                                                                 data.get(r.file_id))
-                old = found.get(r.file_id)                   # its summary, for next time (catch-up; never an error)
-                report_summary.write(client, r.parent, r.name, cache[key(r)], r.md5, replace_id=old.id if old else None)
             except Exception as err:                    # 02/11/2026: any bad report is left out, never a crash
                 msg = friendly_error(err, "Reading this report")
                 cache[key(r)] = msg if msg.startswith(r.name) else f"{r.name}: {msg}"
@@ -2225,19 +2249,16 @@ def dashboard_facts(client, root):
                     fresh[key(r)] = cache[key(r)]       # changes (a download problem is tried again next time)
             ld.update(f"Reading · {i} of {n}")
         ld.__exit__(None, None, None)
-    # 5. into the bank's file: the reports read another way; a bank with no file yet gets every report known here
-    #    (once per session: the listing kept for the session does not show the file just written)
-    written = state.setdefault("bank_summaries", set())
-    on_drive = {f.name for f in state.history_index[1].others}
+    # 4. into its bank's file: every report not in it yet (read from its Excel, or kept on this computer); 18/11/2026:
+    #    the only summary (no file per report). Tried once per session: a failed write is tried again next session
     for code in sorted({r.bank for r in records}):
-        first = report_summary.bank_name(code) not in on_drive and (root, code) not in written
-        add = {key(r): cache[key(r)] for r in (records if first else missing)
-               if r.bank == code and isinstance(cache.get(key(r)), list)}
+        add = {key(r): cache[key(r)] for r in records
+               if r.bank == code and isinstance(cache.get(key(r)), list) and key(r) not in shared}
         if add:
-            written.add((root, code))
             with irembo_loading(f"Saving the {engine.bank_name(code)} summary on Google Drive…"):
                 report_summary.update_bank(client, report_history.bank_summary_folder(client, root, code), code, add,
                                            keep=[key(r) for r in records if r.bank == code])
+            shared.update(dict.fromkeys(add))            # known now (None: its figures are in this session's cache)
     if fresh:
         facts_cache.save(DASH_CACHE, fresh, keep=[key(r) for r in records])
     facts = [f for r in records if isinstance(cache.get(key(r)), list) for f in cache[key(r)]]
@@ -3496,6 +3517,18 @@ def settings_page():
                 st.error(str(err), icon="⚠️")
         st.markdown("**Changes**")
         history_table("Follow-up")
+    # ---- 18/11/2026: who keeps each bank's dashboard summary file on Drive (read-only: in the code, the same for all)
+    with st.container(border=True):
+        st.markdown('<div class="card-title">🗂 Dashboard summary files</div>', unsafe_allow_html=True)
+        st.caption("Each bank has one summary file on Google Drive (in its folder) that makes the Dashboard fast. Only "
+                   "the person who keeps it updates it; the others' apps read it. This list is in the code "
+                   "(services/report_summary.py, KEEPERS), so everyone's app follows the same one: to change it, "
+                   "ask a developer.")
+        me = (user or "").lower()
+        st.dataframe(pd.DataFrame([{"Bank": engine.bank_name(code), "Summary file": report_summary.bank_name(code),
+                                    "Kept by": who + (" (you)" if who.lower() == me else "")}
+                                   for code, who in report_summary.KEEPERS.items()]),
+                     hide_index=True, width="stretch")
     # ---- who may change settings
     with st.container(border=True):
         st.markdown('<div class="card-title">👥 Access</div>', unsafe_allow_html=True)
