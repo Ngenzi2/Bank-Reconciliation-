@@ -1,42 +1,29 @@
 """
-A SMALL SUMMARY FILE NEXT TO EACH REPORT ON GOOGLE DRIVE (11/11/2026)
-=====================================================================
+ONE SUMMARY FILE PER BANK ON GOOGLE DRIVE (13/11/2026; 18/11/2026: the only summary)
+==================================================================================
 Reading a report for the Reports Dashboard means downloading its Excel and opening its large sheets (a BK month has
-about 80,000 rows): seconds per report. So next to each Excel report on Drive there is a file of a few KB holding the
-dashboard's figures of that report, read from that very Excel (report_history.facts_from_xlsx: the same reading as
-the dashboard, so the figures are the same):
-
-    <CODE>_recon_summary_<period>.summary.json      next to <CODE>_recon_summary_<period>.xlsx
-
-The dashboard downloads only the summary. A summary is used only when it belongs to the Excel now on Drive (the
-Excel's MD5 checksum is written in it) and was written with the same VERSION as facts_cache; otherwise the Excel is
-read as before and its summary written again (catch-up: the reports saved before this file existed). Each report
-has its own summary: two people saving at the same time never write into the same file. Writing a summary never
-fails a save or the dashboard: without it, the Excel is read.
-
-    name_for(xlsx_name)                 the summary's name
-    to_bytes(facts, xlsx_md5)           the summary of a report's facts (dashboard.Fact)
-    from_bytes(data, record)            its facts again, or None when it does not belong to the Excel `record`
-    write(client, folder, ...)          upload it (a new file, or replacing the one already there); never raises
-
-ONE FILE PER BANK (13/11/2026)
-With many reports the dashboard still downloads one small file per report. So each bank also has one file holding the
-figures of all its weekly and monthly reports, in the bank's folder (at the top of Reconciliation Reports when the
-bank has no folder yet):
+about 80,000 rows): seconds per report. So each bank has one file holding the dashboard's figures of all its weekly
+and monthly reports, in the bank's folder (at the top of Reconciliation Reports when the bank has no folder yet):
 
     <CODE>_dashboard_summary.json       {"version", "reports": {"<report's Drive ID>|<last modified>": [facts]}}
 
-The dashboard reads these files first (one download per bank). A report that is not in its bank's file, or was
-replaced since, is read from its own summary (above), else from its Excel, and added to the bank's file. Saving a
-report adds it too. The file is read again just before it is written, so a report added meanwhile by someone else
-is kept; when two people still write at the same moment, the report left out is simply added the next time the
-dashboard is opened. When the file on Drive cannot be replaced (made by another account), a second one is written
-next to it: the dashboard reads every file of the bank, the newest last.
+Saving a report adds its figures to its bank's file; the dashboard reads the banks' files (one download per bank)
+and adds any report missing from them (read once from its Excel). The file is read again just before it is
+written, so a report added meanwhile by someone else is kept. A bank keeps one file: copies made before (when the
+file could not be replaced) are merged into it and moved to the Drive bin.
+
+Who keeps each bank's file (KEEPERS, 18/11/2026): the app may change only the files its own account made (Drive
+permission "drive.file"), so two people writing the same bank's file made a copy each time. Only the keeper's app
+writes a bank's file (with every copy's figures); anyone else's app writes nothing there and moves its own old
+copies to the bin; a report it saves is added by the keeper's dashboard (read once from the Excel). A bank not in
+KEEPERS: anyone's app writes it. 18/11/2026: no summary file per report
+any more (<report>.summary.json, 11/11/2026): one more file for every report saved.
 
     bank_name(code)                     the bank's file name
     bank_from_bytes(data)               {report key: [facts as saved]} ({} when unreadable or of another VERSION)
     facts_of(saved, record)             the facts of one report, as saved, with their report
-    update_bank(client, folder, ...)    add reports to the bank's file; never raises
+    update_bank(client, folder, ...)    add reports to the bank's file, one file kept; never raises
+    trash_old(client, files)            the old per-report summaries to the bin (the dashboard tidies Drive)
 """
 from __future__ import annotations
 
@@ -46,14 +33,23 @@ import pandas as pd
 
 from services import facts_cache
 
-SUFFIX = ".summary.json"
+OLD_SUFFIX = ".summary.json"       # the summary per report, 11-18/11/2026 (no longer written)
 BANK_SUFFIX = "_dashboard_summary.json"
 MIME = "application/json"
+# 18/11/2026: the Google account whose app keeps each bank's summary file (the one who reconciles the bank)
+KEEPERS = {"BPR": "d.teta@irembo.com", "ECO": "d.teta@irembo.com",
+           "BK": "d.ngenzi@irembo.com", "BOA": "d.ngenzi@irembo.com", "IM": "d.ngenzi@irembo.com"}
 
 
-def name_for(xlsx_name: str) -> str:
-    """'IM_recon_summary_01-09-2026_to_30-09-2026.xlsx' -> 'IM_recon_summary_01-09-2026_to_30-09-2026.summary.json'."""
-    return xlsx_name.rsplit(".", 1)[0] + SUFFIX
+def keeps(client, code: str) -> bool:
+    """This app's account keeps the bank's file (or the bank has no keeper). Unknown account: False (nothing written)."""
+    keeper = KEEPERS.get(code)
+    if not keeper:
+        return True
+    try:
+        return client.account_email().lower() == keeper.lower()
+    except Exception:
+        return False
 
 
 def _plain(v):
@@ -68,23 +64,6 @@ def _fact(f) -> dict:
             "weekend": f.weekend, "weekend_known": f.weekend_known, "source": f.source}
 
 
-def to_bytes(facts: list, xlsx_md5: str) -> bytes:
-    return json.dumps({"version": facts_cache.VERSION, "xlsx_md5": xlsx_md5, "facts": [_fact(f) for f in facts]},
-                      default=_plain, ensure_ascii=False).encode("utf-8")
-
-
-def from_bytes(data: bytes, record) -> list | None:
-    """The facts of the summary, with `record` (the Excel on Drive) as their report; None when the summary is
-    unreadable, of another VERSION, or written for another content of the Excel (replaced by hand since)."""
-    try:
-        saved = json.loads(data)
-        if saved.get("version") != facts_cache.VERSION or not record.md5 or saved.get("xlsx_md5") != record.md5:
-            return None
-        return facts_of(saved["facts"], record)
-    except Exception:
-        return None
-
-
 def facts_of(saved: list, record) -> list | None:
     """The facts as they were saved (_fact), with `record` as their report; None when they cannot be read."""
     from services.dashboard import Fact
@@ -92,19 +71,6 @@ def facts_of(saved: list, record) -> list | None:
         return [Fact(f["bank"], f["kind"], pd.Timestamp(f["start"]), pd.Timestamp(f["end"]), f["counts"], f["amounts"],
                      None if f["merchants"] is None else {(m, c): (n, a) for m, c, n, a in f["merchants"]},
                      f["weekend"], f["weekend_known"], record, f["source"]) for f in saved]
-    except Exception:
-        return None
-
-
-def write(client, folder_id: str, xlsx_name: str, facts: list, xlsx_md5: str, replace_id: str | None = None,
-          http=None):
-    """Upload the summary of the Excel `xlsx_name` into its folder (replace_id: the summary already there). The
-    stored file (DriveFile), or None when it could not be written (the dashboard then reads the Excel)."""
-    if not folder_id:
-        return None
-    try:
-        return client.upload(folder_id, name_for(xlsx_name), to_bytes(facts, xlsx_md5), MIME, replace_id=replace_id,
-                             http=http)
     except Exception:
         return None
 
@@ -127,27 +93,67 @@ def bank_from_bytes(data) -> dict:
 
 def update_bank(client, folder_id: str, code: str, entries: dict, keep=None):
     """Add the reports {report key: [facts]} to the bank's file in the folder, on top of what is on Drive now (read
-    again here). keep: the keys of the bank's reports now on Drive (the others are dropped). The stored file
-    (DriveFile), or None when it could not be written (the dashboard then reads each report's own summary)."""
-    if not folder_id or not entries:
+    again here: every copy of it, merged). keep: the keys of the bank's reports now on Drive (the others are
+    dropped). The stored file (DriveFile), or None when nothing was written (the dashboard then reads the Excel).
+    18/11/2026: only the bank's keeper (KEEPERS) writes it, into its own copy (replaced, tried twice; a new one only
+    when it has none); every other copy of its own goes to the bin. Anyone else's app writes nothing and moves its
+    own copies to the bin (their figures are in the keeper's file, or come back from the Excel). With no entries,
+    the copies are only tidied; nothing is done when there is a single file."""
+    if not folder_id:
         return None
     try:
         name = bank_name(code)
         files = sorted((f for f in client.list_children(folder_id, name=name) if f.name == name),
                        key=lambda f: f.modified)
+        if not entries and len(files) < 2:                           # nothing to add, nothing to tidy
+            return None
+        ours = [f for f in files if f.mine]
+        if not keeps(client, code):                                  # not ours to keep: only our copies away
+            _to_bin(client, ours, name)
+            return None
         reports = {}
-        for f in files:
+        for f in files:                                              # every copy, whoever made it; ours last
             reports.update(bank_from_bytes(client.download(f.id)))
         reports.update({k: [_fact(f) for f in facts] for k, facts in entries.items()})
         if keep is not None:
             reports = {k: v for k, v in reports.items() if k in set(keep)}
         body = json.dumps({"version": facts_cache.VERSION, "reports": reports}, default=_plain,
                           ensure_ascii=False).encode("utf-8")
-        try:
-            return client.upload(folder_id, name, body, MIME, replace_id=files[-1].id if files else None)
-        except Exception:
-            if not files:
-                raise
-            return client.upload(folder_id, name, body, MIME)       # not ours to replace: a file of our own
+        stored = None
+        for _ in range(2 if ours else 1):                           # a slow Drive: once more before anything else
+            try:
+                stored = client.upload(folder_id, name, body, MIME, replace_id=ours[-1].id if ours else None)
+                break
+            except Exception:
+                pass
+        if stored is None:
+            return None
+        _to_bin(client, [f for f in ours if f.id != stored.id], name)
+        return stored
     except Exception:
         return None
+
+
+def _to_bin(client, files: list, name: str):
+    """Move these copies to the Drive bin; one Drive refuses is left (tried again next time)."""
+    for f in files:
+        try:
+            client.trash(f.id, f"an old copy of {name}")
+        except Exception:
+            pass
+
+
+def trash_old(client, files: list) -> list:
+    """Move the old per-report summaries (<report>.summary.json, 11-18/11/2026) to the Drive bin: their figures are in
+    the banks' files. Only files of that name are touched; a file Drive refuses to move (another account's) is left
+    (its own account's app moves it). The names moved."""
+    moved = []
+    for f in files:
+        if not f.name.endswith(OLD_SUFFIX) or f.name.endswith(BANK_SUFFIX) or not f.mine:
+            continue
+        try:
+            client.trash(f.id, f.name)
+            moved.append(f.name)
+        except Exception:
+            pass
+    return moved
