@@ -49,7 +49,7 @@ XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 TYPE_MIMES = {"csv": {"text/csv", SHEET_MIME},
               "xlsx": {"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
               "xls": {"application/vnd.ms-excel"}}
-FILE_FIELDS = "id, name, mimeType, size, modifiedTime, md5Checksum, parents"
+FILE_FIELDS = "id, name, mimeType, size, modifiedTime, md5Checksum, parents, ownedByMe"
 SHARED = {"supportsAllDrives": True}
 SIGN_IN_AGAIN = "Sign in again (side panel → Google Drive → Sign in with Google)."
 
@@ -72,12 +72,14 @@ class DriveFile:
     md5: str = ""
     folder: str = ""                         # path of the folder it was found in, e.g. 'I&M / 09/2026' ("" = top)
     parent: str = ""                         # the ID of its folder (11/11/2026: a report's summary goes next to it)
+    mine: bool = True                        # 18/11/2026: made by this account (only those can be changed or binned)
 
     @classmethod
     def from_api(cls, f: dict, folder: str = "") -> "DriveFile":
         return cls(f["id"], f.get("name", ""), f.get("mimeType", ""),
                    int(f["size"]) if f.get("size") is not None else None, f.get("modifiedTime", ""),
-                   f.get("md5Checksum", ""), folder, (f.get("parents") or [""])[0])
+                   f.get("md5Checksum", ""), folder, (f.get("parents") or [""])[0],
+                   f.get("ownedByMe", True) is not False)                 # a shared drive has no owner: True
 
 
 @dataclass
@@ -291,9 +293,11 @@ class DriveClient:
             raise DriveError(f"Could not {what}: {reason}." + (f" [Google: {google}]" if google else "")) from None
 
     def account_email(self) -> str:
-        """The e-mail address Drive is used with (your account, or the service account)."""
-        about = self._run(self.service.about().get(fields="user(emailAddress)"), "read the signed-in account")
-        return (about.get("user") or {}).get("emailAddress", "")
+        """The e-mail address Drive is used with (your account, or the service account); asked once."""
+        if not getattr(self, "_email", ""):
+            about = self._run(self.service.about().get(fields="user(emailAddress)"), "read the signed-in account")
+            self._email = (about.get("user") or {}).get("emailAddress", "")
+        return self._email
 
     # ---- access rights (asked to Drive, never assumed) ------------------------------------------------------------
     def check_access(self, folder_id: str, label: str, write: bool) -> AccessCheck:
@@ -487,6 +491,14 @@ class DriveClient:
         except ImportError:
             return None
         return google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=timeout))
+
+    def trash(self, file_id: str, what: str = "the file") -> None:
+        """Move a file to the Drive bin (18/11/2026: the copies of a bank's summary file once merged). It can be
+        restored from the bin for 30 days; DriveError when Drive refuses (e.g. a file of another account)."""
+        done = self._run(self.service.files().update(fileId=file_id, body={"trashed": True}, fields="id, trashed",
+                                                     **SHARED), f"move {what} to the bin")
+        if not (done or {}).get("trashed"):
+            raise DriveError(f"Google Drive did not move {what} to the bin.")
 
     def upload(self, parent_id: str, name: str, data: bytes, mime: str, replace_id: str | None = None,
                http=None) -> DriveFile:
