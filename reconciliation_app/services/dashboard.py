@@ -137,8 +137,18 @@ def facts_from_report(rep: dict, record, weekend: dict | None = None) -> list:
 
 def no_transaction_fact(path, record) -> Fact | None:
     """The fact of a No-Transaction Report (step 1, "No-Transaction Report": one table, every count 0, the status
-    "No Transactions Recorded"), or None when the file is a standard report. The counts are read from its table."""
+    "No Transactions Recorded"), or None when the file is a standard report. The counts are read from its table.
+    17/11/2026: a No-Transaction Report has a single sheet; a report with more is not opened here (a BK month is
+    70 MB: opening it took seconds on every dashboard)."""
+    import zipfile
     from openpyxl import load_workbook
+    try:
+        with zipfile.ZipFile(path) as z:
+            sheets = [n for n in z.namelist() if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", n)]
+        if len(sheets) > 1:
+            return None
+    except zipfile.BadZipFile:
+        return None
     wb = load_workbook(path, read_only=True, data_only=True)
     try:
         ws = wb[wb.sheetnames[0]]

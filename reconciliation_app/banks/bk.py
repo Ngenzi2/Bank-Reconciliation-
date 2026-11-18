@@ -298,7 +298,9 @@ def row_types(rows: pd.DataFrame) -> pd.Series:
     # 09/11/2026: a cash deposit at a branch with a name, not an invoice ("Cash Deposit : NCGR LTD") is not a bill
     # payment (the Branch Teller bill payments are "Cash Deposit : <invoice>")
     teller = source.eq("Branch Teller") & narration.str.contains("Cash Deposit", case=False, regex=False)
-    out[teller & narration_invoice(rows)[0].eq("")] = "Cash deposit"
+    if teller.any():                      # (the invoice cut from the Narration of these rows only: a month has 98,000)
+        inv = narration_invoice(rows[teller])[0]
+        out[inv.index[inv.eq("")]] = "Cash deposit"
     out[narration.str.contains("SWIFT Payment", regex=False)] = "Bank transfer"
     out[narration.str.contains("SWIFT Payment - Charges", regex=False)] = "Bank transfer Charges"   # fix 2
     out[narration.str.contains("AGENT REFUND", regex=False)] = "Refund"
