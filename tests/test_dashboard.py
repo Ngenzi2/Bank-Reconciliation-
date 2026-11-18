@@ -324,3 +324,29 @@ def test_three_cards_shown_and_the_others_behind_the_arrows():
     every = dv.kpi_cards(now, None, fu)                              # the page's PDF: every card, no arrows
     assert 'class="car-i"' not in every and every.count('class="dk-c"') == 6
     assert 'class="car-i"' not in dv.kpi_cards(now, None, None, per_view=5)  # 5 cards fit: no arrows
+
+
+def test_the_follow_up_excel_has_the_success_rate_style_without_a_rank():
+    # 18/11/2026: the Follow-up page's Download: the same look as the success rate's Excel, the table's own order
+    import datetime
+    import io
+    from openpyxl import load_workbook
+    from services import dashboard_view as dv
+    t = pd.DataFrame({"Invoice": ["2", "1"], "Amount": [1500.0, 20.0], "Value date": [datetime.date(2026, 11, 2)] * 2})
+    ws = load_workbook(io.BytesIO(dv.ranked_xlsx(t, "Follow-up · November 2026", "Open", None, "Follow-up",
+                                                 rank=False)))["Follow-up"]
+    assert ws["A1"].value == "Follow-up · November 2026" and [c.value for c in ws[4]] == ["Invoice", "Amount", "Value date"]
+    assert [ws["A5"].value, ws["A6"].value] == ["2", "1"]                      # not ranked, not sorted
+    assert ws["B5"].number_format == "#,##0" and ws["C5"].number_format == "DD/MM/YYYY" and ws["A5"].font.b
+
+
+def test_the_follow_up_progress_shows_completed_and_remaining():
+    # 18/11/2026, Follow-up page: completed and remaining (tiles, one bar), per bank done and left
+    from services import dashboard_view as dv
+    html = dv.followup_progress(7, 12, {"RWF": 52000.0}, {"RWF": 64470.0, "USD": 0.0},
+                                [("Ecobank", 4, 3), ("I&M", 3, 1), ("BPR", 0, 1)], "November 2026 · Pending · All banks")
+    assert ">7</div>" in html and ">5</div>" in html and "58%</b> resolved · 7 of 12 items" in html
+    assert "RWF 52,000 received later" in html and "RWF 64,470 still to follow up" in html and "USD 0" not in html
+    assert ">4</td>" in html and ">3</td>" in html and ">resolved</th>" in html and "BY DECISION" not in html
+    empty = dv.followup_progress(0, 0, {}, {}, [], "Week 3")
+    assert "No item" in empty and "nothing left" in empty and "0%</b> resolved" in empty
