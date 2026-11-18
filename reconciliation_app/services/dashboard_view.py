@@ -218,6 +218,70 @@ def _arrow(now, before, good_up=True, points=False, fmt=lambda v: f"{v:,}"):
     return f'<span class="{"dk-g" if good else "dk-r"}">{"↗" if up else "↘"} {txt}</span> from {fmt(before)}'
 
 
+def followup_progress(done: int, total: int, received: dict, still_open: dict, by_bank: list, label: str) -> str:
+    """18/11/2026, the Follow-up page: what is completed (a decision recorded) and what remains, as a success.
+    received: {currency: amount} marked "Received later"; still_open: {currency: amount} of the remaining items;
+    by_bank: [(bank, completed, remaining)]. label: the period and filters shown (the same items as the cards)."""
+    ok, ok_l, left, left_l, left_d = "#2E7D4F", "#DFF3E6", "#D4A72C", "#FBF1D9", "#9A7414"
+    pct = done / total * 100 if total else 0
+    money = lambda amounts: " · ".join(f"{escape(c)} {v:,.0f}" for c, v in amounts.items() if v)
+    # 18/11/2026: by bank as a table without lines: each number right under its heading
+    banks = "".join(
+        f'<tr><td>{escape(name)}</td><td class="fp-bt"><span class="fp-sb"><i style="width:{d / (d + n) * 100:.0f}%;'
+        f'background:{ok}"></i><i style="width:{n / (d + n) * 100:.0f}%;background:{left}"></i></span></td>'
+        f'<td class="fp-num" style="color:{ok}">{d:,}</td><td class="fp-num" style="color:{left_d}">{n:,}</td></tr>'
+        for name, d, n in by_bank if d + n)
+    # 18/11/2026: an empty row under the headings takes any extra height, so the last bank is level with the
+    # "% resolved" line of the left block (both rows 32px, both blocks ending at the same bottom)
+    if banks:
+        banks = '<tr class="fp-gap"><td colspan="4"></td></tr>' + banks
+    return (STYLE_D + f"""<style>
+.fp{{border:1px solid #E1EEF0;border-radius:16px;padding:20px 26px;background:linear-gradient(180deg,#FBFEFC,#fff);
+font-family:Nunito,'Segoe UI',sans-serif;color:{TEAL};box-shadow:0 2px 6px rgba(18,50,57,.05)}}
+.fp-t{{display:flex;justify-content:space-between;align-items:center;gap:12px}}
+.fp-k{{font-size:13px;font-weight:800;letter-spacing:.08em;color:{MUT};display:flex;gap:9px;align-items:center}}
+.fp-k i{{width:24px;height:24px;border-radius:50%;background:{ok_l};color:{ok};display:grid;place-items:center;
+font-style:normal}}
+.fp-p{{font-size:12.5px;color:{MUT};background:{PALE};padding:4px 11px;border-radius:20px;font-weight:700}}
+.fp-g{{display:grid;grid-template-columns:1fr 1fr;gap:32px;margin-top:16px;align-items:stretch}}
+.fp-left{{display:flex;flex-direction:column}}             /* 18/11/2026: as tall as the bank table, tops level */
+.fp-tiles{{display:grid;grid-template-columns:1fr 1fr;gap:12px;flex:1}}
+.fp-tile{{border-radius:12px;padding:13px 15px}}
+.fp-n{{font-size:30px;font-weight:800;line-height:1}}
+.fp-l{{font-size:12.5px;color:{MUT};margin-top:5px;font-weight:800;letter-spacing:.04em}}
+.fp-m{{font-size:13px;margin-top:6px;font-weight:700}}
+.fp-bar{{display:flex;height:11px;border-radius:8px;overflow:hidden;background:{PALE};flex:1}}
+.fp-s{{font-size:13px;color:{MUT};margin-top:7px}}
+.fp-foot{{height:32px;display:flex;align-items:center;margin-top:8px}}
+.fp-under{{height:20px;line-height:20px;margin-top:2px}}      /* under the bar; the bank table keeps the same room */
+.fp-right{{display:flex;flex-direction:column;padding-bottom:22px}}
+.fp-tb{{width:100%;border-collapse:collapse;font-size:14px;flex:1}}
+.fp-tb th,.fp-tb td{{border:0;padding:0;background:none;vertical-align:middle}}
+.fp-tb tr:not(.fp-gap) td{{height:32px}} .fp-tb tr.fp-gap td{{height:auto}} .fp-tb th{{height:22px}}
+.fp-tb th{{font-size:12px;font-weight:800;color:{MUT};text-align:left;padding:0 0 6px;line-height:1.2}}
+.fp-tb td:first-child{{white-space:nowrap;padding-right:14px}}
+.fp-tb th:first-child{{letter-spacing:.07em}}
+.fp-tb .fp-bt{{width:48%;padding:0 18px 0 12px}}
+.fp-tb .fp-num,.fp-tb th.fp-num{{width:90px;text-align:center;vertical-align:middle;font-weight:800;
+font-variant-numeric:tabular-nums}}
+.fp-tb th.fp-num{{font-weight:700}}
+.fp-tb th.fp-num::before{{content:"";display:inline-block;width:9px;height:9px;border-radius:3px;margin-right:5px}}
+.fp-sb{{display:flex;height:9px;border-radius:6px;overflow:hidden;background:{PALE}}}
+.fp-sb i{{display:block;height:100%}}
+@media (max-width:900px){{.fp-g{{grid-template-columns:1fr}}}}
+</style><div class="fp"><div class="fp-t"><div class="fp-k"><i>✓</i>FOLLOW-UP PROGRESS</div>
+<div class="fp-p">{escape(label)}</div></div><div class="fp-g"><div class="fp-left"><div class="fp-tiles">
+<div class="fp-tile" style="background:{ok_l}"><div class="fp-n" style="color:{ok}">{done:,}</div>
+<div class="fp-l">RESOLVED</div><div class="fp-m">{money(received) + " received later" if money(received) else "nothing received later yet"}</div></div>
+<div class="fp-tile" style="background:{left_l}"><div class="fp-n" style="color:{left_d}">{total - done:,}</div>
+<div class="fp-l">PENDING</div><div class="fp-m">{money(still_open) + " still to follow up" if money(still_open) else "nothing left"}</div></div>
+</div><div class="fp-foot"><div class="fp-bar"><i style="width:{pct:.0f}%;background:{ok}"></i><i style="width:{100 - pct:.0f}%;background:{left}"></i></div></div>
+<div class="fp-s fp-under"><b>{pct:.0f}%</b> resolved · {done:,} of {total:,} items</div></div>
+<div class="fp-right">{f'<table class="fp-tb"><tr><th>BY BANK</th><th></th><th class="fp-num">resolved</th><th class="fp-num">pending</th></tr>{banks}</table>' if banks else '<div class="fp-s">No item</div>'}</div>
+</div></div>
+<style>.fp-tb th.fp-num:nth-child(3)::before{{background:{ok}}} .fp-tb th.fp-num:nth-child(4)::before{{background:{left}}}</style>""")
+
+
 def kpi_cards(now: dict, before: dict | None, fu: dict | None = None, per_view: int | None = None) -> str:
     """AMOUNT (received; RWF and USD each in full, never added) · RATE (received notification ÷ processed
     transaction) · TRANSACTIONS (processed) · SLA (% violated). With a comparison: the change; else what it is.
@@ -270,8 +334,8 @@ def kpi_cards(now: dict, before: dict | None, fu: dict | None = None, per_view: 
                 # 30/10/2026: "4 / 75" then "Checked", the open items per type, and the money still open
                 rows = "".join(f'<div><span>{t}</span><b>{s["by_type"][t][0]:,}</b></div>'
                                for t in fu.get("types", ("Pending", "Paid twice")))
-                sub = (f'Checked<div class="dk-fu">{rows}</div>'
-                       + (f'{escape(fu["open_money"])} remaining' if s["open"] else "Nothing left to check"))
+                sub = (f'Resolved<div class="dk-fu">{rows}</div>'    # 18/11/2026: "Resolved", like the Follow-up page
+                       + (f'{escape(fu["open_money"])} pending' if s["open"] else "Every item resolved"))
                 cards.append(("FOLLOW-UP", "fu", f'<span class="{red.strip()}">{s["resolved"]:,} / {s["total"]:,}'
                                                  f'</span>', sub))
             else:
@@ -599,18 +663,22 @@ def alt_bank_rate_ring(table: pd.DataFrame, colors: dict):
     return _alt_theme(alt.layer(ring, big, small), height=230)
 
 
-def ranked_xlsx(table: pd.DataFrame, title: str, sub: str, by: str, sheet: str = "By bank") -> bytes:
+def ranked_xlsx(table: pd.DataFrame, title: str, sub: str, by: str | None, sheet: str = "By bank",
+                rank: bool = True) -> bytes:
     """10/11/2026: a table as an Excel file, ranked: a centred title and line above it, a Rank column (the biggest
     `by` first), the header in IremboPay teal, every cell centred and bold, thin lines inside and a thick one around.
     Rates (%) with 2 decimals, shares and changes with 1, counts and amounts with thousands separators. Two-level
     columns (top, sub; 11/11/2026): two header rows, the top merged over its sub-columns, a column whose sub is ""
-    merged down both rows."""
+    merged down both rows. 18/11/2026: by=None and rank=False keep the table's order without a Rank column (the
+    Follow-up page's Excel, in the same style); a date as DD/MM/YYYY."""
     import io
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-    ranked = table.sort_values(by, ascending=False, kind="stable").reset_index(drop=True)
+    import datetime
+    ranked = (table.sort_values(by, ascending=False, kind="stable") if by is not None else table).reset_index(drop=True)
     two = isinstance(ranked.columns, pd.MultiIndex)
-    ranked.insert(0, ("Rank", "") if two else "Rank", range(1, len(ranked) + 1))
+    if rank:
+        ranked.insert(0, ("Rank", "") if two else "Rank", range(1, len(ranked) + 1))
     pairs = [tuple(c) if two else (c, "") for c in ranked.columns]
     cols = [f"{t} {sub}".strip() for t, sub in pairs]
     ranked.columns = cols
@@ -649,6 +717,8 @@ def ranked_xlsx(table: pd.DataFrame, title: str, sub: str, by: str, sheet: str =
                 cell.font = Font(bold=True)
                 if isinstance(cell.value, (int, float)) and name != "Rank":
                     cell.number_format = fmt[name]
+                elif isinstance(cell.value, (datetime.date, datetime.datetime)):
+                    cell.number_format = "DD/MM/YYYY"
         ws.row_dimensions[r].height = 22
     for c, name in enumerate(cols, 1):
         label = pairs[c - 1][1] or pairs[c - 1][0]       # a sub-column: as wide as its sub and its numbers
