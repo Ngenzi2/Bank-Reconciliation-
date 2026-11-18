@@ -98,3 +98,26 @@ def test_week_names_and_file_names():
     assert report_history.parse_name(name)["label"] == p.label                         # still read by its dates
     assert report_history.parse_name("IM_recon_summary_28-09-2026_to_04-10-2026.xlsx")["label"] == p.label
     assert report_history.parse_name(name.replace(".xlsx", "_v2.pdf"))["version"] == 2
+
+
+def test_a_pending_item_keeps_its_irembopay_status():
+    # 17/11/2026: the Follow-up page filters the pending items by their IremboPay status in the report
+    assert followup.status_of({"payment_status": "new"}) == "NEW"
+    assert followup.status_of({"payment_status": "NEW", "review_status": "Pending notification (invoice expired)"}) \
+        == "EXPIRED"                                       # reviewed: kept as NEW, the expiry is the note
+    assert followup.status_of({"payment_status": None}) == "None"   # not in IremboPay's file / no invoice number
+
+
+def test_an_item_keeps_the_bank_statements_channel(tmp_path):
+    # 18/11/2026: the Follow-up table shows the channel on the bank statement (Ecobank: Source Channel)
+    from types import SimpleNamespace
+    row = {"Currency": "RWF", "Request Date": "2026-11-02", "Cba Ref No": "R1", "Amount": 5000,
+           "invoice_number": "886", "Source Channel": "ECOBANKMOBILEAPP", "payment_status": "NEW"}
+    path = tmp_path / "r.xlsx"
+    with pd.ExcelWriter(path) as xw:
+        pd.DataFrame([row]).to_excel(xw, sheet_name="Pending notification", index=False)
+        pd.DataFrame([dict(row, invoice_number="887")]).to_excel(xw, sheet_name="Duplicate payment other channel",
+                                                                 index=False)
+    items = followup.items_from_report(path, SimpleNamespace(modified="2026-11-03", name="r.xlsx"), "ECO")
+    assert [(i["type"], i["channel"]) for i in items] == [("Pending", "ECOBANKMOBILEAPP"),
+                                                         ("Paid twice", "ECOBANKMOBILEAPP")]
