@@ -75,10 +75,46 @@ def run(tmp_path, rows=ROWS, pays=PAYS, require_review=True, sla=1):
 
 # ---- reading --------------------------------------------------------------------------------------------------------
 def test_statement_is_read_whatever_the_doc_id_title():
-    for title in ("DOC ID", "Doc ID", "doc id", "DOCID", ""):
+    for title in ("DOC ID", "Doc ID", "doc id", "DOCID", "", "INVOICE", "INVOICE NUMBERS", "REFERENCE NUMBER",
+                  "BANK REFERENCE"):
         f = read(statement(ROWS, header=HEAD[:3] + [title] + HEAD[4:]))
         assert f.rows == 7 and f.currency == "" and f.bank == "BPR"           # the 7 credits; the debit is not kept
         assert bpr.clean_statement(f.data)["invoice_number"].iloc[0] == "886000000001"
+
+
+NOV_HEAD = ["BOOKING_DATE", "TRANS_REFERENCE", "DESCRIPTION", "REFERENCE NUMBER", "VALUE_DATE", "DEBIT", "CREDIT",
+            "CLOSING_BALANCE"]
+NOV = [("13-NOV-26", "FT1", "SZAAA1", "886000000001", "13-NOV-26", 0, 5000),
+       ("14-NOV-26", "FT2", "SZAAA2", "886000000002", "14-NOV-26", 0, 2000),
+       ("14-NOV-26", "FT3", "SZAAA3", "", "14-NOV-26", 0, 700),
+       ("15-NOV-26", "FT4", "SZAAA4", "886000000004", "15-NOV-26", 0, 300),
+       ("15-NOV-26", "RWF1", "", "", "15-NOV-26", -8000, 0)]
+
+
+def test_the_november_2026_layout_is_read():
+    # TRANS_REFERENCE, REFERENCE NUMBER and dates like '13-NOV-26' (no time)
+    f = read(statement(NOV, header=NOV_HEAD), "13 November - 15th November.xlsx")
+    assert f.rows == 4 and (f.first, f.last) == (pd.Timestamp("2026-11-13"), pd.Timestamp("2026-11-15"))
+    st = bpr.clean_statement(f.data)
+    assert st["BANK_REFERENCE"].tolist() == ["FT1", "FT2", "FT3", "FT4"]
+    assert st["invoice_number"].iloc[0] == "886000000001" and st["VALUE_DATE"].iloc[1] == pd.Timestamp("2026-11-14")
+    assert st[bpr.NO_TIME].eq("yes").all() and st[bpr.NO_VALUE_DATE].eq("").all()
+
+
+def test_a_value_date_without_time_is_checked_by_day(tmp_path):
+    pays = [("886000000001", 5000, "RWF", "2026-11-13 18:30:00", "BPR_RW", "SZAAA1"),     # same day: on time
+            ("886000000002", 2000, "RWF", "2026-11-15 08:00:00", "BPR_RW", "SZAAA2"),     # next day: violated
+            ("886000000004", 300, "RWF", "2026-11-15 09:00:00", "MTN", "")]               # other provider
+    files = [read(statement(NOV, header=NOV_HEAD)), e.read_payment_file("p.csv", payments(pays), "BPR")]
+    res = e.run(tmp_path / "base", e.make_period("week", "2026-11-09"), files, sla_days=1, require_review=False,
+                bank="BPR", report_dir=tmp_path / "r")
+    sla = res.sheets["Matched details"].set_index("BANK_REFERENCE")["sla_status"]
+    assert (sla["FT1"], sla["FT2"]) == ("On time", "SLA violated")
+    t = e.counts_of(res.blocks[-1][2])
+    processed = t["Overall processed payments"]["Total"]
+    assert processed == 4 == (t["Overall notifications received by Irembo"]["Total"]
+                              + t["Pending notifications"]["Total"] + t["Duplicate Payment"]["Total"])
+    assert t["SLA Violated"]["Total"] == 1
 
 
 def test_the_data_sheet_is_found_and_other_sheets_ignored():
