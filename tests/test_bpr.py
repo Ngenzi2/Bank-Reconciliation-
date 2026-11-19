@@ -101,6 +101,18 @@ def test_the_november_2026_layout_is_read():
     assert st[bpr.NO_TIME].eq("yes").all() and st[bpr.NO_VALUE_DATE].eq("").all()
 
 
+def test_a_missing_doc_id_is_taken_from_the_list_on_another_sheet():
+    rows = [("2026-11-13", "FT1", "20140000001", "", "2026-11-13 10:00:00", 0, 5000),
+            ("2026-11-13", "FT2", "SZAAA2", "", "2026-11-13 11:00:00", 0, 2000),
+            ("2026-11-13", "FT3", "SZAAA3", "", "2026-11-13 12:00:00", 0, 700)]
+    sql = [["FT9", "GH2H"], ["886000000001", "20140000001"], ["SZAAA2", "886000000002"],
+           ["886000000003", "SZAAA3"], ["886000000004", "SZAAA3"]]            # SZAAA3 with two invoices: not used
+    st = bpr.clean_statement(read(statement(rows, sheets={"SQL": sql})).data)
+    assert st["invoice_number"].tolist()[:2] == ["886000000001", "886000000002"]
+    assert pd.isna(st["invoice_number"].iloc[2])
+    assert st[bpr.FOUND_BY].tolist()[:2] == ["sheet 'SQL' of the statement"] * 2
+
+
 def test_a_value_date_without_time_is_checked_by_day(tmp_path):
     pays = [("886000000001", 5000, "RWF", "2026-11-13 18:30:00", "BPR_RW", "SZAAA1"),     # same day: on time
             ("886000000002", 2000, "RWF", "2026-11-15 08:00:00", "BPR_RW", "SZAAA2"),     # next day: violated
