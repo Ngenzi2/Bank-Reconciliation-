@@ -28,6 +28,7 @@ any more (<report>.summary.json, 11/11/2026): one more file for every report sav
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
 
@@ -91,14 +92,29 @@ def bank_from_bytes(data) -> dict:
         return {}
 
 
-def update_bank(client, folder_id: str, code: str, entries: dict, keep=None):
+def _each(client, items: list, job) -> list:
+    """job(item, http) for every item, 4 at a time, each on a Drive connection of its own (18/11/2026: Drive answers
+    in about a second; one after the other when the client has no connection to give, e.g. in tests)."""
+    if len(items) < 2 or getattr(client, "thread_http", lambda: None)() is None:
+        return [job(i, None) for i in items]
+    with ThreadPoolExecutor(min(4, len(items))) as pool:
+        return list(pool.map(lambda i: job(i, client.thread_http()), items))
+
+
+def _call(fn, *args, http=None):
+    return fn(*args, http=http) if http is not None else fn(*args)
+
+
+def update_bank(client, folder_id: str, code: str, entries: dict, keep=None, known: dict | None = None,
+                moved: list | None = None):
     """Add the reports {report key: [facts]} to the bank's file in the folder, on top of what is on Drive now (read
     again here: every copy of it, merged). keep: the keys of the bank's reports now on Drive (the others are
     dropped). The stored file (DriveFile), or None when nothing was written (the dashboard then reads the Excel).
     18/11/2026: only the bank's keeper (KEEPERS) writes it, into its own copy (replaced, tried twice; a new one only
     when it has none); every other copy of its own goes to the bin. Anyone else's app writes nothing and moves its
     own copies to the bin (their figures are in the keeper's file, or come back from the Excel). With no entries,
-    the copies are only tidied; nothing is done when there is a single file."""
+    the copies are only tidied; nothing is done when there is a single file. known: {file ID: content} already
+    downloaded (the dashboard's), not downloaded again; moved: the copies moved to the bin are added to it."""
     if not folder_id:
         return None
     try:
@@ -109,11 +125,14 @@ def update_bank(client, folder_id: str, code: str, entries: dict, keep=None):
             return None
         ours = [f for f in files if f.mine]
         if not keeps(client, code):                                  # not ours to keep: only our copies away
-            _to_bin(client, ours, name)
+            (moved if moved is not None else []).extend(_to_bin(client, ours, name))
             return None
+        known = {k: v for k, v in (known or {}).items() if isinstance(v, (bytes, bytearray))}   # not a failed one
+        get = [f for f in files if known.get(f.id) is None]
+        got = dict(zip([f.id for f in get], _each(client, get, lambda f, h: _call(client.download, f.id, http=h))))
         reports = {}
-        for f in files:                                              # every copy, whoever made it; ours last
-            reports.update(bank_from_bytes(client.download(f.id)))
+        for f in files:                                              # every copy, whoever made it, oldest first
+            reports.update(bank_from_bytes(known.get(f.id) if known.get(f.id) is not None else got[f.id]))
         reports.update({k: [_fact(f) for f in facts] for k, facts in entries.items()})
         if keep is not None:
             reports = {k: v for k, v in reports.items() if k in set(keep)}
@@ -128,32 +147,38 @@ def update_bank(client, folder_id: str, code: str, entries: dict, keep=None):
                 pass
         if stored is None:
             return None
-        _to_bin(client, [f for f in ours if f.id != stored.id], name)
+        (moved if moved is not None else []).extend(_to_bin(client, [f for f in ours if f.id != stored.id], name))
         return stored
     except Exception:
         return None
 
 
-def _to_bin(client, files: list, name: str):
-    """Move these copies to the Drive bin; one Drive refuses is left (tried again next time)."""
-    for f in files:
+def _to_bin(client, files: list, what: str) -> list:
+    """Move these files to the Drive bin, 4 at a time; one Drive refuses is left (tried again next time). The names
+    of the files moved."""
+    def one(f, http):
         try:
-            client.trash(f.id, f"an old copy of {name}")
+            _call(client.trash, f.id, f"an old copy of {what}", http=http)
+            return f.name
         except Exception:
-            pass
+            return None
+    return [n for n in _each(client, files, one) if n]
 
 
 def trash_old(client, files: list) -> list:
     """Move the old per-report summaries (<report>.summary.json, 11-18/11/2026) to the Drive bin: their figures are in
     the banks' files. Only files of that name are touched; a file Drive refuses to move (another account's) is left
     (its own account's app moves it). The names moved."""
-    moved = []
-    for f in files:
-        if not f.name.endswith(OLD_SUFFIX) or f.name.endswith(BANK_SUFFIX) or not f.mine:
-            continue
+    old = [f for f in files if f.name.endswith(OLD_SUFFIX) and not f.name.endswith(BANK_SUFFIX) and f.mine]
+    return [n for f, n in zip(old, _to_bin_each(client, old)) if n]
+
+
+def _to_bin_each(client, files: list) -> list:
+    """_to_bin for files of different names: [name or None] in the same order."""
+    def one(f, http):
         try:
-            client.trash(f.id, f.name)
-            moved.append(f.name)
+            _call(client.trash, f.id, f.name, http=http)
+            return f.name
         except Exception:
-            pass
-    return moved
+            return None
+    return _each(client, files, one)
