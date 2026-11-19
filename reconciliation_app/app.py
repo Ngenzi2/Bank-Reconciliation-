@@ -2164,8 +2164,22 @@ def tidy_summaries(client, bank_files: list, records: list, known: dict):
     for f in bank_files:
         copies.setdefault((f.parent, f.name), []).append(f)
     old = [f for f in state.history_index[1].others if f.name.endswith(report_summary.OLD_SUFFIX)
-           and not f.name.endswith(report_summary.BANK_SUFFIX)]
-    several = {k: v for k, v in copies.items() if len(v) > 1 and k[0]}
+           and not f.name.endswith(report_summary.BANK_SUFFIX) and f.mine]
+    # 19/11/2026: only what this account can do: someone else's leftovers are left to their own app (no "Tidying"
+    # screen, nothing written, when everything left is theirs and its figures are already in this account's file)
+    keys = lambda f: set(report_summary.bank_from_bytes(known.get(f.id))) if isinstance(known.get(f.id), bytes) else None
+
+    def to_do(files):
+        ours, others = [f for f in files if f.mine], [f for f in files if not f.mine]
+        code = files[0].name[:-len(report_summary.BANK_SUFFIX)]
+        if not report_summary.keeps(client, code):
+            return bool(ours and others)                         # the keeper's file is there: ours to the bin
+        if len(ours) != 1:
+            return True                                          # several of ours to merge, or none of ours yet
+        mine, now = keys(ours[0]), {facts_cache.key(r) for r in records if r.bank == code}
+        return mine is None or any(keys(f) is None or (keys(f) & now) - mine for f in others)   # a report ours lacks
+                                                                 # (an older version of a report does not count)
+    several = {k: v for k, v in copies.items() if len(v) > 1 and k[0] and to_do(v)}
     if not several and not old:
         return
     done = []
