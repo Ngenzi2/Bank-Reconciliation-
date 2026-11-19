@@ -261,3 +261,22 @@ def test_old_per_report_summaries_of_another_account_are_left():
     drive.files = {"s1": ("IM_x.summary.json", b"", "folder")}
     assert report_summary.trash_old(drive, [DriveFile("s1", "IM_x.summary.json", mine=False)]) == []
     assert "s1" in drive.files
+
+
+def test_tidying_uses_what_the_dashboard_downloaded_and_says_what_it_moved():
+    # 18/11/2026: the copies the dashboard just downloaded are not downloaded again; a copy that failed to download
+    # there is downloaded here (never merged as empty); the copies moved to the bin are reported
+    first, second = Drive(), Drive()
+    report_summary.update_bank(first, "folder", "IM", {"a|1": facts()})
+    report_summary.update_bank(second, "folder", "IM", {"b|1": facts()})
+    drive = Drive()
+    drive.files = {"c1": first.files[bank_files(first)[0][0]], "c2": second.files[bank_files(second)[0][0]]}
+    asked = []
+    real = drive.download
+    drive.download = lambda fid, mime="", http=None, as_xlsx=False: asked.append(fid) or real(fid)
+    moved = []
+    known = {"c1": drive.files["c1"][1], "c2": DriveError("not downloaded")}
+    assert report_summary.update_bank(drive, "folder", "IM", {}, known=known, moved=moved) is not None
+    assert asked == ["c2"]                                                # c1 known; c2 failed before: fetched
+    (fid, data), = bank_files(drive)
+    assert set(report_summary.bank_from_bytes(data)) == {"a|1", "b|1"} and moved == [report_summary.bank_name("IM")]
