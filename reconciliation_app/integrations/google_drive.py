@@ -492,11 +492,11 @@ class DriveClient:
             return None
         return google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=timeout))
 
-    def trash(self, file_id: str, what: str = "the file") -> None:
+    def trash(self, file_id: str, what: str = "the file", http=None) -> None:
         """Move a file to the Drive bin (18/11/2026: the copies of a bank's summary file once merged). It can be
         restored from the bin for 30 days; DriveError when Drive refuses (e.g. a file of another account)."""
         done = self._run(self.service.files().update(fileId=file_id, body={"trashed": True}, fields="id, trashed",
-                                                     **SHARED), f"move {what} to the bin")
+                                                     **SHARED), f"move {what} to the bin", http)
         if not (done or {}).get("trashed"):
             raise DriveError(f"Google Drive did not move {what} to the bin.")
 
