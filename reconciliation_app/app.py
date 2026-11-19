@@ -2153,12 +2153,13 @@ def _delta(ch, *, pct=True, lower_is_better=False, points=False):
 SUMMARY_LOG = BASE_DIR / "output" / "summary_tidy.log"     # what the dashboard moved to the Drive bin (18/11/2026)
 
 
-def tidy_summaries(client, bank_files: list, records: list):
+def tidy_summaries(client, bank_files: list, records: list, known: dict):
     """18/11/2026, once per session (with the banks' files): a bank with several copies of its summary file is tidied
     (report_summary.update_bank: its keeper's app merges them into its own; anyone else's app moves its own copies to
     the Drive bin), and this account's old per-report summaries (<report>.summary.json) go to the bin. Only those
     two kinds of files are touched, and only the ones this account made; each move is noted in
-    output/summary_tidy.log. Never an error: what Drive refuses is tried again next time."""
+    output/summary_tidy.log. Never an error: what Drive refuses is tried again next time. known: {file ID: content}
+    of the banks' files just downloaded (not downloaded again); the files are moved 4 at a time."""
     copies = {}
     for f in bank_files:
         copies.setdefault((f.parent, f.name), []).append(f)
@@ -2171,13 +2172,12 @@ def tidy_summaries(client, bank_files: list, records: list):
     with irembo_loading("Tidying the summaries on Google Drive…"):
         for (parent, name), files in several.items():           # the keeper merges; the others bin their own
             code = name[:-len(report_summary.BANK_SUFFIX)]
-            report_summary.update_bank(client, parent, code, {},
+            moved = []
+            report_summary.update_bank(client, parent, code, {}, known=known, moved=moved,
                                        keep=[facts_cache.key(r) for r in records if r.bank == code])
-            left = {f.id for f in client.list_children(parent, name=name) if f.name == name}
-            gone = sum(f.id not in left for f in files)
-            if gone:
-                done += [f"{name} ({files[0].folder}): {gone} cop{'y' if gone == 1 else 'ies'} to the bin, "
-                         f"{len(left)} left"]
+            if moved:
+                done += [f"{name} ({files[0].folder}): {len(moved)} cop{'y' if len(moved) == 1 else 'ies'} to the bin, "
+                         f"{len(files) - len(moved)} left"]
         done += [f"to the bin: {n}" for n in report_summary.trash_old(client, old)]
     if done:
         try:
@@ -2226,7 +2226,7 @@ def dashboard_facts(client, root):
             for f in bank_files:                         # the newest copy of a bank last
                 shared.update(report_summary.bank_from_bytes(got.get(f.id)))
         state.bank_shared, state.bank_shared_root = shared, root
-        tidy_summaries(client, bank_files, records)
+        tidy_summaries(client, bank_files, records, got if bank_files else {})
     for r in todo:
         facts = report_summary.facts_of(shared[key(r)], r) if shared.get(key(r)) else None
         if facts is not None:
