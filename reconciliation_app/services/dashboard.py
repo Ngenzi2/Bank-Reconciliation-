@@ -404,7 +404,7 @@ def bank_shares(now_by: dict, before_by: dict | None = None, measure: str = "pro
         if not t:
             return 0.0
         return t["processed"] if measure == "processed" else t["amounts"].get(currency, {}).get("processed", 0.0)
-    rows = [{"Code": c, "Bank": engine.BANKS[c].FULL_NAME if c in engine.BANKS else c, "Value": value(t)}
+    rows = [{"Code": c, "Bank": engine.BANKS[c].NAME if c in engine.BANKS else c, "Value": value(t)}   # short name
             for c, t in now_by.items()]
     rows = [r for r in rows if r["Value"]]
     total = sum(r["Value"] for r in rows)
