@@ -141,3 +141,23 @@ def test_checker_keeps_the_currency_of_an_open_invoice():
     assert checker.answer("886213126169") == "Open, not paid yet" and checker.currency("886213126169") == "USD"
     assert checker.answer("886213126170") == "Paid" and checker.currency("886213126170") == ""
     assert checker.currencies() == {"886213126169": "USD"}
+
+
+def test_check_all_again_asks_every_invoice_again():
+    # 19/11/2026: "↻ Check all again" on the Follow-up and Reconciliation pages: an answer can change (paid since)
+    import time
+    answers = {"886000000001": "Open, not paid yet"}
+    checker = C.Checker(lookup=lambda inv: answers.get(inv, "Paid"), pause=0)
+    checker.add(["886000000001"])
+    for _ in range(100):
+        if checker.progress(["886000000001"])[0] == 1:
+            break
+        time.sleep(0.01)
+    assert checker.answer("886000000001") == "Open, not paid yet"
+    answers["886000000001"] = "Paid"                               # paid since
+    checker.recheck(["886000000001"])
+    for _ in range(100):
+        if checker.answer("886000000001") != C.CHECKING:
+            break
+        time.sleep(0.01)
+    assert checker.answer("886000000001") == "Paid"
