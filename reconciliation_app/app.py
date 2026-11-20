@@ -178,6 +178,11 @@ class irembo_loading:
     def __enter__(self):
         self.outer = irembo_loading.current
         self.on_big = self._big()
+        if not self.on_big and _page_run():
+            # 19/11/2026: reading Google Drive on the page (a refresh, a filter, a new report): the big loader, and
+            # the page drawn before stays hidden until this page is drawn again (never half old, half new)
+            show_page_loader(self.title, self.sub)
+            self.on_big = True
         self.ph = st.empty()
         if self.on_big:                          # its text goes on the big loader in the middle
             show_page_loader(self.title, self.sub)
@@ -189,6 +194,17 @@ class irembo_loading:
     def __exit__(self, *exc):
         self.ph.empty()
         irembo_loading.current = self.outer
+        return False
+
+
+def _page_run() -> bool:
+    """The whole page is being drawn (not a fragment refreshing itself, and the page loader exists already)."""
+    if "page_loader" not in globals():
+        return False
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+        return not getattr(get_script_run_ctx(), "current_fragment_id", None)
+    except Exception:
         return False
 
 
@@ -1918,7 +1934,9 @@ PAGE = next(k for k, pg in PAGES.items() if pg.title == _current.title)
 if state.get("goto") in PAGES and state.goto != PAGE:    # a page asked for (e.g. a test, or a link in the app)
     st.switch_page(PAGES[state.pop("goto")])
 state.pop("goto", None)
-PAGE_CHANGED = state.get("on_page") != PAGE               # 27/10/2026: the page loader shows while it loads
+# 27/10/2026: the page loader shows while it loads; 19/11/2026: until the page has been drawn to the end once (a run
+# cut short, e.g. by a click while loading, shows the loader again instead of the new page over the old one)
+PAGE_CHANGED = state.get("page_drawn") != PAGE
 if state.get("on_page") != PAGE:                        # another page: a saved report open on the last one closes
     state.on_page, state.view_mem, state.view_report = PAGE, None, None
 
@@ -2034,6 +2052,13 @@ PAGE_LOADING = {"dashboard": ("Loading the dashboard…", "Reading the saved rep
                 "settings": ("Loading the settings…", "")}
 page_loader = st.empty()
 PAGE_LOADER = {"on": False}
+
+
+def page_done():
+    """The page is drawn to the end: the loader goes away (and the next run of this page is no page change)."""
+    page_loader.empty()
+    PAGE_LOADER["on"] = False
+    state.page_drawn = PAGE
 
 
 def show_page_loader(title: str, sub: str = ""):
@@ -2325,6 +2350,28 @@ def tile_groups(tiles) -> str:
     return html + "</div>"
 
 
+def bank_measure_tools(measure: str, curs: list, cur: str):
+    """19/11/2026, Processed by bank: Transactions | Amount (<currency>) ▾ | Rate - the amount is a drop-down of the
+    currencies with money (this card's own currency); the one chosen is highlighted."""
+    def go(m, c=None):
+        state.dash_bank_measure = m
+        if c:
+            state.dash_c_banks = c
+    with st.container(horizontal=True, gap="small", key="dash_bank_tools", vertical_alignment="center"):
+        st.button("Transactions", key="dash_bm_tx", type="primary" if measure == "Transactions" else "secondary",
+                  on_click=go, args=("Transactions",))
+        with st.container(key="dash_bm_on" if measure == "Amount" else "dash_bm_off", width=190):
+            k = f"dash_bm_amt_{measure}_{cur}"                # drawn anew when the measure or the currency changes
+            st.selectbox("Amount", [f"Amount ({c})" for c in curs],
+                         index=curs.index(cur) if measure == "Amount" and cur in curs else None,
+                         placeholder="Amount", key=k, label_visibility="collapsed",
+                         on_change=lambda: state[k] and go("Amount", state[k][len("Amount ("):-1]))
+        st.button("Rate", key="dash_bm_rate", type="primary" if measure == "Rate" else "secondary",
+                  on_click=go, args=("Rate",))
+    st.html(f"<style>.st-key-dash_bm_on [data-baseweb='select'] > div {{border: 2px solid {BRAND}; "
+            f"background: #EAF4F5; font-weight: 800;}}</style>")
+
+
 def dashboard_page():
     st.markdown("<style>.block-container {max-width: 1600px;}</style>", unsafe_allow_html=True)   # this page is wide
     client, problem = drive_client()
@@ -2353,7 +2400,8 @@ def dashboard_page():
         state.dash_banks = state._dash_banks_last = [state.pop("dash_pick")]
     if "dash_goto" in state:                       # a level chosen in the breakdown or the path: (level, period)
         level, key = state.pop("dash_goto")
-        state.dash_kind, state[f"dash_period_{level}"] = level, key
+        state.dash_kind = level
+        state.setdefault("dash_chosen", {})[level] = key
     # the hierarchy, all from the monthly reports: a year = its quarters = its months; a month holds its weeks and days
     kinds = {"year": "Year", "quarter": "Quarter", "month": "Month", "week": "Week"}   # no day view (22/10/2026)
     # 28/10/2026: the banks are ticked (any of them, "All" = every bank); pick: "All", one bank's code, or "Some"
@@ -2369,9 +2417,15 @@ def dashboard_page():
     pick_banks = ticked
     options = (dashboard.period_options([f for f in facts if f.bank in pick_banks], kind) if with_partial
                else dashboard.complete_options(facts, kind, pick_banks))
-    if options and state.get(f"dash_period_{kind}") not in options:
-        state[f"dash_period_{kind}"] = options[0]
-    first = state.get(f"dash_period_{kind}") if options else None
+    # 19/11/2026: the period chosen for each type is kept apart from its drop-down: a drop-down that comes back (Week,
+    # then Month, then Week again) is drawn anew on that period, so it never shows one week while the page uses another
+    chosen = state.setdefault("dash_chosen", {})
+    if options and chosen.get(kind) not in options:
+        chosen[kind] = options[0]
+    first = chosen.get(kind) if options else None
+    if state.get("dash_shown_kind") != kind:                 # another period type: its drop-down is a new one
+        state.dash_shown_kind, state.dash_drop_n = kind, state.get("dash_drop_n", 0) + 1
+    drop_key = f"dash_period_{kind}_{state.dash_drop_n}"
     last = None
     # compared with (24/10/2026): "No comparison" or any other saved period of the same type, chosen in the bar
     vs_options = [o for o in options if o != first]
@@ -2404,7 +2458,8 @@ def dashboard_page():
                                  else dashboard.describe(kind, k))
             # the period and what it is compared with: two drop-downs side by side, in the bar (24/10/2026)
             if options:
-                st.selectbox("Period", options, key=f"dash_period_{kind}", label_visibility="collapsed",
+                st.selectbox("Period", options, index=options.index(first), key=drop_key, label_visibility="collapsed",
+                             on_change=lambda: chosen.__setitem__(kind, state[drop_key]),
                              format_func=lambda k: "📅 " + short_p(k) + (
                                  "" if dashboard.is_complete(facts, kind, k, pick_banks) else " · partial"),
                              width=160, help="The period shown")
@@ -2511,22 +2566,33 @@ def dashboard_page():
     star_note = (f'<div class="dc-note">* a {per} that is only partly in {_esc(span)}: only its part is counted</div>'
                  if any(part) else "")
     made = pd.Timestamp.now().strftime("%d %b %Y · %H:%M")
-    mcur = cur if cur != "All" else ("RWF" if "RWF" in now["currencies"] else (now["currencies"] or ["RWF"])[0])
+    # 19/11/2026: one currency at a time in each money card (Amount overview, Top merchants, Processed by bank's
+    # amount), each card its own choice among the currencies with money in the period; ⚙ Currency sets them all
+    order = ["RWF", "USD", "EUR", "GBP"]
+    amt_curs = ([cur] if cur != "All" else
+                sorted((c for c in found if any(ch["amounts"].get(c, 0.0) for ch in child)),
+                       key=lambda c: (order.index(c) if c in order else len(order), c))) or ["RWF"]
+
+    def card_cur(card):
+        if state.get(f"dash_c_{card}") not in amt_curs:
+            state[f"dash_c_{card}"] = amt_curs[0]
+        return state[f"dash_c_{card}"]
+    cur_amt, mcur = card_cur("amount"), card_cur("merchants")
     mt, _ = dashboard.merchants(sel, bef, mcur)
     with_data = sorted({engine.BANKS[f.bank].NAME for f in sel if f.merchants is not None and f.bank in engine.BANKS})
+    if with_data and len(with_data) == len(engine.BANKS):          # 19/11/2026: every bank: "All banks"
+        with_data = ["All banks"]
     charts = [
         ("payments", "Payments over time", over + " · processed transactions",
          dashboard_view.lines(labels, [("Processed transaction", [c["processed"] for c in child], BRAND)], part,
                               fill=True) + dashboard_view.chart_legend([("Processed transaction", BRAND)]) + star_note,
          pd.DataFrame({"Period": tlabels, "Processed transaction": [c["processed"] for c in child],
                        "Received notification": [c["received"] for c in child]})),
-        ("amount", "Amount overview", over + " · amount received",
-         dashboard_view.dual_bars(labels, [c["amounts"].get("RWF", 0.0) for c in child],
-                                  [c["amounts"].get("USD", 0.0) for c in child], part)
-         + dashboard_view.chart_legend([("RWF (left axis)", dashboard_view.TEAL), ("USD (right axis)", dashboard_view.USD_C)])
+        ("amount", "Amount overview", over + f" · amount received in {cur_amt}",
+         dashboard_view.money_bars(labels, [c["amounts"].get(cur_amt, 0.0) for c in child], cur_amt, part)
          + star_note,
-         pd.DataFrame({"Period": tlabels, "RWF received": [round(c["amounts"].get("RWF", 0.0)) for c in child],
-                       "USD received": [round(c["amounts"].get("USD", 0.0), 2) for c in child]})),
+         pd.DataFrame({"Period": tlabels, **{f"{c} received": [round(ch["amounts"].get(c, 0.0), 0 if c == "RWF" else 2)
+                                                               for ch in child] for c in amt_curs}})),
         ("exceptions", "Exceptions by type", over,
          dashboard_view.lines(labels, [(n, [c[m] for c in child], col) for n, m, col in
                                        (("SLA violated", "sla", dashboard_view.EXC["SLA violated"]),
@@ -2556,9 +2622,7 @@ def dashboard_page():
     live = {   # on the screen: the same figures as interactive charts (they answer the cursor); None = HTML only
         "payments": (dashboard_view.alt_lines(charts[0][4], [("Processed transaction", BRAND)], fill=True),
                      star_note),
-        "amount": (dashboard_view.alt_dual_bars(charts[1][4]),
-                   dashboard_view.chart_legend([("RWF (left axis)", dashboard_view.TEAL),
-                                                ("USD (right axis)", dashboard_view.USD_C)]) + star_note),
+        "amount": (dashboard_view.alt_money_bars(charts[1][4], cur_amt), star_note),
         "exceptions": (dashboard_view.alt_lines(charts[2][4], [(n, c) for n, c in dashboard_view.EXC.items()]),
                        dashboard_view.chart_legend(list(dashboard_view.EXC.items())) + star_note),
         "notif": (dashboard_view.alt_lines(
@@ -2584,7 +2648,6 @@ def dashboard_page():
                              for a, b in zip(p_tab[now_n].tolist(), p_tab[bef_n].tolist())]
         p_tab[f"Weeks of {now_n}" if kind == "month" else f"In {now_n}"] = [dates(child, i) for i in range(n_pos)]
         p_tab[f"Weeks of {bef_n}" if kind == "month" else f"In {bef_n}"] = [dates(child_b, i) for i in range(n_pos)]
-        cur_amt = state.get("dash_amt_cur") if state.get("dash_amt_cur") in ("RWF", "USD") else "RWF"
         a_tab = pd.DataFrame({"Position": pos,
                               now_n: [val(child, i, lambda c: round(c["amounts"].get(cur_amt, 0.0))) for i in range(n_pos)],
                               bef_n: [val(child_b, i, lambda c: round(c["amounts"].get(cur_amt, 0.0))) for i in range(n_pos)]})
@@ -2635,7 +2698,7 @@ def dashboard_page():
     # ---- 28/10/2026: all banks only - each bank's share of the processed transactions (or of the amount processed),
     #      next to "Pending & delayed notifications"; a ring with the total inside
     if len(banks) > 1:                                    # 28/10/2026: all banks, or the banks ticked
-        b_cur = cur if cur in ("RWF", "USD") else "RWF"
+        b_cur = card_cur("banks")                         # 19/11/2026: its own currency (⚙ sets all)
         b_measure = state.get("dash_bank_measure") if state.get("dash_bank_measure") in ("Transactions", "Amount", "Rate") \
             else "Transactions"
         b_colors = {c: bank_color(c) for c in engine.BANKS}
@@ -2672,26 +2735,33 @@ def dashboard_page():
             if not b_tab.empty:
                 live["banks"] = (dashboard_view.alt_bank_ring(b_tab, b_colors, b_unit),
                                  dashboard_view.bank_list(b_tab, b_colors, b_unit))
+    # 20/11/2026: "Processed by bank" up, in the place of "Exceptions by type", which goes down
+    keys = [c[0] for c in charts]
+    if "banks" in keys and "exceptions" in keys:
+        i, j = keys.index("exceptions"), keys.index("banks")
+        charts[i], charts[j] = charts[j], charts[i]
     for row in (charts[:2], charts[2:4], charts[4:]):
         cols = st.columns(len(row), gap="medium")
         for col, (key, title, sub, chart, table) in zip(cols, row):
             with col.container(border=True, key=f"dcard_{key}"):
                 if key in ("notif", "banks"):                  # + ⬇ Excel (27/10/2026; Processed by bank 10/11/2026)
-                    h1, h2, h3, h4 = st.columns([5.2, 1.4, 0.9, 0.9] if len(row) == 1 else [3, 1.7, 1.1, 1.1],
-                                                vertical_alignment="center")
+                    h1, h2, h3, h4 = st.columns([5.2, 1.4, 0.9, 1.0] if len(row) == 1 else [2.7, 1.7, 1.1, 1.3],
+                                                vertical_alignment="center")   # 19/11/2026: "⬇ Excel" in full
+                elif key in ("amount", "merchants") and len(amt_curs) > 1:   # 19/11/2026: + its currency box
+                    h1, hc, h2, h3 = st.columns([2.6, 1.05, 1.9, 1.35], vertical_alignment="center")
+                    mine = cur_amt if key == "amount" else mcur
+                    pick = f"dash_cur_{key}_{mine}"                  # drawn anew on the card's currency
+                    hc.selectbox("Currency", amt_curs, index=amt_curs.index(mine), key=pick,
+                                 label_visibility="collapsed", help="This card's currency (⚙ Currency sets every card)",
+                                 on_change=lambda k=pick, c=key: state.__setitem__(f"dash_c_{c}", state[k]))
                 else:
                     h1, h2, h3 = st.columns([3.4, 1.9, 1.35], vertical_alignment="center")
                 h1.markdown(f'<div class="dc-t">{_esc(title)}</div><div class="dc-s">{_esc(sub)}</div>',
                             unsafe_allow_html=True)
                 shown = h2.segmented_control(f"{title}: view", ["Chart", "Table"], default="Chart",
                                              key=f"dash_view_{key}", label_visibility="collapsed") or "Chart"
-                if key == "amount" and bef and before_span and labels:   # comparing: one currency at a time
-                    st.segmented_control("Currency", ["RWF", "USD"], default="RWF", key="dash_amt_cur",
-                                         label_visibility="collapsed")
                 if key == "banks":                             # 28/10/2026: transactions or amount, per bank
-                    st.segmented_control("Measure", ["Transactions", "Amount", "Rate"], default="Transactions",
-                                         key="dash_bank_measure", label_visibility="collapsed",
-                                         format_func=lambda m: f"Amount ({b_cur})" if m == "Amount" else m)
+                    bank_measure_tools(b_measure, amt_curs, b_cur)
                 rate_view = key == "banks" and b_measure == "Rate"     # 10/11/2026: the success rates in bold, 2 decimals
                 body = chart if shown == "Chart" else dashboard_view.table_html(
                     table, **({"bold": True, "decimals": 2} if rate_view else {}))
@@ -2857,12 +2927,19 @@ def checkout_progress(checker, invoices):
         if state.get("checkout_shown") != (tuple(invoices), d):   # everything answered: show it in the table once
             state.checkout_shown = (tuple(invoices), d)
             st.rerun()
-        st.caption(f"🔎 IremboPay check: done ({t} invoice{'s' if t != 1 else ''})"
-                   + (f" · {f} could not be checked" if f else ""))
-        if f and st.button(f"↻ Check again ({f})", key="checkout_retry"):
-            checker.retry_failed(invoices)
-            state.checkout_shown = None
-            st.rerun()
+        with st.container(horizontal=True, vertical_alignment="center", gap="small"):
+            st.caption(f"🔎 IremboPay check: done ({t} invoice{'s' if t != 1 else ''})"
+                       + (f" · {f} could not be checked" if f else ""))
+            if f and st.button(f"↻ Check again ({f})", key="checkout_retry", type="tertiary"):
+                checker.retry_failed(invoices)
+                state.checkout_shown = None
+                st.rerun()
+            # 19/11/2026: every invoice looked up again (an answer can change: paid, expired since)
+            if st.button("↻ Check all again", key="checkout_again", type="tertiary",
+                         help="Ask IremboPay again for every invoice of this list"):
+                checker.recheck(invoices)
+                state.checkout_shown = None
+                st.rerun()
 
     line()
 
@@ -2979,7 +3056,9 @@ def followup_page():
     checker.add(pend)
     checked, to_check, _ = checker.progress(pend)
     answers = sorted({says(i) for i in scope if i["type"] == "Pending"}) if checked == to_check else []
-    says_now = state.get("fu_says") if kinds_now == "Pending" and state.get("fu_says") in answers else "All"
+    # 19/11/2026: the answer chosen is kept apart from its drop-down, which is drawn anew on it (after a check it comes
+    # back on the choice, never on "All" while the list stays filtered)
+    says_now = state.get("fu_says_pick") if kinds_now == "Pending" and state.get("fu_says_pick") in answers else "All"
     if says_now != "All":
         scope = [i for i in scope if says(i) == says_now]
     sm = followup.summary(scope, decisions, days=days)
@@ -3021,8 +3100,14 @@ def followup_page():
         f4.selectbox("IremboPay says", [f"Checking… {checked} of {to_check}"], key="fu_says_wait", disabled=True,
                      help="Available when the IremboPay check is done")
     elif kinds == "Pending":
-        status = f4.selectbox("IremboPay says", ["All"] + answers, key="fu_says",
-                              help="What IremboPay's checkout says now about each pending invoice")
+        # 19/11/2026: drawn anew on every run from the choice kept (the browser never shows an older one), and the
+        # list follows that kept choice, so the box and the list always agree
+        state.fu_says_n = state.get("fu_says_n", 0) + 1
+        says_key = f"fu_says_{state.fu_says_n}"
+        f4.selectbox("IremboPay says", ["All"] + answers, index=(["All"] + answers).index(says_now),
+                     key=says_key, on_change=lambda k=says_key: state.__setitem__("fu_says_pick", state[k]),
+                     help="What IremboPay's checkout says now about each pending invoice")
+        status = says_now
     pick = f3.selectbox("Bank", ["All"] + banks_here, key="fu_bank",
                         format_func=lambda c: "All banks" if c == "All" else engine.bank_name(c))
     rows = [i for i in items
@@ -3064,14 +3149,26 @@ def followup_page():
             st.caption(f"💡 {int(suggest.sum())} pending invoice(s) are now **Paid** in IremboPay: "
                        "\"Received later\" is filled in for you. Check them, then Save.")
         DASH = "—"                                       # no decision yet, in the Decision column
-        options = [DASH] + sorted({d for v in followup.DECISIONS.values() for d in v})
+        # 19/11/2026: the decisions of the type shown (Pending or Paid twice); both types in the list: each decision
+        # that belongs to one type only says which ("Bank error reversed (paid twice)")
+        types_here = list(dict.fromkeys(table["Type"]))
+        TAG = {"Pending": "pending", "Paid twice": "paid twice"}
+
+        def labelled(d, t):
+            if len(types_here) < 2 or not d or sum(d in v for v in followup.DECISIONS.values()) > 1:
+                return d
+            return f"{d} ({TAG.get(t, t.lower())})"
+        options = [DASH] + (followup.DECISIONS[types_here[0]] if len(types_here) == 1 else
+                            sorted({labelled(d, t) for t, v in followup.DECISIONS.items() for d in v}))
+        table["Decision"] = [labelled(d, t) for d, t in zip(table["Decision"], table["Type"])]
         table["Decision"] = table["Decision"].replace("", DASH)
         # 18/11/2026: the table's own icons are hidden; Download and Search are buttons below it
         st.markdown('<style>.st-key-fu_table [data-testid="stElementToolbar"] {display: none;}</style>',
                     unsafe_allow_html=True)
         edited = st.container(key="fu_table").data_editor(
             table.drop(columns="_key"), hide_index=True, width="stretch",
-            key=f"fu_editor_{period_txt}_{show}_{kinds}_{status}_{pick}_{query}",
+            # 19/11/2026: + the decision list: an unsaved edit made with another list is dropped (never hidden)
+            key=f"fu_editor_{period_txt}_{show}_{kinds}_{status}_{pick}_{query}_{'-'.join(types_here)}",
             disabled=[c for c in table.columns if c not in ("Decision", "Comment", "_key")],
             column_config={
                 "Amount": st.column_config.NumberColumn("Amount", format="localized"),
@@ -3094,6 +3191,7 @@ def followup_page():
         changes, bad = {}, []
         for (_, new), (_, old) in zip(edited.iterrows(), table.iterrows()):
             dec, com = str(new["Decision"] or "").replace(DASH, ""), str(new["Comment"] or "")
+            dec = re.sub(r" \((pending|paid twice)\)$", "", dec)          # the type's label, when both are listed
             before = decisions.get(new["_key"], {})
             if dec and dec not in followup.DECISIONS[new["Type"]]:
                 bad.append(f"{new['Invoice']}: \"{dec}\" is not a choice for a {new['Type'].lower()} item")
@@ -3133,13 +3231,13 @@ def followup_page():
 
 if PAGE == "followup":
     followup_page()
-    page_loader.empty()
+    page_done()
     st.stop()
 
 
 if PAGE == "dashboard":
     dashboard_page()
-    page_loader.empty()
+    page_done()
     st.stop()                                   # the steps are hidden while the dashboard is open
 
 
@@ -3250,7 +3348,7 @@ if PAGE == "reports":
                     history_list(records, client, on_drive)
             else:
                 history_list(records, client, on_drive)
-    page_loader.empty()
+    page_done()
     st.stop()                                   # the steps are hidden while Report History is open
 
 
@@ -3576,11 +3674,11 @@ def settings_page():
 
 if PAGE == "banks":
     bank_management_page()
-    page_loader.empty()
+    page_done()
     st.stop()
 if PAGE == "settings":
     settings_page()
-    page_loader.empty()
+    page_done()
     st.stop()
 
 
@@ -4496,5 +4594,4 @@ elif state.step == 4:     # Report & Export
 
 
 # 27/10/2026: the step is drawn - the page loader (shown on a step change) goes away
-page_loader.empty()
-PAGE_LOADER["on"] = False
+page_done()
