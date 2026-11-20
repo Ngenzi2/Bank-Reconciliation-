@@ -9,11 +9,14 @@ The BPR statement (an export of BNR.ACCOUNT_STATEMENT_BALANCE, .xlsx; one day or
     BOOKING_DATE · BANK_REFERENCE · DESCRIPTION · DOC ID · VALUE_DATE (date + time, no seconds) · DEBIT (negative)
     · CREDIT · CLOSING_BALANCE. The first row is "Opening balance". The header row is found, not assumed (the data
     sheet is usually "Export Worksheet", once "Sheet1"; the other sheets - lookup lists, the SQL - are ignored).
-    The DOC ID title varies (DOC ID, DOCID, Doc ID, doc id, or blank) and some files have no DOC ID or no VALUE_DATE.
-    There is no currency column.
+    The DOC ID title varies (DOC ID, DOCID, INVOICE(S), INVOICE NUMBER(S), REFERENCE NUMBER, BANK REFERENCE, blank):
+    any title right after DESCRIPTION is the DOC ID. BANK_REFERENCE is TRANS_REFERENCE in the November 2026 files.
+    Dates are "2026-11-12 16:11:00" or, in some exports, "13-NOV-26" (VALUE_DATE then has no time).
+    Some files have no DOC ID or no VALUE_DATE. There is no currency column.
 
 Rules
-    - Invoice = DOC ID (filled in by the team). A credit without DOC ID: found in IremboPay by its BANK_REFERENCE or
+    - Invoice = DOC ID (filled in by the team). A credit without DOC ID: first in the list the team sometimes adds on
+      another sheet (one invoice + its DESCRIPTION per row, e.g. "Sheet1" or "SQL"), else found in IremboPay by its BANK_REFERENCE or
       DESCRIPTION (= provider_reference) or DESCRIPTION (= invoice number) - only when IremboPay has it; otherwise it
       goes straight to Pending notification (not to Exception Resolution).
     - Only the credits are reconciled; the debits (the daily transfer out) are only used for the checks below.
@@ -28,6 +31,7 @@ Rules
     - IremboPay payment_provider BPR_RW is BPR, and so is BPR (bank transfer, 27/10/2026); a credit IremboPay shows
       under another provider goes to review.
     - SLA in whole minutes: paid_at's minute against VALUE_DATE's minute, 1 minute allowed (Bank Management).
+      A VALUE_DATE without time is checked by day: on time when paid_at is on the same day.
     - An invoice credited more than once: the credit IremboPay recorded (DESCRIPTION = provider_reference) counts,
       the others go to review. A credit cancelled by a debit of the same description and amount goes to review.
     - Every file is checked row by row against its balances (a file that does not add up is refused), and the files
@@ -85,11 +89,13 @@ COLUMNS = {
 INVOICE_COLUMN = "DOC ID"                # the invoice number, filled in by the team
 FOUND_BY = "Invoice found by"            # how the invoice of a credit without DOC ID was found in IremboPay
 NO_VALUE_DATE = "VALUE_DATE missing"     # "yes" on a row whose file has no VALUE_DATE
+NO_TIME = "VALUE_DATE without time"      # "yes" when VALUE_DATE is a day only (SLA checked by day)
 CANCELLED = "Cancelled by"               # the debit that cancels a credit (its bank reference)
-DETAIL_COLUMNS = [INVOICE_COLUMN, FOUND_BY, NO_VALUE_DATE, CANCELLED]
+DETAIL_COLUMNS = [INVOICE_COLUMN, FOUND_BY, NO_VALUE_DATE, NO_TIME, CANCELLED]
 DATETIME_COLUMNS = ["VALUE_DATE"]
 _HEADER = "BOOKING_DATE"
 _ALL = ["BOOKING_DATE", "BANK_REFERENCE", "DESCRIPTION", "DOC ID", "VALUE_DATE", "DEBIT", "CREDIT", "CLOSING_BALANCE"]
+_OTHER_TITLES = {"TRANS_REFERENCE": "BANK_REFERENCE"}
 
 
 # =====================================================================================================================
@@ -129,31 +135,61 @@ def _clean_text(series: pd.Series) -> pd.Series:
     return series.fillna("").astype(str).str.replace("\xa0", "", regex=False).str.strip()
 
 
+def _dates(series: pd.Series) -> pd.Series:
+    """'2026-11-12 16:11:00' or '13-NOV-26' -> a date."""
+    text = _clean_text(series)
+    out = pd.to_datetime(text, errors="coerce", format="ISO8601")
+    for fmt in ("%d-%b-%y", "%d-%b-%Y"):
+        out = out.fillna(pd.to_datetime(text, errors="coerce", format=fmt))
+    return out
+
+
 def _table(content, name, excel_engine):
-    """The sheet that holds the statement (the one with a BOOKING_DATE header), as text, with its header row."""
+    """The sheet that holds the statement (the one with a BOOKING_DATE header), as text, with its header row, and
+    the other sheets."""
     try:
         book = pd.read_excel(io.BytesIO(content) if isinstance(content, (bytes, bytearray)) else content,
                              sheet_name=None, header=None, dtype=str, engine=excel_engine)
     except Exception:
         raise ValueError(f"{name}: this file cannot be opened as an Excel bank statement.") from None
-    for sheet in book.values():
+    for title, sheet in book.items():
         sheet = sheet.fillna("")
         hits = sheet.index[sheet.apply(lambda r: r.astype(str).str.strip().str.upper().eq(_HEADER).any(), axis=1)]
         if len(hits):
-            return sheet, hits[0]
+            return sheet, hits[0], {t: s for t, s in book.items() if t != title}
     raise ValueError(f"{name}: this is not a BPR bank statement (no 'BOOKING_DATE' header).")
 
 
+def _invoice_lists(sheets: dict) -> dict:
+    """The lists the team adds on other sheets: one invoice number and its DESCRIPTION per row, in any order
+    -> {description: (invoice, sheet)}. A description given with two different invoices is not used."""
+    out, twice = {}, set()
+    for title, sheet in sheets.items():
+        for row in sheet.fillna("").astype(str).itertuples(index=False):
+            cells = [re.sub(r"\.0$", "", c.strip()) for c in row if c.strip()]
+            invs = [c for c in cells if re.fullmatch(r"8\d{11}", c)]
+            if len(invs) != 1:
+                continue
+            for c in cells:
+                if c != invs[0]:
+                    if c in out and out[c][0] != invs[0]:
+                        twice.add(c)
+                    out.setdefault(c, (invs[0], title))
+    return {k: v for k, v in out.items() if k not in twice}
+
+
 def _columns(header: list) -> list:
-    """The statement's column names, made the same in every file: 'Doc ID' / 'doc id' / 'DOCID' / a blank title
-    between DESCRIPTION and VALUE_DATE -> 'DOC ID'."""
+    """The statement's column names, made the same in every file: 'DOCID', 'INVOICE NUMBER', 'REFERENCE NUMBER', a
+    blank title... right after DESCRIPTION -> 'DOC ID'; 'TRANS_REFERENCE' -> 'BANK_REFERENCE'."""
+    known = {c.replace(" ", ""): c for c in _ALL}
     out = []
     for i, h in enumerate(header):
         key = re.sub(r"[^A-Z_]", "", str(h).upper())
-        if key == "DOCID" or (not key and out and out[-1] == "DESCRIPTION"):
+        key = _OTHER_TITLES.get(key, key)
+        if key == "DOCID" or (key not in known and out and out[-1] == "DESCRIPTION"):
             out.append(INVOICE_COLUMN)
-        elif key in {c.replace(" ", "") for c in _ALL}:
-            out.append(next(c for c in _ALL if c.replace(" ", "") == key))
+        elif key in known:
+            out.append(known[key])
         else:
             out.append(f"_col{i}")
     return out
@@ -164,7 +200,7 @@ def read_statement(content: bytes, name: str, excel_engine=None):
     names + Currency (blank: taken from IremboPay) + the checks' columns. info: currency (blank), first / last (the
     days covered, from the dates inside), and the balances used by the checks between files.
     Raise ValueError with a plain message when the file is not a BPR statement or does not add up."""
-    raw, head = _table(content, name, excel_engine)
+    raw, head, others = _table(content, name, excel_engine)
     data = raw.loc[head + 1:].copy()
     data.columns = _columns(list(raw.loc[head]))
     data = data[[c for c in data.columns if not c.startswith("_col")]]
@@ -174,6 +210,11 @@ def read_statement(content: bytes, name: str, excel_engine=None):
         raise ValueError(f"{name}: the BPR statement is missing the column(s) {', '.join(missing)}.")
     for col in ("BANK_REFERENCE", "DESCRIPTION", INVOICE_COLUMN, "VALUE_DATE"):
         data[col] = _clean_text(data[col]) if col in data else ""
+    # dates written the same way in every file ('13-NOV-26' -> '2026-11-13 00:00:00')
+    no_time = data["VALUE_DATE"].ne("") & ~data["VALUE_DATE"].str.contains(":", regex=False)
+    for col in ("BOOKING_DATE", "VALUE_DATE"):
+        when = _dates(data[col])
+        data[col] = when.dt.strftime("%Y-%m-%d %H:%M:%S").where(when.notna(), data[col])
     credit, debit, balance = _num(data["CREDIT"]).fillna(0), _num(data["DEBIT"]).fillna(0), _num(data["CLOSING_BALANCE"])
     opening = data["DESCRIPTION"].str.lower().str.startswith("opening balance")
 
@@ -202,11 +243,20 @@ def read_statement(content: bytes, name: str, excel_engine=None):
 
     # ---- the credits kept; VALUE_DATE missing: BOOKING_DATE decides the period, the row goes to review
     rows = data[is_credit].copy()
+    # a credit without DOC ID: its invoice from the list on another sheet (DESCRIPTION or BANK_REFERENCE)
+    lists = _invoice_lists(others)
+    rows[FOUND_BY] = ""
+    for i in rows.index[rows[INVOICE_COLUMN].eq("")]:
+        hit = lists.get(rows.at[i, "DESCRIPTION"]) or lists.get(rows.at[i, "BANK_REFERENCE"])
+        if hit:
+            rows.at[i, INVOICE_COLUMN] = hit[0]
+            rows.at[i, FOUND_BY] = f"sheet '{hit[1]}' of the statement"
     rows[NO_VALUE_DATE] = rows["VALUE_DATE"].eq("").map({True: "yes", False: ""})
+    rows[NO_TIME] = no_time[rows.index].map({True: "yes", False: ""})
     rows["VALUE_DATE"] = rows["VALUE_DATE"].where(rows["VALUE_DATE"].ne(""), rows["BOOKING_DATE"])
     rows[CANCELLED] = cancel[rows.index]
     rows["Currency"] = ""
-    rows = rows[[c for c in _ALL if c in rows] + [NO_VALUE_DATE, CANCELLED, "Currency"]].drop(
+    rows = rows[[c for c in _ALL if c in rows] + [FOUND_BY, NO_VALUE_DATE, NO_TIME, CANCELLED, "Currency"]].drop(
         columns=["DEBIT", "CLOSING_BALANCE"], errors="ignore")
     for c in ("VALUE_DATE", INVOICE_COLUMN):
         if c not in rows:
@@ -233,7 +283,7 @@ def clean_statement(statement: pd.DataFrame) -> pd.DataFrame:
     statement["CREDIT"] = _num(statement["CREDIT"])
     statement["BOOKING_DATE"] = pd.to_datetime(statement["BOOKING_DATE"], errors="coerce", format="ISO8601")
     statement["VALUE_DATE"] = pd.to_datetime(statement["VALUE_DATE"], errors="coerce", format="ISO8601")
-    for c in (NO_VALUE_DATE, CANCELLED):
+    for c in (NO_VALUE_DATE, NO_TIME, CANCELLED):
         if c not in statement:
             statement[c] = ""
     # the same credit in a file with VALUE_DATE and in a file without it (e.g. "sept 22 to oct 13.xlsx" and the day
@@ -253,8 +303,8 @@ def find_invoices(statement: pd.DataFrame, payments: pd.DataFrame) -> pd.DataFra
         3. DESCRIPTION    = an IremboPay invoice number       (some USD exports have it there)
     A reference shared by several invoices is not used. The way it was found is kept ("Invoice found by")."""
     statement = statement.copy()
-    statement[FOUND_BY] = ""
-    statement.loc[statement["invoice_number"].notna(), FOUND_BY] = "DOC ID"
+    statement[FOUND_BY] = statement[FOUND_BY].fillna("") if FOUND_BY in statement else ""
+    statement.loc[statement["invoice_number"].notna() & statement[FOUND_BY].eq(""), FOUND_BY] = "DOC ID"
     by_ref = {}
     for inv, refs, pref in zip(payments["invoice_number"].astype(str),
                                payments.get("_provider_refs", pd.Series("", index=payments.index)).fillna(""),
@@ -360,11 +410,13 @@ def check_files(statements: list) -> tuple:
 def sla(rows: pd.DataFrame, sla_minutes: int):
     """(minutes between VALUE_DATE and paid_at, in whole minutes; SLA status). On time when paid_at's minute is
     VALUE_DATE's minute or up to sla_minutes after (or before). Only BPR payments are checked; a row without
-    VALUE_DATE cannot be checked. A review decision (sla_override) wins."""
+    VALUE_DATE cannot be checked; a VALUE_DATE without time is checked by day. A review decision (sla_override) wins."""
     diff = (rows["paid_at"].dt.floor("min") - rows["VALUE_DATE"]).dt.total_seconds() / 60
     status = pd.Series("Cannot check", index=rows.index, dtype=object)
     has = diff.notna() & rows[NO_VALUE_DATE].fillna("").ne("yes")
-    within = diff.abs() <= sla_minutes
+    by_day = pd.Series([v == "yes" for v in _text(rows, NO_TIME)], index=rows.index)
+    within = (diff.abs() <= sla_minutes).where(~by_day, rows["paid_at"].dt.normalize() == rows["VALUE_DATE"].dt.normalize())
+    diff = diff.where(~by_day)
     status[has & within] = "On time"
     status[has & ~within] = "SLA violated"
     override = rows["sla_override"].ne("") & rows["payment_provider"].isin(PROVIDERS)

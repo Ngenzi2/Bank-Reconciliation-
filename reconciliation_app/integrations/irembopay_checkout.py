@@ -125,7 +125,12 @@ class Checker:
                     running[pool.submit(self._lookup, inv)] = inv
                     last_start = time.monotonic()
                 if not running:
-                    return
+                    # stop only when nothing was queued meanwhile (add() then starts a new thread)
+                    with self._lock:
+                        if not self._queue:
+                            self._thread = None
+                            return
+                    continue
                 done, _ = wait(list(running), timeout=0.5, return_when=FIRST_COMPLETED)
                 with self._lock:
                     for future in done:
