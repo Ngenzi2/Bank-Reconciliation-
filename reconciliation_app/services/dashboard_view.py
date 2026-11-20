@@ -6,7 +6,7 @@ Every number, curve, slice and line is computed from the facts of the saved repo
 nothing is typed by hand. IremboPay colours: white / pale teal surfaces, dark teal text and figures, brand green for
 results that are good, red / amber for problems only.
 
-    kpi_cards / lines / dual_bars / merchant_bars / table_html / card_page / alt_lines / alt_dual_bars
+    kpi_cards / lines / money_bars / merchant_bars / table_html / card_page / alt_lines / alt_money_bars
 """
 from __future__ import annotations
 
@@ -288,14 +288,20 @@ def kpi_cards(now: dict, before: dict | None, fu: dict | None = None, per_view: 
     per_view (12/11/2026): show that many cards, the others behind the ‹ › arrows (the page's PDF: every card)."""
     rec_amt = lambda t: {c: a.get("received", 0.0) for c, a in (t or {}).get("amounts", {}).items()}
     amt, amt_b = rec_amt(now), (rec_amt(before) if before else None)
-    curs = [c for c in ("RWF", "USD") if c in amt] + [c for c in amt if c not in ("RWF", "USD")]
+    order = ["RWF", "USD", "EUR", "GBP"]
+    curs = [c for c in order if c in amt] + sorted(c for c in amt if c not in order)
     rate = lambda t: t["received"] / t["processed"] if t and t["processed"] else None
     sla = lambda t: t["sla"] / t["processed"] if t and t["processed"] else None
     pend = lambda t: t.get("pending", 0) / t["processed"] if t and t["processed"] else None
     # a share above 0 that would round to 0 (e.g. 1 of 50,000) is shown as "<0.01%", never as "0.00%"
     pct = lambda v, n=2: ("N/A" if v is None else f"<{10 ** -n:.{n}f}%" if 0 < v * 100 < 0.5 * 10 ** -n
                           else f"{v * 100:.{n}f}%")
-    amount_big = "<br>".join(f"{c} {short(amt[c])}" for c in curs) or "–"
+    # 20/11/2026: one tile per currency in the IremboPay colours (dark teal, the currency in lime green); a currency
+    # with nothing received in the period is greyed out; the full amount on hover
+    sym = {"USD": "$ ", "EUR": "€ ", "GBP": "£ "}
+    amount_big = ('<div class="dk-cur">' + "".join(
+        f'<div class="dk-ct{"" if amt[c] else " dk-c0"}" title="{c} {amt[c]:,.0f}"><span>{sym.get(c, "")}{c}</span>'
+        f'<b>{short(amt[c]) if amt[c] else "0"}</b></div>' for c in curs) + "</div>") if curs else "–"
 
     def rows(label, top, pairs, tail=""):
         """09/11/2026: the FOLLOW-UP card's design - a label (or the change), a line, then label | number rows."""
@@ -306,10 +312,10 @@ def kpi_cards(now: dict, before: dict | None, fu: dict | None = None, per_view: 
     amount_sub = (" · ".join(f"{c} " + (_arrow(amt[c], amt_b.get(c), fmt=lambda v: short(v)) or "no earlier figure")
                              for c in curs) if amt_b is not None else "Total received (notifications received)")
     cards = [
-        ("AMOUNT", "money", amount_big, amount_sub),
-        # 27/10/2026: TRANSACTIONS before RATE
+        # 20/11/2026: TRANSACTIONS first, the AMOUNT in the middle, then RATE
         ("TRANSACTIONS", "tx", f"{now['processed']:,}",
          _arrow(now["processed"], before["processed"]) if before else "Processed transactions in this period"),
+        ("AMOUNT", "money", amount_big, amount_sub),
         ("RATE", "rate", pct(rate(now)),
          _arrow(rate(now), rate(before), points=True, fmt=pct) if before else "Received notification ÷ processed transaction"),
         ("SLA", "sla", pct(sla(now), 1),
@@ -367,9 +373,12 @@ def carousel(items: list, per_view: int) -> str:
         f"#{key}-{p}:checked~.car-n .car-p{p}{{display:flex}}"
         f"#{key}-{p}:checked~.car-d label[for={key}-{p}]{{background:{TEAL}}}"
         for p, s in enumerate(starts))
+    # 20/11/2026: both arrows always there, in the same place; the one with nowhere to go is faded
     arrows = "".join(
-        (f'<label for="{key}-{p - 1}" class="car-a car-l car-p{p}" title="Previous">‹</label>' if p else "")
-        + (f'<label for="{key}-{p + 1}" class="car-a car-rt car-p{p}" title="Next">›</label>' if p < len(starts) - 1 else "")
+        (f'<label for="{key}-{p - 1}" class="car-a car-l car-p{p}" title="Previous">‹</label>' if p else
+         f'<span class="car-a car-l car-off car-p{p}">‹</span>')
+        + (f'<label for="{key}-{p + 1}" class="car-a car-rt car-p{p}" title="Next">›</label>' if p < len(starts) - 1 else
+           f'<span class="car-a car-rt car-off car-p{p}">›</span>')
         for p in range(len(starts)))
     dots = "".join(f'<label for="{key}-{p}" title="Cards {s + 1}–{s + per_view} of {n}"></label>'
                    for p, s in enumerate(starts))
@@ -409,36 +418,29 @@ def lines(labels: list, series: list, partial: list | None = None, fill: bool = 
     return _img(f'<svg viewBox="0 0 {W} {H}">{g}</svg>')
 
 
-def dual_bars(labels: list, rwf: list, usd: list, partial: list | None = None) -> str:
-    """RWF and USD side by side per period, each on its own scale (RWF on the left axis, USD on the right):
-    the two currencies are never added or drawn on one scale."""
-    W, H, L, R, T, B = 600, 270, 52, 548, 30, 232
+# 19/11/2026: the amount chart shows one currency at a time (tabs), each in its own colour
+CUR_C = {"RWF": TEAL, "USD": USD_C, "EUR": ACC, "GBP": AMBER}
+
+
+def money_bars(labels: list, values: list, cur: str, partial: list | None = None) -> str:
+    """The amount received per period in ONE currency, its amount on each bar (the PDF; 19/11/2026: no second axis)."""
+    W, H, L, R, T, B = 600, 270, 52, 588, 34, 232
     n = len(labels)
     if not n:
         return '<div class="dv-empty">No period to show.</div>'
-    top_r, step_r = _nice(max(rwf + [1]))
-    top_u, step_u = _nice(max(usd + [1]))
-    g, v = "", 0.0
-    while v <= top_r + 1e-9:
-        y = B - v / top_r * (B - T)
-        g += (f'<line x1="{L}" x2="{R}" y1="{y:.1f}" y2="{y:.1f}" class="dv-gl"/>'
-              f'<text x="{L - 8}" y="{y + 4:.1f}" class="dv-ax" text-anchor="end">{short(v) if v else "0"}</text>')
-        v += step_r
-    v = 0.0
-    while v <= top_u + 1e-9:
-        y = B - v / top_u * (B - T)
-        g += f'<text x="{R + 8}" y="{y + 4:.1f}" class="dv-ax" fill="{USD_C}">{short(v) if v else "0"}</text>'
-        v += step_u
-    g += (f'<text x="{L - 8}" y="12" class="dv-ax" text-anchor="end" font-weight="800" fill="{TEAL}">RWF</text>'
-          f'<text x="{R + 8}" y="12" class="dv-ax" font-weight="800" fill="{USD_C}">USD</text>')
+    top, step = _nice(max(list(values) + [1]))
+    g = _axis(L, R, T, B, top, step)
     slot = (R - L) / n
-    bw = min(22, slot * .32)
+    bw = min(40, slot * .5)
+    col = CUR_C.get(cur, TEAL)
     for i, lab in enumerate(labels):
-        cx = L + slot * (i + .5)
-        for val, top, col, dx, cur in ((rwf[i], top_r, TEAL, -bw - 1.5, "RWF"), (usd[i], top_u, USD_C, 1.5, "USD")):
-            h = val / top * (B - T) if top else 0
-            g += (f'<rect x="{cx + dx:.1f}" y="{B - h:.1f}" width="{bw:.1f}" height="{h:.1f}" rx="3" fill="{col}">'
-                  f'<title>{escape(lab)} · {cur} {val:,.0f}</title></rect>')
+        cx, v = L + slot * (i + .5), values[i]
+        h = v / top * (B - T) if top else 0
+        g += (f'<rect x="{cx - bw / 2:.1f}" y="{B - h:.1f}" width="{bw:.1f}" height="{h:.1f}" rx="3" fill="{col}">'
+              f'<title>{escape(lab)} · {cur} {v:,.0f}</title></rect>')
+        if v:
+            g += (f'<text x="{cx:.1f}" y="{B - h - 6:.1f}" class="dv-ax" text-anchor="middle" font-weight="800" '
+                  f'fill="{TEAL}">{short(v)}</text>')
         star = "*" if partial and partial[i] else ""
         g += f'<text x="{cx:.1f}" y="{B + 18}" class="dv-ax" text-anchor="middle">{escape(lab)}{star}</text>'
     return _img(f'<svg viewBox="0 0 {W} {H}">{g}</svg>')
@@ -471,8 +473,9 @@ def merchant_bars(table: pd.DataFrame, cur: str, n: int = 5) -> str:
     return STYLE_D + '<div class="dm">' + "".join(
         f'<div class="dm-r" data-tip="{escape(str(m.Merchant))} · {cur} {m.Amount:,.0f} received · '
         f'{m.Transactions:,} transactions · {m._4:.1f}%">'
-        f'<span class="dm-n"><i style="background:{palette[i % 5]}"></i>{escape(str(m.Merchant))}</span>'
-        f'<span class="dm-b"><span style="width:{m._4 / top * 100:.1f}%"></span></span>'
+        f'<span class="dm-n" title="{escape(str(m.Merchant))}"><i style="background:{palette[i % 5]}"></i>'
+        f'{escape(str(m.Merchant))}</span>'                    # 19/11/2026: full name on hover, bar in its colour
+        f'<span class="dm-b"><span style="width:{m._4 / top * 100:.1f}%;background:{palette[i % 5]}"></span></span>'
         f'<span class="dm-v"><b>{m._4:.1f}%</b><span>{m.Transactions:,}{_mchange(m)}</span></span></div>'
         for i, m in enumerate(rows.itertuples())) + (
         f'<div class="dm-note">Bar: share of the {cur} received notifications; the figure after it: transactions. '
@@ -801,6 +804,11 @@ STYLE_D = f'''<style>
 .dk-c{{background:#fff;border:1px solid #E1EEF0;border-radius:12px;padding:15px 17px;box-shadow:0 1px 3px rgba(18,50,57,.06);min-width:0}}
 .dk-h{{display:flex;justify-content:space-between;align-items:center;font-size:11px;font-weight:700;letter-spacing:.06em;color:{MUT}}}
 .dk-v{{font-size:26px;font-weight:800;margin:7px 0 5px;line-height:1.15}} .dk-v2{{font-size:19px}}
+.dk-cur{{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:2px 0 4px}}
+.dk-ct{{background:{TEAL};border-radius:10px;padding:8px 11px;min-width:0}}
+.dk-ct span{{display:block;color:#99E378;font-size:11.5px;font-weight:800;letter-spacing:.06em}}
+.dk-ct b{{display:block;color:#fff;font-size:20px;font-weight:800;white-space:nowrap}}
+.dk-c0{{background:#EEF2F3}} .dk-c0 span,.dk-c0 b{{color:#A7B3B6}}
 .dk-s{{font-size:11.5px;color:{MUT}}}
 .dk-fu{{border-top:1px solid #E1EEF0;margin:8px 0 6px;padding-top:6px}}
 .dk-fu div{{display:flex;justify-content:space-between;gap:8px;line-height:1.7}} .dk-fu b{{color:{TEAL};font-weight:700}}
@@ -829,11 +837,14 @@ STYLE_D = f'''<style>
 .car{{position:relative;font-family:"Nunito","Segoe UI",system-ui,sans-serif;color:{TEAL}}} .car-r{{display:none}}
 .car-v{{overflow:hidden;padding:2px 1px 4px}} .car-t{{display:flex;gap:13px;transition:transform .35s ease}}
 .car-i{{display:flex;min-width:0}} .car-i>.dk-c{{flex:1}}
-.car-a{{display:none;position:absolute;top:50%;transform:translateY(-60%);width:30px;height:30px;border-radius:50%;
-border:1px solid #D4E3E6;align-items:center;justify-content:center;font-size:22px;line-height:1;cursor:pointer;
-color:{TEAL};background:#fff;box-shadow:0 1px 3px rgba(18,50,57,.12);user-select:none}} .car-a:hover{{border-color:{TEAL}}}
-.car-l{{left:-15px}} .car-rt{{right:-15px}} .car-a{{z-index:2}}
-.car-d{{display:flex;justify-content:center;gap:7px;margin-top:9px}}
+.car-a{{display:none;position:absolute;bottom:0;width:32px;height:32px;border-radius:50%;
+border:2px solid #fff;align-items:center;justify-content:center;font-size:22px;font-weight:800;line-height:1;
+cursor:pointer;color:{GREEN};background:{TEAL};box-shadow:0 2px 6px rgba(18,50,57,.3);user-select:none}}
+.car-a:hover{{background:#1E4A52}}   /* the IremboPay logo's colours: dark teal, lime-green arrow */
+.car-off{{opacity:.3;cursor:default;box-shadow:none}} .car-off:hover{{background:{TEAL}}}
+/* 19/11/2026: the arrows beside the dots, under the cards: they never cover a number */
+.car-l{{left:calc(50% - 74px)}} .car-rt{{right:calc(50% - 74px)}} .car-a{{z-index:2}}
+.car-d{{display:flex;justify-content:center;align-items:center;gap:7px;margin-top:6px;height:32px}}
 .car-d label{{display:flex;width:8px;height:8px;border-radius:50%;background:#D4E3E6;cursor:pointer}}
 </style>'''
 
@@ -872,26 +883,6 @@ def alt_lines(table: pd.DataFrame, series: list, fill: bool = False):
             .encode(x=x, opacity=alt.condition(hover, alt.value(.6), alt.value(0)), tooltip=tips).add_params(hover))
     points = base.mark_circle(size=110).encode(opacity=alt.condition(hover, alt.value(1), alt.value(0))).transform_filter(hover)
     return _alt_theme(alt.layer(*layers, rule, points))
-
-
-def alt_dual_bars(table: pd.DataFrame):
-    """RWF and USD received per period side by side, each on its own axis (RWF left, USD right); hovering a bar
-    shows both amounts of that period."""
-    import altair as alt
-    order = list(table["Period"])
-    x = alt.X("Period:N", sort=order, title=None, axis=alt.Axis(labelAngle=0))
-    tips = [alt.Tooltip("Period:N"), alt.Tooltip("RWF received:Q", format=",.0f"),
-            alt.Tooltip("USD received:Q", format=",.2f")]
-    rwf = alt.Chart(table).mark_bar(xOffset=-9, width=16, cornerRadiusTopLeft=3, cornerRadiusTopRight=3, color=TEAL).encode(
-        x=x, y=alt.Y("RWF received:Q", title="RWF", axis=alt.Axis(format="~s", titleColor=TEAL, orient="left")),
-        tooltip=tips)
-    usd = alt.Chart(table).mark_bar(xOffset=9, width=16, cornerRadiusTopLeft=3, cornerRadiusTopRight=3, color=USD_C).encode(
-        x=x, y=alt.Y("USD received:Q", title="USD", axis=alt.Axis(format="~s", titleColor=USD_C, orient="right")),
-        tooltip=tips)
-    return _alt_theme(alt.layer(rwf, usd).resolve_scale(y="independent"))
-
-
-FU_C = {"Resolved": "#2E7D4F", "Still open": AMBER, "Overdue": BAD}
 
 
 def stacked_bars(labels: list, parts: list) -> str:
@@ -1000,6 +991,22 @@ def alt_compare_lines(table: pd.DataFrame, now: str, before: str, color: str):
     band = alt.Chart(table).mark_rule(strokeWidth=36, opacity=0.001).encode(x=x, tooltip=tips)
     return _alt_theme(alt.layer(base.mark_line(interpolate="monotone", strokeWidth=2.6).encode(strokeDash=dash),
                                 points, band))
+
+
+def alt_money_bars(table: pd.DataFrame, cur: str):
+    """The amount received per period in ONE currency (the column '<cur> received'), its amount on each bar; hovering
+    a bar shows it in full (19/11/2026: one currency at a time, chosen in the card)."""
+    import altair as alt
+    col = f"{cur} received"
+    t = table[["Period", col]].rename(columns={col: "Amount"})
+    t["Label"] = t["Amount"].map(lambda v: short(v) if v else "")
+    x = alt.X("Period:N", sort=list(t["Period"]), title=None, axis=alt.Axis(labelAngle=0))
+    bars = alt.Chart(t).mark_bar(width=34, cornerRadiusTopLeft=3, cornerRadiusTopRight=3,
+                                 color=CUR_C.get(cur, TEAL)).encode(
+        x=x, y=alt.Y("Amount:Q", title=cur, axis=alt.Axis(format="~s")),
+        tooltip=[alt.Tooltip("Period:N"), alt.Tooltip("Amount:Q", title=cur, format=",.2f" if cur != "RWF" else ",.0f")])
+    labels = alt.Chart(t).mark_text(dy=-8, fontWeight=800, color=TEAL).encode(x=x, y="Amount:Q", text="Label:N")
+    return _alt_theme(alt.layer(bars, labels))
 
 
 def alt_group_bars(table: pd.DataFrame, cat: str, series: list, horizontal: bool = False):
