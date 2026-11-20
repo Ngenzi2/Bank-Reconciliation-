@@ -246,7 +246,7 @@ def test_bank_shares_of_the_processed_transactions_and_the_amount():
     assert list(cmp["Change %"].fillna(-1)) == [16.7, -1, 0.0]
     from services import dashboard_view as dv
     html = dv.bank_ring(tab, {"IM": "#123239"}, "processed")
-    assert "Most used: I&amp;M Bank (58.2%)" in html and "10,506" in html
+    assert "Most used: I&amp;M (58.2%)" in html and "10,506" in html
     assert "No processed transaction" in dv.bank_ring(d.bank_shares({"IM": None}), {}, "processed")
 
 
