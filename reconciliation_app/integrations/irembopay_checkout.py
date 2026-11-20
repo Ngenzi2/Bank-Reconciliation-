@@ -165,6 +165,15 @@ class Checker:
             done = [self._results[i] for i in invoices if i in self._results]
         return len(done), len(invoices), sum(a == COULD_NOT for a in done)
 
+    def recheck(self, invoices) -> None:
+        """Look up these invoices again, whatever their answer (19/11/2026: "Check again" - an invoice paid since)."""
+        with self._lock:
+            for i in invoices:
+                i = str(i).strip()
+                self._results.pop(i, None)
+                self._currency.pop(i, None)
+        self.add(invoices)
+
     def retry_failed(self, invoices) -> None:
         """Look up again the invoices whose answer was 'Could not check'."""
         with self._lock:
