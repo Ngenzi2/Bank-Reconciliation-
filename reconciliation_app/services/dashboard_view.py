@@ -1,6 +1,6 @@
 """
-THE DASHBOARD'S MAIN VIEW (22/10/2026): four key cards (Amount, Rate, Transactions, SLA), then Payments over time,
-Amount overview, Exceptions by type and Top merchants; each chart interactive on the screen (Altair) and drawn as an
+THE DASHBOARD'S MAIN VIEW (22/10/2026): four key cards (Total transactions, Collected amount, Success rate, SLA), then
+Collection over time, Collection overview, Exceptions by type and Top merchants; each chart interactive on the screen (Altair) and drawn as an
 SVG for its PDF, with its table.
 Every number, curve, slice and line is computed from the facts of the saved reports (services/dashboard.py);
 nothing is typed by hand. IremboPay colours: white / pale teal surfaces, dark teal text and figures, brand green for
@@ -313,10 +313,10 @@ def kpi_cards(now: dict, before: dict | None, fu: dict | None = None, per_view: 
                              for c in curs) if amt_b is not None else "Total received (notifications received)")
     cards = [
         # 20/11/2026: TRANSACTIONS first, the AMOUNT in the middle, then RATE
-        ("TRANSACTIONS", "tx", f"{now['processed']:,}",
+        ("TOTAL TRANSACTIONS", "tx", f"{now['processed']:,}",
          _arrow(now["processed"], before["processed"]) if before else "Processed transactions in this period"),
-        ("AMOUNT", "money", amount_big, amount_sub),
-        ("RATE", "rate", pct(rate(now)),
+        ("COLLECTED AMOUNT", "money", amount_big, amount_sub),
+        ("SUCCESS RATE", "rate", pct(rate(now)),
          _arrow(rate(now), rate(before), points=True, fmt=pct) if before else "Received notification ÷ processed transaction"),
         ("SLA", "sla", pct(sla(now), 1),
          rows("Violated", _arrow(sla(now), sla(before), good_up=False, points=True, fmt=lambda v: pct(v, 1))

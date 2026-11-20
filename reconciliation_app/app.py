@@ -731,6 +731,7 @@ st.markdown(f"""
   .dash-miss {{font-size: .82rem; color: #8A5B00; margin-top: .3rem;}}
   .dk-red {{color: #C2413D;}}
   [class*="st-key-dcard_"] [data-testid="stElementToolbar"] {{display: none;}}   /* our Table / ⬇ PDF instead */
+  [class*="st-key-dash_cur_"] [data-baseweb="select"] {{min-width: 5.8rem;}}   /* the currency in full (USD, RWF) */
   .dc-note {{font-size: .76rem; color: var(--rc-muted); text-align: center; margin-top: .2rem;}}
   /* the two cards of a row: the same height */
   [data-testid="stHorizontalBlock"]:has(> [data-testid="stColumn"] [class*="st-key-dcard_"]) > [data-testid="stColumn"] >
@@ -2566,7 +2567,7 @@ def dashboard_page():
     star_note = (f'<div class="dc-note">* a {per} that is only partly in {_esc(span)}: only its part is counted</div>'
                  if any(part) else "")
     made = pd.Timestamp.now().strftime("%d %b %Y · %H:%M")
-    # 19/11/2026: one currency at a time in each money card (Amount overview, Top merchants, Processed by bank's
+    # 19/11/2026: one currency at a time in each money card (Collection overview, Top merchants, Processed by bank's
     # amount), each card its own choice among the currencies with money in the period; ⚙ Currency sets them all
     order = ["RWF", "USD", "EUR", "GBP"]
     amt_curs = ([cur] if cur != "All" else
@@ -2583,12 +2584,12 @@ def dashboard_page():
     if with_data and len(with_data) == len(engine.BANKS):          # 19/11/2026: every bank: "All banks"
         with_data = ["All banks"]
     charts = [
-        ("payments", "Payments over time", over + " · processed transactions",
+        ("payments", "Collection over time", over + " · processed transactions",
          dashboard_view.lines(labels, [("Processed transaction", [c["processed"] for c in child], BRAND)], part,
                               fill=True) + dashboard_view.chart_legend([("Processed transaction", BRAND)]) + star_note,
          pd.DataFrame({"Period": tlabels, "Processed transaction": [c["processed"] for c in child],
                        "Received notification": [c["received"] for c in child]})),
-        ("amount", "Amount overview", over + f" · amount received in {cur_amt}",
+        ("amount", "Collection overview", over + f" · amount received in {cur_amt}",
          dashboard_view.money_bars(labels, [c["amounts"].get(cur_amt, 0.0) for c in child], cur_amt, part)
          + star_note,
          pd.DataFrame({"Period": tlabels, **{f"{c} received": [round(ch["amounts"].get(c, 0.0), 0 if c == "RWF" else 2)
@@ -2658,11 +2659,11 @@ def dashboard_page():
         e_tab["Change %"] = [round((a - b) / b * 100, 1) if b else None for a, b in zip(e_tab[now_n], e_tab[bef_n])]
         legend2 = lambda c: dashboard_view.chart_legend([(now_n, c), (f"{bef_n} (compared with)", dashboard_view.PREV)])
         lined = f"lined up by {'day' if kind == 'week' else per} ({pos[0]} with {pos[0]})"
-        charts[0] = ("payments", "Payments over time", f"{now_n} vs {bef_n} · processed transactions · {lined}",
+        charts[0] = ("payments", "Collection over time", f"{now_n} vs {bef_n} · processed transactions · {lined}",
                      dashboard_view.lines(pos, [(now_n, list(p_tab[now_n]), BRAND),
                                                 (bef_n, list(p_tab[bef_n]), dashboard_view.PREV)]) + legend2(BRAND),
                      p_tab)
-        charts[1] = ("amount", "Amount overview", f"{now_n} vs {bef_n} · amount received in {cur_amt} · {lined}",
+        charts[1] = ("amount", "Collection overview", f"{now_n} vs {bef_n} · amount received in {cur_amt} · {lined}",
                      dashboard_view.group_bars(pos, [(now_n, list(a_tab[now_n]), dashboard_view.TEAL),
                                                      (bef_n, list(a_tab[bef_n]), dashboard_view.PREV)])
                      + legend2(dashboard_view.TEAL), a_tab)
@@ -2748,7 +2749,7 @@ def dashboard_page():
                     h1, h2, h3, h4 = st.columns([5.2, 1.4, 0.9, 1.0] if len(row) == 1 else [2.7, 1.7, 1.1, 1.3],
                                                 vertical_alignment="center")   # 19/11/2026: "⬇ Excel" in full
                 elif key in ("amount", "merchants") and len(amt_curs) > 1:   # 19/11/2026: + its currency box
-                    h1, hc, h2, h3 = st.columns([2.6, 1.05, 1.9, 1.35], vertical_alignment="center")
+                    h1, hc, h2, h3 = st.columns([2.3, 1.45, 1.85, 1.3], vertical_alignment="center")
                     mine = cur_amt if key == "amount" else mcur
                     pick = f"dash_cur_{key}_{mine}"                  # drawn anew on the card's currency
                     hc.selectbox("Currency", amt_curs, index=amt_curs.index(mine), key=pick,
