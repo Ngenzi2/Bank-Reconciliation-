@@ -350,3 +350,25 @@ def test_the_follow_up_progress_shows_completed_and_remaining():
     assert ">4</td>" in html and ">3</td>" in html and ">resolved</th>" in html and "BY DECISION" not in html
     empty = dv.followup_progress(0, 0, {}, {}, [], "Week 3")
     assert "No item" in empty and "nothing left" in empty and "0%</b> resolved" in empty
+
+
+def test_collected_amount_is_the_money_in_the_bank_with_the_notified_under_it():
+    """23/11/2026: COLLECTED AMOUNT = processed (the money in our bank accounts), each currency's tile with
+    "Notified ..." under it; the Collection overview's bars are the collected amount too."""
+    from services import dashboard_view as dv
+    now = {"processed": 100, "received": 95, "sla": 0, "pending": 2, "duplicate": 3,
+           "amounts": {"RWF": {"processed": 1_567_395_147.0, "received": 1_483_016_451.0},
+                       "USD": {"processed": 1_244_665.0, "received": 1_066_203.0}}}
+    html = dv.kpi_cards(now, None)
+    assert "<b>1.57B</b><i>Notified 1.48B</i>" in html and "<b>1.24M</b><i>Notified 1.07M</i>" in html
+    assert "Total collected (money in our bank accounts)" in html
+    assert 'title="RWF 1,567,395,147 collected · 1,483,016,451 notified"' in html
+    rep, rec = month_report(month="2026-08", weeks=((1, 2), (3, 9)), proc=(1000, 0), pending=(2, 0), sla=(50, 0),
+                            received=(990, 0))
+    child = d.children(d.combine(d.facts_from_report(rep, rec)), "month", pd.Timestamp("2026-08-01"))
+    assert all(c["amounts"]["RWF"] >= c["notified"]["RWF"] for c in child)
+    assert child[0]["amounts"]["RWF"] > child[0]["notified"]["RWF"]          # the 10 not notified are collected
+    import base64
+    svg = dv.money_bars([c["label"] for c in child], [c["amounts"]["RWF"] for c in child], "RWF",
+                        notified=[c["notified"]["RWF"] for c in child])
+    assert ">990.0K<" in base64.b64decode(svg.split("base64,")[1].split('"')[0]).decode()
