@@ -2584,16 +2584,19 @@ def dashboard_page():
     if with_data and len(with_data) == len(engine.BANKS):          # 19/11/2026: every bank: "All banks"
         with_data = ["All banks"]
     charts = [
-        ("payments", "Collection over time", over + " · processed transactions",
+        ("payments", "Transactions over time", over,          # 23/11/2026: the processed transactions
          dashboard_view.lines(labels, [("Processed transaction", [c["processed"] for c in child], BRAND)], part,
                               fill=True) + dashboard_view.chart_legend([("Processed transaction", BRAND)]) + star_note,
          pd.DataFrame({"Period": tlabels, "Processed transaction": [c["processed"] for c in child],
                        "Received notification": [c["received"] for c in child]})),
-        ("amount", "Collection overview", over + f" · amount received in {cur_amt}",
-         dashboard_view.money_bars(labels, [c["amounts"].get(cur_amt, 0.0) for c in child], cur_amt, part)
-         + star_note,
-         pd.DataFrame({"Period": tlabels, **{f"{c} received": [round(ch["amounts"].get(c, 0.0), 0 if c == "RWF" else 2)
-                                                               for ch in child] for c in amt_curs}})),
+        # 23/11/2026: the money collected (processed: in our bank accounts), the notified amount under each period
+        ("amount", "Collection overview", over,
+         dashboard_view.money_bars(labels, [c["amounts"].get(cur_amt, 0.0) for c in child], cur_amt, part,
+                                   [c["notified"].get(cur_amt, 0.0) for c in child])
+         + dashboard_view.collected_legend(cur_amt) + star_note,
+         pd.DataFrame({"Period": tlabels,
+                       **{f"{c} {what}": [round(ch[key].get(c, 0.0), 0 if c == "RWF" else 2) for ch in child]
+                          for c in amt_curs for what, key in (("collected", "amounts"), ("notified", "notified"))}})),
         ("exceptions", "Exceptions by type", over,
          dashboard_view.lines(labels, [(n, [c[m] for c in child], col) for n, m, col in
                                        (("SLA violated", "sla", dashboard_view.EXC["SLA violated"]),
@@ -2623,7 +2626,8 @@ def dashboard_page():
     live = {   # on the screen: the same figures as interactive charts (they answer the cursor); None = HTML only
         "payments": (dashboard_view.alt_lines(charts[0][4], [("Processed transaction", BRAND)], fill=True),
                      star_note),
-        "amount": (dashboard_view.alt_money_bars(charts[1][4], cur_amt), star_note),
+        "amount": (dashboard_view.alt_money_bars(charts[1][4], cur_amt),
+                   dashboard_view.collected_legend(cur_amt) + star_note),
         "exceptions": (dashboard_view.alt_lines(charts[2][4], [(n, c) for n, c in dashboard_view.EXC.items()]),
                        dashboard_view.chart_legend(list(dashboard_view.EXC.items())) + star_note),
         "notif": (dashboard_view.alt_lines(
@@ -2659,11 +2663,11 @@ def dashboard_page():
         e_tab["Change %"] = [round((a - b) / b * 100, 1) if b else None for a, b in zip(e_tab[now_n], e_tab[bef_n])]
         legend2 = lambda c: dashboard_view.chart_legend([(now_n, c), (f"{bef_n} (compared with)", dashboard_view.PREV)])
         lined = f"lined up by {'day' if kind == 'week' else per} ({pos[0]} with {pos[0]})"
-        charts[0] = ("payments", "Collection over time", f"{now_n} vs {bef_n} · processed transactions · {lined}",
+        charts[0] = ("payments", "Transactions over time", f"{now_n} vs {bef_n} · {lined}",
                      dashboard_view.lines(pos, [(now_n, list(p_tab[now_n]), BRAND),
                                                 (bef_n, list(p_tab[bef_n]), dashboard_view.PREV)]) + legend2(BRAND),
                      p_tab)
-        charts[1] = ("amount", "Collection overview", f"{now_n} vs {bef_n} · amount received in {cur_amt} · {lined}",
+        charts[1] = ("amount", "Collection overview", f"{now_n} vs {bef_n} · amount collected in {cur_amt} · {lined}",
                      dashboard_view.group_bars(pos, [(now_n, list(a_tab[now_n]), dashboard_view.TEAL),
                                                      (bef_n, list(a_tab[bef_n]), dashboard_view.PREV)])
                      + legend2(dashboard_view.TEAL), a_tab)
@@ -2749,7 +2753,11 @@ def dashboard_page():
                     h1, h2, h3, h4 = st.columns([5.2, 1.4, 0.9, 1.0] if len(row) == 1 else [2.7, 1.7, 1.1, 1.3],
                                                 vertical_alignment="center")   # 19/11/2026: "⬇ Excel" in full
                 elif key in ("amount", "merchants") and len(amt_curs) > 1:   # 19/11/2026: + its currency box
-                    h1, hc, h2, h3 = st.columns([2.3, 1.45, 1.85, 1.3], vertical_alignment="center")
+                    if key == "amount":            # 23/11/2026: a line of their own under the title: the currency
+                        h1, h3 = st.columns([5.6, 1.3], vertical_alignment="center")   # on the left, Chart | Table
+                        hc, _, h2 = st.columns([1.45, 3.6, 1.85], vertical_alignment="center")   # under ⬇ PDF
+                    else:
+                        h1, hc, h2, h3 = st.columns([2.3, 1.45, 1.85, 1.3], vertical_alignment="center")
                     mine = cur_amt if key == "amount" else mcur
                     pick = f"dash_cur_{key}_{mine}"                  # drawn anew on the card's currency
                     hc.selectbox("Currency", amt_curs, index=amt_curs.index(mine), key=pick,
@@ -2759,6 +2767,8 @@ def dashboard_page():
                     h1, h2, h3 = st.columns([3.4, 1.9, 1.35], vertical_alignment="center")
                 h1.markdown(f'<div class="dc-t">{_esc(title)}</div><div class="dc-s">{_esc(sub)}</div>',
                             unsafe_allow_html=True)
+                if key == "amount" and len(amt_curs) > 1:     # against the card's right edge, as ⬇ PDF above it
+                    h2 = h2.container(horizontal=True, horizontal_alignment="right")
                 shown = h2.segmented_control(f"{title}: view", ["Chart", "Table"], default="Chart",
                                              key=f"dash_view_{key}", label_visibility="collapsed") or "Chart"
                 if key == "banks":                             # 28/10/2026: transactions or amount, per bank
