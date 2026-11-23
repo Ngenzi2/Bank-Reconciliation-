@@ -206,6 +206,15 @@ def test_pending_card_is_pending_over_processed():
     assert "PENDING" in dv.kpi_cards(now, before) and "1.70%" in dv.kpi_cards(now, before)  # the change, in points
 
 
+def test_total_transactions_card_shows_the_notified_ones_with_a_note():
+    """23/11/2026: processed and notified each in a box of its own, in the chart's colours."""
+    from services import dashboard_view as dv
+    now = {"processed": 89_680, "received": 87_492, "sla": 0, "pending": 0, "duplicate": 0, "amounts": {}}
+    html = dv.kpi_cards(now, None)
+    assert '<div class="dk-bx dk-pt"><b>89,680</b>' in html and "Processed transactions in this period" in html
+    assert '<div class="dk-bx dk-nt"><b>87,492</b>' in html and "Notified transactions in this period" in html
+
+
 def test_pending_and_delayed_per_period_and_the_weeks_without_report():
     """27/10/2026: the card "Pending & delayed notifications": per child period (here the weeks of a month) + Total,
     % of processed; an ended week with no report is named (the month is not complete)."""

@@ -319,8 +319,14 @@ def kpi_cards(now: dict, before: dict | None, fu: dict | None = None, per_view: 
                              for c in curs) if amt_b is not None else "Total collected (money in our bank accounts)")
     cards = [
         # 20/11/2026: TRANSACTIONS first, the AMOUNT in the middle, then RATE
-        ("TOTAL TRANSACTIONS", "tx", f"{now['processed']:,}",
-         _arrow(now["processed"], before["processed"]) if before else "Processed transactions in this period"),
+        # 23/11/2026: processed and notified each in a box, in the colours of the Collection overview chart
+        # (dark = processed / collected, light teal = notified); the change vs before under the processed one
+        ("TOTAL TRANSACTIONS", "tx",
+         f'<div class="dk-bx dk-pt"><b>{now["processed"]:,}</b><span><i class="dk-dot" style="background:{TEAL}">'
+         '</i>Processed transactions in this period</span></div>',
+         (_arrow(now["processed"], before["processed"]) if before else "")
+         + f'<div class="dk-bx dk-nt"><b>{now["received"]:,}</b><span><i class="dk-dot" style="background:{ACC}">'
+           '</i>Notified transactions in this period</span></div>'),
         ("COLLECTED AMOUNT", "money", amount_big, amount_sub),
         ("SUCCESS RATE", "rate", pct(rate(now)),
          _arrow(rate(now), rate(before), points=True, fmt=pct) if before else "Received notification ÷ processed transaction"),
@@ -834,6 +840,14 @@ STYLE_D = f'''<style>
 .dk-s{{font-size:11.5px;color:{MUT}}}
 .dk-fu{{border-top:1px solid #E1EEF0;margin:8px 0 6px;padding-top:6px}}
 .dk-fu div{{display:flex;justify-content:space-between;gap:8px;line-height:1.7}} .dk-fu b{{color:{TEAL};font-weight:700}}
+.dk-c:has(.dk-pt){{display:flex;flex-direction:column}}
+.dk-c:has(.dk-pt)>.dk-v{{margin-top:auto}} .dk-c:has(.dk-pt)>.dk-s{{margin-bottom:auto}}
+.dk-dot{{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}}
+.dk-bx{{border-radius:8px;padding:8px 11px}}
+.dk-bx b{{display:block;font-weight:800;line-height:1.15;margin-bottom:3px}}
+.dk-bx span{{display:block;font-size:11.5px;font-weight:400;color:{MUT}}}
+.dk-pt{{background:#EEF3F4}} .dk-pt b{{font-size:26px;color:{TEAL}}}
+.dk-nt{{background:{PALE};margin-top:10px}} .dk-nt b{{font-size:21px;color:{ACC}}}
 .dk-red{{color:{BAD}}}.dk-msg{{font-size:16px;line-height:1.3;display:block}} .dk-g{{color:#2E7D4F;font-weight:800}} .dk-r{{color:{BAD};font-weight:800}} .dk-n{{color:{MUT}}}
 .dl{{display:flex;flex-wrap:wrap;justify-content:center;gap:14px;font-size:11.5px;color:{TEAL};margin-top:4px;font-family:"Nunito",system-ui,sans-serif}}
 .dl i{{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px}}
