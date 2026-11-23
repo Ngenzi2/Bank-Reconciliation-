@@ -114,8 +114,8 @@ OPTIONAL = {
     "SLA_MAX": "the largest SLA setting allowed (default 10)",
     # ---- BK (see bk.py)
     "DETAILS_SHEET": "the name of the sheet with every credit and its IremboPay payment (default 'Payment details')",
-    "COUNTED_CREDIT_COLUMN": "True: a 'Counted credit' column - on a second credit, the reference of the credit "
-                             "counted for its invoice",
+    "COUNTED_CREDIT_COLUMN": "True: a 'Counted credit' column (or the column's own name, e.g. I&M 'Counted Tran Id')"
+                             " - on a second credit, the reference of the credit counted for its invoice",
     "FRONT_COLUMNS": "details-sheet columns moved right after the bank columns (BK: review_status, review_comment)",
     "row_result": "function(rows): one word per credit, shown in the details sheet's 'Result' column",
     "IREMBOPAY_SHEET": "the name of a sheet with the IremboPay payment file's own rows of the period",
