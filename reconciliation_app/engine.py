@@ -1519,7 +1519,8 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
                         "as a suggestion. Check it and set Reviewed = Yes.")
     merged, not_found, counts, msgs = apply_review(merged, not_found, payments, review, bank)
     if no_invoice_pending.any():                          # BPR: the credits with no invoice number are pending
-        auto = merged["period"].eq("current") & merged["invoice_number"].isna() & ~merged["_to_review"]
+        auto = (merged["period"].eq("current") & merged["invoice_number"].isna() & ~merged["_to_review"]
+                & merged["_not_reviewed"].eq(""))           # 23/11/2026: not a bill payment -> not pending
         merged.loc[auto, "payment_status"] = "NEW"
         merged.loc[auto, "review_status"] = "Pending notification (no invoice number)"
         res.add("info", f"{int(auto.sum())} credit(s) with no invoice number are in Pending notification.")
@@ -1587,6 +1588,8 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
     rep["Reason"] = rep["_not_reviewed"].where(rep["_not_reviewed"].ne(""), rep["Reason"])   # BK: not a bill payment
     if hasattr(bank, "row_result"):                       # BK (05/11/2026): one word per credit, to filter on
         rep["Result"] = bank.row_result(rep)
+    if hasattr(bank, "payment_type"):                     # BPR (23/11/2026): how each credit was paid
+        rep[bank.PAYMENT_TYPE] = bank.payment_type(rep)
     counted_col = option(bank, "COUNTED_CREDIT_COLUMN", False)
     if counted_col and ref:                                     # BK (05/11/2026): on a second credit, the bank
         counted_col = "Counted credit" if counted_col is True else counted_col   # reference of the credit counted

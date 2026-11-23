@@ -17,8 +17,12 @@ The BPR statement (an export of BNR.ACCOUNT_STATEMENT_BALANCE, .xlsx; one day or
 Rules
     - Invoice = DOC ID (filled in by the team). A credit without DOC ID: first in the list the team sometimes adds on
       another sheet (one invoice + its DESCRIPTION per row, e.g. "Sheet1" or "SQL"), else found in IremboPay by its BANK_REFERENCE or
-      DESCRIPTION (= provider_reference) or DESCRIPTION (= invoice number) - only when IremboPay has it; otherwise it
-      goes straight to Pending notification (not to Exception Resolution).
+      DESCRIPTION (= provider_reference) or DESCRIPTION (= invoice number) - only when IremboPay has it; otherwise:
+        a bill payment (DESCRIPTION SZ... agent, 20... internet banking) or an invoice number in DESCRIPTION (a
+        branch payment) -> Pending notification (not reviewed);
+        anything else (branch transfer FTCM..., another reference, none) -> 23/11/2026, like BK: counted in Processed,
+        in no other table, listed in "Not a bill payment (BPR)" (IremboPay cannot know it).
+    - "Payment type" of each credit: IremboPay's payment_channel when it has the credit, else the DESCRIPTION.
     - Only the credits are reconciled; the debits (the daily transfer out) are only used for the checks below.
     - Date = VALUE_DATE: the period of a credit and the SLA. A row without VALUE_DATE goes to review; BOOKING_DATE
       only decides which period's review it appears in. When the same credit (BANK_REFERENCE + amount) is also in a
@@ -91,7 +95,10 @@ FOUND_BY = "Invoice found by"            # how the invoice of a credit without D
 NO_VALUE_DATE = "VALUE_DATE missing"     # "yes" on a row whose file has no VALUE_DATE
 NO_TIME = "VALUE_DATE without time"      # "yes" when VALUE_DATE is a day only (SLA checked by day)
 CANCELLED = "Cancelled by"               # the debit that cancels a credit (its bank reference)
-DETAIL_COLUMNS = [INVOICE_COLUMN, FOUND_BY, NO_VALUE_DATE, NO_TIME, CANCELLED]
+PAYMENT_TYPE = "Payment type"            # agent / internet banking bill payment, branch payment, bank transfer, ...
+NOT_BILL_SHEET = "Not a bill payment (BPR)"
+EXTRA_SHEETS = [NOT_BILL_SHEET]
+DETAIL_COLUMNS = [INVOICE_COLUMN, FOUND_BY, PAYMENT_TYPE, NO_VALUE_DATE, NO_TIME, CANCELLED]
 DATETIME_COLUMNS = ["VALUE_DATE"]
 _HEADER = "BOOKING_DATE"
 _ALL = ["BOOKING_DATE", "BANK_REFERENCE", "DESCRIPTION", "DOC ID", "VALUE_DATE", "DEBIT", "CREDIT", "CLOSING_BALANCE"]
@@ -333,6 +340,62 @@ def channel(rows: pd.DataFrame) -> pd.Series:
                       else "BRANCH" if x.startswith("FTCM") else "OTHER" for x in d], index=rows.index)
 
 
+def bill_payment(rows: pd.DataFrame) -> pd.Series:
+    """'yes' when the credit came through BPR's IremboPay bill payment: DESCRIPTION is an agent reference (SZ...)
+    or an internet banking one (11 digits starting with 20). Only these have a reference IremboPay can know; a
+    branch transfer (FTCM...), another reference or none -> 'no'."""
+    d = rows["DESCRIPTION"].fillna("").astype(str).str.strip()
+    return pd.Series(["yes" if x.startswith("SZ") or re.fullmatch(r"20\d{9}", x) else "no" for x in d],
+                     index=rows.index)
+
+
+_TYPE_OF_CHANNEL = {"BPR_RW_AGENT": "Agent bill payment", "BPR_RW_IB": "Internet banking bill payment",
+                    "BPR_RW_BRANCH": "Branch payment", "BANK_TRANSFER": "Bank transfer"}
+
+
+def payment_type(rows: pd.DataFrame) -> pd.Series:
+    """How the credit was paid: IremboPay's payment_channel when IremboPay has it, else the DESCRIPTION (SZ... agent,
+    20... internet banking); anything else is a transfer into the account, "not in IremboPay" when IremboPay does
+    not know it."""
+    chan = (rows["payment_channel"].fillna("").astype(str).str.strip().str.upper() if "payment_channel" in rows
+            else pd.Series("", index=rows.index))
+    found = (rows["found_in_irembopay"].fillna(False).astype(bool) if "found_in_irembopay" in rows
+             else pd.Series(False, index=rows.index))
+    desc = rows["DESCRIPTION"].fillna("").astype(str).str.strip()
+    out = []
+    for c, f, d in zip(chan, found, desc):
+        if c in _TYPE_OF_CHANNEL:
+            out.append(_TYPE_OF_CHANNEL[c])
+        elif d.startswith("SZ"):
+            out.append("Agent bill payment")
+        elif re.fullmatch(r"20\d{9}", d):
+            out.append("Internet banking bill payment")
+        elif re.fullmatch(r"8\d{11}", d):              # an invoice number: paid at a branch
+            out.append("Branch payment")
+        else:
+            out.append("Transfer" if f else "Transfer, not in IremboPay")
+    return pd.Series(out, index=rows.index, dtype=object)
+
+
+def not_bill_payment(rows: pd.DataFrame) -> pd.Series:
+    """23/11/2026 (like BK): a credit with no invoice number that is not a bill payment (a branch transfer FTCM...,
+    another reference, none). IremboPay cannot know it, so it is counted in Processed but in no other table, and listed
+    in "Not a bill payment (BPR)". A DESCRIPTION that is an invoice number (a branch payment) stays Pending, and a
+    credit cancelled by a debit is still reviewed."""
+    if "DESCRIPTION" not in rows or "invoice_number" not in rows:
+        return pd.Series(False, index=rows.index)
+    cancelled = (rows[CANCELLED].fillna("").astype(str).ne("") if CANCELLED in rows
+                 else pd.Series(False, index=rows.index))
+    invoice = rows["DESCRIPTION"].fillna("").astype(str).str.strip().str.fullmatch(r"8\d{11}")
+    return rows["invoice_number"].isna() & bill_payment(rows).eq("no") & ~invoice & ~cancelled
+
+
+def counted_not_reviewed(rows: pd.DataFrame) -> pd.Series:
+    """(engine hook) Why a credit is counted in Processed but never reviewed ("" = handled normally)."""
+    return pd.Series("", index=rows.index, dtype=object).mask(not_bill_payment(rows),
+                                                              "Not a bill payment (transfer, not in IremboPay)")
+
+
 # =====================================================================================================================
 # 5. CHECKS BETWEEN FILES (step 3): nothing may be missing
 # =====================================================================================================================
@@ -432,9 +495,9 @@ def received(rows: pd.DataFrame) -> pd.Series:
 
 
 def pending(rows: pd.DataFrame) -> pd.Series:
-    """Pending notification: in IremboPay but not paid (no paid_at)."""
+    """Pending notification: in IremboPay but not paid (no paid_at); not a credit that is not a bill payment."""
     import engine                                 # (here: engine imports the banks)
-    return engine.not_paid(rows, PENDING_STATUSES)
+    return engine.not_paid(rows, PENDING_STATUSES) & ~not_bill_payment(rows)
 
 
 def duplicate(rows: pd.DataFrame) -> pd.Series:
@@ -506,3 +569,12 @@ def not_found_reason(rows: pd.DataFrame) -> pd.Series:
             parts.append("no VALUE_DATE")
         out.append("; ".join(parts))
     return pd.Series(out, index=rows.index, dtype=object)
+
+
+def extra_sheets(rep, attempts, start, end, whole) -> dict:
+    """(engine hook) "Not a bill payment (BPR)": the credits of the period with no invoice number that are not bill
+    payments (counted in Processed only)."""
+    rows = rep[whole["processed"] & not_bill_payment(rep)]
+    cols = ["Currency", "BOOKING_DATE", "VALUE_DATE", "BANK_REFERENCE", "DESCRIPTION", PAYMENT_TYPE, "CREDIT",
+            "Source file"]
+    return {NOT_BILL_SHEET: rows[[c for c in cols if c in rows]].sort_values("VALUE_DATE")}

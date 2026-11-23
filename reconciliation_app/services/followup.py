@@ -32,7 +32,8 @@ STORE_NAME = "Follow-up decisions.json"
 DECISIONS = {"Pending": ["Received later", "Refunded", "Not an Irembo payment"],
              "Paid twice": ["Refunded", "Kept / used for another invoice", "Bank error reversed"]}
 SHEETS = {"Pending notification": "Pending", "Duplicate payment other channel": "Paid twice"}
-CACHE_VERSION = 3                     # 2 (17/11/2026): each item keeps its IremboPay status; 3 (18/11): its channel
+CACHE_VERSION = 4                     # 2 (17/11/2026): each item keeps its IremboPay status; 3 (18/11): its channel;
+                                      # 4 (23/11): BPR, the payment type
 
 
 def _text(v) -> str:
@@ -42,8 +43,10 @@ def _text(v) -> str:
 
 def items_from_report(path: Path, record, bank_code: str) -> list:
     """[{key, bank, type, invoice, reference, amount, currency, paid_on, merchant, provider, status, channel,
-    report, reported}] of one saved Excel report: the rows of its Pending notification and Duplicate payment sheets.
-    channel (18/11/2026): the bank statement's channel of the credit (the bank's channel(), as in the review)."""
+    payment_type, report, reported}] of one saved Excel report: the rows of its Pending notification and Duplicate
+    payment sheets. channel (18/11/2026): the bank statement's channel of the credit (the bank's channel(), as in the
+    review). payment_type (23/11/2026, BPR): agent / internet banking bill payment, branch payment, bank transfer,
+    transfer not in IremboPay; "" for other banks."""
     bank = engine.get_bank(bank_code)
     c = bank.COLUMNS
     try:
@@ -63,6 +66,10 @@ def items_from_report(path: Path, record, bank_code: str) -> list:
             channels = bank.channel(df).astype(str) if hasattr(bank, "channel") else pd.Series("", index=df.index)
         except Exception:                               # a report without the statement column it needs
             channels = pd.Series("", index=df.index)
+        try:
+            types = bank.payment_type(df) if hasattr(bank, "payment_type") else pd.Series("", index=df.index)
+        except Exception:
+            types = pd.Series("", index=df.index)
         for n, r in df.iterrows():
             inv, ref = _text(r.get("invoice_number")), _text(r.get(c["reference"])) if c.get("reference") else ""
             amount = pd.to_numeric(r.get(c["amount"]), errors="coerce")
@@ -74,6 +81,7 @@ def items_from_report(path: Path, record, bank_code: str) -> list:
                         "paid_on": None if pd.isna(paid_on) else pd.Timestamp(paid_on).normalize(),
                         "merchant": _text(r.get("name")), "provider": _text(r.get("payment_provider")),
                         "status": status_of(r), "channel": _text(channels.get(n)),
+                        "payment_type": _text(types.get(n)),
                         "report": record.name, "reported": reported.normalize()})
     return out
 

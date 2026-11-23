@@ -3146,6 +3146,7 @@ def followup_page():
             "Bank reference": i["reference"],               # 17/11/2026: the statement's own reference of the credit
             "Amount": i["amount"], "Currency": i["currency"],
             "Channel": i.get("channel", ""),        # 18/11/2026: the bank statement's channel of the credit
+            "Payment type": i.get("payment_type", ""),     # 23/11/2026: BPR only
             "Value date": i["paid_on"].date() if i["paid_on"] is not None else None, "Merchant": i["merchant"],
             "IremboPay says": says(i) if i["type"] == "Pending" else "",      # the same words as the filter
             "Decision": decisions.get(i["key"], {}).get("decision", ""),
@@ -3196,6 +3197,9 @@ def followup_page():
                 "Channel": st.column_config.TextColumn(
                     "Channel", help="The channel on the bank statement: I&M and BPR from the description · Ecobank "
                                     "Source Channel · BOA from the description · BK Source"),
+                "Payment type": st.column_config.TextColumn(
+                    "Payment type", help="BPR: agent or internet banking bill payment, branch payment, bank transfer, "
+                                         "or a transfer IremboPay does not know"),
                 "Comment": st.column_config.TextColumn("Comment", width="medium"),
                 "IremboPay says": st.column_config.TextColumn("IremboPay says", help="IremboPay checkout, now")})
         edited["_key"] = table["_key"].values

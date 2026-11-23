@@ -121,3 +121,20 @@ def test_an_item_keeps_the_bank_statements_channel(tmp_path):
     items = followup.items_from_report(path, SimpleNamespace(modified="2026-11-03", name="r.xlsx"), "ECO")
     assert [(i["type"], i["channel"]) for i in items] == [("Pending", "ECOBANKMOBILEAPP"),
                                                          ("Paid twice", "ECOBANKMOBILEAPP")]
+    assert all(i["payment_type"] == "" for i in items)                  # not BPR
+
+
+def test_a_bpr_item_shows_its_payment_type(tmp_path):
+    # 23/11/2026: worked out from the report's columns, so a report made before the column existed shows it too
+    from types import SimpleNamespace
+    rows = [{"Currency": "RWF", "VALUE_DATE": "2026-11-13", "BANK_REFERENCE": r, "DESCRIPTION": d, "CREDIT": 500,
+             "invoice_number": None, "found_in_irembopay": f, "payment_channel": c}
+            for r, d, f, c in (("FT1", "SZABAFZRRNAL", False, None), ("FT2", "", True, "BANK_TRANSFER"),
+                               ("FT3", "FTCM26218AW", False, None))]
+    path = tmp_path / "r.xlsx"
+    with pd.ExcelWriter(path) as xw:
+        pd.DataFrame(rows).to_excel(xw, sheet_name="Pending notification", index=False)
+        pd.DataFrame(columns=list(rows[0])).to_excel(xw, sheet_name="Duplicate payment other channel", index=False)
+    items = followup.items_from_report(path, SimpleNamespace(modified="2026-11-16", name="r.xlsx"), "BPR")
+    assert [(i["reference"], i["payment_type"]) for i in items] == [
+        ("FT1", "Agent bill payment"), ("FT2", "Bank transfer"), ("FT3", "Transfer, not in IremboPay")]

@@ -113,6 +113,32 @@ def test_a_missing_doc_id_is_taken_from_the_list_on_another_sheet():
     assert st[bpr.FOUND_BY].tolist()[:2] == ["sheet 'SQL' of the statement"] * 2
 
 
+def test_bill_payment_comes_from_the_description():
+    rows = [("2026-11-13", f"FT{n}", desc, "", "2026-11-13 10:00:00", 0, 100) for n, desc in enumerate(
+        ["SZABAFZRRNAL", "20146616061", "FTCM26218AWSDPODK", "0000001471432203", "", "886000000001"])]
+    st = bpr.clean_statement(read(statement(rows)).data)
+    assert bpr.bill_payment(st).tolist() == ["yes", "yes", "no", "no", "no", "no"]
+
+
+def test_a_credit_with_no_invoice_that_is_not_a_bill_payment_is_processed_only(tmp_path):
+    # 23/11/2026 (like BK): counted in Processed, in no other table, listed in "Not a bill payment (BPR)"
+    rows = ROWS[:7] + [("2026-08-05", "FT8", "FTCM26218AWSDPODK", "", "2026-08-05 12:00:00", 0, 900),
+                       ("2026-08-05", "FT9", "", "", "2026-08-05 13:00:00", 0, 400)]
+    res = run(tmp_path, rows=rows, require_review=False)
+    t = e.counts_of(res.blocks[-1][2])
+    assert t["Overall processed payments"]["Total"] == 8                       # FT1-4, FT6, FT7 + FT8, FT9
+    assert t["Pending notifications"]["Total"] == 1                            # FT3 (agent bill payment) only
+    not_bill = res.sheets[bpr.NOT_BILL_SHEET]
+    assert sorted(not_bill["BANK_REFERENCE"]) == ["FT8", "FT9"]
+    assert set(not_bill[bpr.PAYMENT_TYPE]) == {"Transfer, not in IremboPay"}
+    assert t["Overall processed payments"]["Total"] == (t["Overall notifications received by Irembo"]["Total"]
+                                                        + t["Pending notifications"]["Total"]
+                                                        + t["Duplicate Payment"]["Total"] + len(not_bill))
+    types = res.sheets["Matched details"].set_index("BANK_REFERENCE")[bpr.PAYMENT_TYPE]
+    assert types["FT1"] == "Agent bill payment" and types["FT3"] == "Agent bill payment"     # IremboPay's channel, SZ...
+    assert types["FT8"] == "Transfer, not in IremboPay"
+
+
 def test_a_value_date_without_time_is_checked_by_day(tmp_path):
     pays = [("886000000001", 5000, "RWF", "2026-11-13 18:30:00", "BPR_RW", "SZAAA1"),     # same day: on time
             ("886000000002", 2000, "RWF", "2026-11-15 08:00:00", "BPR_RW", "SZAAA2"),     # next day: violated
