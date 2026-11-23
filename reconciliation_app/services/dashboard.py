@@ -794,7 +794,8 @@ def breakdown(facts: list, kind: str, first, last, currency: str, banks=None) ->
 def children(facts: list, kind: str, first, last=None, currency: str = "All", banks=None) -> list:
     """The periods one level below the one chosen, for the charts (a year -> its quarters, a quarter -> its months,
     a month -> its weeks, a week -> its days), in order. Each: {"key", "label", "partial" (a week cut by the month
-    end: only its part in this period), the 5 counts, "amounts": {currency: amount received}}. Empty for a day."""
+    end: only its part in this period), the 5 counts, "amounts": {currency: amount collected (processed, 23/11/2026)},
+    "notified": {currency: amount received}}. Empty for a day."""
     base = "month" if kind == "custom" else kind
     child = CHILD.get(base)
     if child is None:
@@ -810,7 +811,8 @@ def children(facts: list, kind: str, first, last=None, currency: str = "All", ba
                  else period_label(key, child, short=True))
         out.append({"key": key, "label": label, "partial": key < first or period_end(key, child) > end,
                     **{m: t[m] for m in METRICS},
-                    "amounts": {c: a.get("received", 0.0) for c, a in t["amounts"].items()},
+                    "amounts": {c: a.get("processed", 0.0) for c, a in t["amounts"].items()},
+                    "notified": {c: a.get("received", 0.0) for c, a in t["amounts"].items()},
                     "money": {c: dict(a) for c, a in t["amounts"].items()}})    # every figure's amount (27/10/2026)
     return out
 
