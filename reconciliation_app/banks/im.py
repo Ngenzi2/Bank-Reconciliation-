@@ -75,6 +75,8 @@ MISSING_DAYS_NOTE = False         # 26/10/2026: the "No statement for ..." note 
 DAY_BEFORE_CURRENCIES = []        # 20/10/2026: no day-before recommendation - the Transaction Date is never before the
                                   # Value Date, so the day before holds no payment of the period
 SEPARATE_CREDITED_AGAIN = True    # step 5: the extra credits of an invoice in a table of their own (20/10/2026)
+COUNTED_CREDIT_COLUMN = "Counted Tran Id"   # 23/11/2026: a second credit shows the Tran Id of the credit counted
+FRONT_COLUMNS = ["Counted Tran Id"]          # for its invoice, right after the bank's columns
 
 
 # =====================================================================================================================
