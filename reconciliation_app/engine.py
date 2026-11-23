@@ -685,6 +685,10 @@ def check_period(period: Period, files: list, bank=None, today=None) -> Check:
         covered = set()
         for f in mine:
             covered |= set(pd.date_range(f.first, f.last))
+        if bank.MONDAY_AFTER_WEEKEND:          # 23/11/2026: a working day's statement holds the payments of the
+            for d in list(covered):            # weekend / holidays just before it (I&M: Monday 23/11 covers 21-22/11)
+                if is_working_day(d):
+                    covered |= set(closed_days_before(d))
         if hasattr(bank, "check_files") and mine:          # the balances: nothing missing between the files
             covered, more_lines, more_blocking = bank.check_files(mine)
             chk.lines += more_lines
@@ -1583,12 +1587,14 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
     rep["Reason"] = rep["_not_reviewed"].where(rep["_not_reviewed"].ne(""), rep["Reason"])   # BK: not a bill payment
     if hasattr(bank, "row_result"):                       # BK (05/11/2026): one word per credit, to filter on
         rep["Result"] = bank.row_result(rep)
-    if option(bank, "COUNTED_CREDIT_COLUMN", False) and ref:   # BK (05/11/2026): on a second credit, the bank
-        extra_ = rep["is_extra_credit"].astype(bool)            # reference of the credit counted for its invoice
+    counted_col = option(bank, "COUNTED_CREDIT_COLUMN", False)
+    if counted_col and ref:                                     # BK (05/11/2026): on a second credit, the bank
+        counted_col = "Counted credit" if counted_col is True else counted_col   # reference of the credit counted
+        extra_ = rep["is_extra_credit"].astype(bool)            # for its invoice (I&M 23/11/2026: "Counted Tran Id")
         counted = (rep[~extra_ & rep["invoice_number"].notna()].drop_duplicates("invoice_number")
                    .set_index("invoice_number")[ref].astype(str))
-        rep["Counted credit"] = ""
-        rep.loc[extra_, "Counted credit"] = rep.loc[extra_, "invoice_number"].map(counted).fillna("")
+        rep[counted_col] = ""
+        rep.loc[extra_, counted_col] = rep.loc[extra_, "invoice_number"].map(counted).fillna("")
 
     def table_rows(a, b):
         """Rows of each of the 5 tables for [a, b): the bank's own rule, or by payment date (default).
