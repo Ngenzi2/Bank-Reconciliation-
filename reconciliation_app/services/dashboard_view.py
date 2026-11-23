@@ -1,6 +1,6 @@
 """
 THE DASHBOARD'S MAIN VIEW (22/10/2026): four key cards (Total transactions, Collected amount, Success rate, SLA), then
-Collection over time, Collection overview, Exceptions by type and Top merchants; each chart interactive on the screen (Altair) and drawn as an
+Transactions over time, Collection overview, Exceptions by type and Top merchants; each chart interactive on the screen (Altair) and drawn as an
 SVG for its PDF, with its table.
 Every number, curve, slice and line is computed from the facts of the saved reports (services/dashboard.py);
 nothing is typed by hand. IremboPay colours: white / pale teal surfaces, dark teal text and figures, brand green for
@@ -34,10 +34,10 @@ def _img(svg: str, style: str = "width:100%;display:block") -> str:
     return f'<img alt="" style="{style}" src="data:image/svg+xml;base64,{base64.b64encode(svg.encode()).decode()}"/>'
 
 
-def short(v: float) -> str:
+def short(v: float, digits: int = 1) -> str:
     for size, unit in ((1e9, "B"), (1e6, "M"), (1e3, "K")):
         if abs(v) >= size:
-            return f"{v / size:,.1f}{unit}"
+            return f"{v / size:,.{digits}f}{unit}"
     return f"{v:,.0f}"
 
 
@@ -283,11 +283,13 @@ font-variant-numeric:tabular-nums}}
 
 
 def kpi_cards(now: dict, before: dict | None, fu: dict | None = None, per_view: int | None = None) -> str:
-    """AMOUNT (received; RWF and USD each in full, never added) · RATE (received notification ÷ processed
-    transaction) · TRANSACTIONS (processed) · SLA (% violated). With a comparison: the change; else what it is.
+    """COLLECTED AMOUNT (23/11/2026: processed, the money in our bank accounts, with the notified amount under it;
+    each currency on its own, never added) · RATE (received notification ÷ processed transaction) · TRANSACTIONS
+    (processed) · SLA (% violated). With a comparison: the change; else what it is.
     per_view (12/11/2026): show that many cards, the others behind the ‹ › arrows (the page's PDF: every card)."""
-    rec_amt = lambda t: {c: a.get("received", 0.0) for c, a in (t or {}).get("amounts", {}).items()}
-    amt, amt_b = rec_amt(now), (rec_amt(before) if before else None)
+    money = lambda t, m: {c: a.get(m, 0.0) for c, a in (t or {}).get("amounts", {}).items()}
+    amt, amt_b = money(now, "processed"), (money(before, "processed") if before else None)
+    notified = money(now, "received")
     order = ["RWF", "USD", "EUR", "GBP"]
     curs = [c for c in order if c in amt] + sorted(c for c in amt if c not in order)
     rate = lambda t: t["received"] / t["processed"] if t and t["processed"] else None
@@ -297,11 +299,15 @@ def kpi_cards(now: dict, before: dict | None, fu: dict | None = None, per_view: 
     pct = lambda v, n=2: ("N/A" if v is None else f"<{10 ** -n:.{n}f}%" if 0 < v * 100 < 0.5 * 10 ** -n
                           else f"{v * 100:.{n}f}%")
     # 20/11/2026: one tile per currency in the IremboPay colours (dark teal, the currency in lime green); a currency
-    # with nothing received in the period is greyed out; the full amount on hover
+    # with nothing collected in the period is greyed out; the full amounts on hover. 23/11/2026: the notified amount
+    # under the collected one
     sym = {"USD": "$ ", "EUR": "€ ", "GBP": "£ "}
     amount_big = ('<div class="dk-cur">' + "".join(
-        f'<div class="dk-ct{"" if amt[c] else " dk-c0"}" title="{c} {amt[c]:,.0f}"><span>{sym.get(c, "")}{c}</span>'
-        f'<b>{short(amt[c]) if amt[c] else "0"}</b></div>' for c in curs) + "</div>") if curs else "–"
+        f'<div class="dk-ct{"" if amt[c] else " dk-c0"}" title="{c} {amt[c]:,.0f} collected · '
+        f'{notified.get(c, 0.0):,.0f} notified"><span>{sym.get(c, "")}{c}</span>'
+        f'<b>{short(amt[c], 2) if amt[c] else "0"}</b>'           # 2 decimals: the gap between the two shows
+        f'<i>Notified {short(notified.get(c, 0.0), 2) if notified.get(c) else "0"}</i></div>' for c in curs)
+                  + "</div>") if curs else "–"
 
     def rows(label, top, pairs, tail=""):
         """09/11/2026: the FOLLOW-UP card's design - a label (or the change), a line, then label | number rows."""
@@ -310,7 +316,7 @@ def kpi_cards(now: dict, before: dict | None, fu: dict | None = None, per_view: 
 
     pend_money = {c: v for c in curs if (v := (now.get("amounts", {}).get(c, {}) or {}).get("pending", 0.0))}
     amount_sub = (" · ".join(f"{c} " + (_arrow(amt[c], amt_b.get(c), fmt=lambda v: short(v)) or "no earlier figure")
-                             for c in curs) if amt_b is not None else "Total received (notifications received)")
+                             for c in curs) if amt_b is not None else "Total collected (money in our bank accounts)")
     cards = [
         # 20/11/2026: TRANSACTIONS first, the AMOUNT in the middle, then RATE
         ("TOTAL TRANSACTIONS", "tx", f"{now['processed']:,}",
@@ -422,9 +428,20 @@ def lines(labels: list, series: list, partial: list | None = None, fill: bool = 
 CUR_C = {"RWF": TEAL, "USD": USD_C, "EUR": ACC, "GBP": AMBER}
 
 
-def money_bars(labels: list, values: list, cur: str, partial: list | None = None) -> str:
-    """The amount received per period in ONE currency, its amount on each bar (the PDF; 19/11/2026: no second axis)."""
-    W, H, L, R, T, B = 600, 270, 52, 588, 34, 232
+def notified_c(cur: str) -> str:
+    """23/11/2026: the colour of the notified amounts under the bars (never the bars' own colour)."""
+    return MUT if CUR_C.get(cur, TEAL) == ACC else ACC
+
+
+def collected_legend(cur: str) -> str:
+    """The dots under the Collection overview: the bars (collected) and the figures under them (notified)."""
+    return chart_legend([("Collected", CUR_C.get(cur, TEAL)), ("Notified", notified_c(cur))])
+
+
+def money_bars(labels: list, values: list, cur: str, partial: list | None = None, notified: list | None = None) -> str:
+    """The amount collected per period in ONE currency, its amount on each bar (the PDF; 19/11/2026: no second axis);
+    23/11/2026: the notified amount under each period."""
+    W, H, L, R, T, B = 600, 270 + (18 if notified else 0), 52, 588, 34, 232
     n = len(labels)
     if not n:
         return '<div class="dv-empty">No period to show.</div>'
@@ -442,7 +459,11 @@ def money_bars(labels: list, values: list, cur: str, partial: list | None = None
             g += (f'<text x="{cx:.1f}" y="{B - h - 6:.1f}" class="dv-ax" text-anchor="middle" font-weight="800" '
                   f'fill="{TEAL}">{short(v)}</text>')
         star = "*" if partial and partial[i] else ""
-        g += f'<text x="{cx:.1f}" y="{B + 18}" class="dv-ax" text-anchor="middle">{escape(lab)}{star}</text>'
+        g += (f'<text x="{cx:.1f}" y="{B + (35 if notified else 18)}" class="dv-ax" text-anchor="middle">'
+              f'{escape(lab)}{star}</text>')
+        if notified:                                  # above the period's name
+            g += (f'<text x="{cx:.1f}" y="{B + 17}" class="dv-ax" text-anchor="middle" fill="{notified_c(cur)}">'
+                  f'{short(notified[i]) if notified[i] else "0"}</text>')
     return _img(f'<svg viewBox="0 0 {W} {H}">{g}</svg>')
 
 
@@ -808,7 +829,8 @@ STYLE_D = f'''<style>
 .dk-ct{{background:{TEAL};border-radius:10px;padding:8px 11px;min-width:0}}
 .dk-ct span{{display:block;color:#99E378;font-size:11.5px;font-weight:800;letter-spacing:.06em}}
 .dk-ct b{{display:block;color:#fff;font-size:20px;font-weight:800;white-space:nowrap}}
-.dk-c0{{background:#EEF2F3}} .dk-c0 span,.dk-c0 b{{color:#A7B3B6}}
+.dk-ct i{{display:block;font-style:normal;color:#CFE3E6;font-size:11.5px;font-weight:700;margin-top:2px;white-space:nowrap}}
+.dk-c0{{background:#EEF2F3}} .dk-c0 span,.dk-c0 b,.dk-c0 i{{color:#A7B3B6}}
 .dk-s{{font-size:11.5px;color:{MUT}}}
 .dk-fu{{border-top:1px solid #E1EEF0;margin:8px 0 6px;padding-top:6px}}
 .dk-fu div{{display:flex;justify-content:space-between;gap:8px;line-height:1.7}} .dk-fu b{{color:{TEAL};font-weight:700}}
@@ -867,7 +889,7 @@ def alt_lines(table: pd.DataFrame, series: list, fill: bool = False):
     names = [c for c, _ in series]
     order = list(table["Period"])
     long = table.melt(id_vars="Period", value_vars=names, var_name="Figure", value_name="Value")
-    x = alt.X("Period:N", sort=order, title=None, axis=alt.Axis(labelAngle=0))
+    x = alt.X("Period:N", sort=order, title=None, axis=alt.Axis(labelAngle=0, labelOverlap=False))   # every period named
     color = alt.Color("Figure:N", scale=alt.Scale(domain=names, range=[c for _, c in series]),
                       legend=None)                      # the legend is drawn under the chart (chart_legend)
     hover = alt.selection_point(fields=["Period"], nearest=True, on="pointerover", clear="pointerout", empty=False)
@@ -994,19 +1016,30 @@ def alt_compare_lines(table: pd.DataFrame, now: str, before: str, color: str):
 
 
 def alt_money_bars(table: pd.DataFrame, cur: str):
-    """The amount received per period in ONE currency (the column '<cur> received'), its amount on each bar; hovering
-    a bar shows it in full (19/11/2026: one currency at a time, chosen in the card)."""
+    """The amount collected per period in ONE currency (the column '<cur> collected'), its amount on each bar; hovering
+    a bar shows it in full with the notified amount (19/11/2026: one currency at a time, chosen in the card;
+    23/11/2026: collected = the money in our bank accounts)."""
     import altair as alt
-    col = f"{cur} received"
-    t = table[["Period", col]].rename(columns={col: "Amount"})
+    col, ncol = f"{cur} collected", f"{cur} notified"
+    t = table[["Period", col, ncol]].rename(columns={col: "Amount", ncol: "Notified"})
     t["Label"] = t["Amount"].map(lambda v: short(v) if v else "")
-    x = alt.X("Period:N", sort=list(t["Period"]), title=None, axis=alt.Axis(labelAngle=0))
+    # 23/11/2026: the period's name lower down, the notified amount between it and the bar
+    x = alt.X("Period:N", sort=list(t["Period"]), title=None, axis=alt.Axis(labelAngle=0, labelPadding=22))
     bars = alt.Chart(t).mark_bar(width=34, cornerRadiusTopLeft=3, cornerRadiusTopRight=3,
                                  color=CUR_C.get(cur, TEAL)).encode(
         x=x, y=alt.Y("Amount:Q", title=cur, axis=alt.Axis(format="~s")),
-        tooltip=[alt.Tooltip("Period:N"), alt.Tooltip("Amount:Q", title=cur, format=",.2f" if cur != "RWF" else ",.0f")])
+        tooltip=[alt.Tooltip("Period:N"),
+                 alt.Tooltip("Amount:Q", title=f"{cur} collected", format=",.2f" if cur != "RWF" else ",.0f"),
+                 alt.Tooltip("Notified:Q", title=f"{cur} notified", format=",.2f" if cur != "RWF" else ",.0f")])
     labels = alt.Chart(t).mark_text(dy=-8, fontWeight=800, color=TEAL).encode(x=x, y="Amount:Q", text="Label:N")
-    return _alt_theme(alt.layer(bars, labels))
+    # 23/11/2026: the notified amount (short, e.g. 1.5B) above each period's name in its own colour (the dots under
+    # the chart say which is which), as in the PDF; hovering it shows the full amount
+    t["Under"] = t["Notified"].map(lambda v: short(v) if v else "0")
+    fmt = ",.2f" if cur != "RWF" else ",.0f"
+    under = alt.Chart(t).mark_text(baseline="top", dy=6, fontSize=10.5, color=notified_c(cur)).encode(
+        x=x, y=alt.value({"expr": "height"}), text="Under:N",             # under the axis, whatever its height
+        tooltip=[alt.Tooltip("Period:N"), alt.Tooltip("Notified:Q", title=f"{cur} notified", format=fmt)])
+    return _alt_theme(alt.layer(bars, labels, under))
 
 
 def alt_group_bars(table: pd.DataFrame, cat: str, series: list, horizontal: bool = False):
