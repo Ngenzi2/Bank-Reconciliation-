@@ -282,11 +282,14 @@ font-variant-numeric:tabular-nums}}
 <style>.fp-tb th.fp-num:nth-child(3)::before{{background:{ok}}} .fp-tb th.fp-num:nth-child(4)::before{{background:{left}}}</style>""")
 
 
-def kpi_cards(now: dict, before: dict | None, fu: dict | None = None, per_view: int | None = None) -> str:
+def kpi_cards(now: dict, before: dict | None, fu: dict | None = None, per_view: int | None = None,
+              later: dict | None = None) -> str:
     """COLLECTED AMOUNT (23/11/2026: processed, the money in our bank accounts, with the notified amount under it;
     each currency on its own, never added) · RATE (received notification ÷ processed transaction) · TRANSACTIONS
     (processed) · SLA (% violated). With a comparison: the change; else what it is.
-    per_view (12/11/2026): show that many cards, the others behind the ‹ › arrows (the page's PDF: every card)."""
+    per_view (12/11/2026): show that many cards, the others behind the ‹ › arrows (the page's PDF: every card).
+    later (24/11/2026, ⚙ Figures "Latest"): {currency: amount received later}, already in now's notified amount;
+    shown in the hover box as "in the reports" + "received later"."""
     money = lambda t, m: {c: a.get(m, 0.0) for c, a in (t or {}).get("amounts", {}).items()}
     amt, amt_b = money(now, "processed"), (money(before, "processed") if before else None)
     notified = money(now, "received")
@@ -299,14 +302,22 @@ def kpi_cards(now: dict, before: dict | None, fu: dict | None = None, per_view: 
     pct = lambda v, n=2: ("N/A" if v is None else f"<{10 ** -n:.{n}f}%" if 0 < v * 100 < 0.5 * 10 ** -n
                           else f"{v * 100:.{n}f}%")
     # 20/11/2026: one tile per currency in the IremboPay colours (dark teal, the currency in lime green); a currency
-    # with nothing collected in the period is greyed out; the full amounts on hover. 23/11/2026: the notified amount
-    # under the collected one
+    # with nothing collected in the period is greyed out. 23/11/2026: the notified amount under the collected one.
+    # 24/11/2026: 3 decimals (a follow-up update shows: 1.483B -> 1.484B); the full amounts in a hover box like the
+    # charts' (with "Latest": what the reports said and what was received later)
     sym = {"USD": "$ ", "EUR": "€ ", "GBP": "£ "}
+
+    def tip(c):
+        n = notified.get(c, 0.0)
+        rows_ = [("Collected", f"{amt[c]:,.0f}"), ("Notified", f"{n:,.0f}")]
+        if later is not None and later.get(c):
+            rows_ += [("in the reports", f"{n - later[c]:,.0f}"), ("received later", f"+{later[c]:,.0f}")]
+        return (f'<div class="dk-tip"><table><tr><td>{c}</td><td></td></tr>'
+                + "".join(f"<tr><td>{k}</td><td>{v}</td></tr>" for k, v in rows_) + "</table></div>")
     amount_big = ('<div class="dk-cur">' + "".join(
-        f'<div class="dk-ct{"" if amt[c] else " dk-c0"}" title="{c} {amt[c]:,.0f} collected · '
-        f'{notified.get(c, 0.0):,.0f} notified"><span>{sym.get(c, "")}{c}</span>'
-        f'<b>{short(amt[c], 2) if amt[c] else "0"}</b>'           # 2 decimals: the gap between the two shows
-        f'<i>Notified {short(notified.get(c, 0.0), 2) if notified.get(c) else "0"}</i></div>' for c in curs)
+        f'<div class="dk-ct{"" if amt[c] else " dk-c0"}"><span>{sym.get(c, "")}{c}</span>'
+        f'<b>{short(amt[c], 3) if amt[c] else "0"}</b>'
+        f'<i>Notified {short(notified.get(c, 0.0), 3) if notified.get(c) else "0"}</i>{tip(c)}</div>' for c in curs)
                   + "</div>") if curs else "–"
 
     def rows(label, top, pairs, tail=""):
@@ -325,7 +336,7 @@ def kpi_cards(now: dict, before: dict | None, fu: dict | None = None, per_view: 
          f'<div class="dk-bx dk-pt"><b>{now["processed"]:,}</b><span><i class="dk-dot" style="background:{TEAL}">'
          '</i>Processed transactions in this period</span></div>',
          (_arrow(now["processed"], before["processed"]) if before else "")
-         + f'<div class="dk-bx dk-nt"><b>{now["received"]:,}</b><span><i class="dk-dot" style="background:{ACC}">'
+         + f'<div class="dk-bx dk-nt"><b>{now["received"] + now.get("later", 0):,}</b><span><i class="dk-dot" style="background:{ACC}">'
            '</i>Notified transactions in this period</span></div>'),
         ("COLLECTED AMOUNT", "money", amount_big, amount_sub),
         ("SUCCESS RATE", "rate", pct(rate(now)),
@@ -833,6 +844,13 @@ STYLE_D = f'''<style>
 .dk-v{{font-size:26px;font-weight:800;margin:7px 0 5px;line-height:1.15}} .dk-v2{{font-size:19px}}
 .dk-cur{{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:2px 0 4px}}
 .dk-ct{{background:{TEAL};border-radius:10px;padding:8px 11px;min-width:0}}
+/* 24/11/2026: the full amounts on hover, in a box like the charts' tooltips */
+.dk-ct{{position:relative}} .dk-tip{{display:none;position:absolute;left:40%;top:calc(100% - 6px);z-index:30;
+background:#fff;border:1px solid #D5DEE0;border-radius:4px;box-shadow:0 4px 14px rgba(0,0,0,.18);padding:6px 9px;
+font-family:"Nunito","Segoe UI",system-ui,sans-serif;font-size:12px;color:{TEAL};white-space:nowrap}}
+.dk-ct:hover .dk-tip{{display:block}} .dk-tip td{{padding:1px 5px}} .dk-tip td:first-child{{color:{MUT};text-align:right}}
+.dk-tip td:last-child{{font-weight:700}} .dk-tip tr:first-child td{{color:{MUT};text-align:center}}
+@media print{{.dk-tip{{display:none!important}}}}
 .dk-ct span{{display:block;color:#99E378;font-size:11.5px;font-weight:800;letter-spacing:.06em}}
 .dk-ct b{{display:block;color:#fff;font-size:20px;font-weight:800;white-space:nowrap}}
 .dk-ct i{{display:block;font-style:normal;color:#CFE3E6;font-size:11.5px;font-weight:700;margin-top:2px;white-space:nowrap}}
@@ -871,7 +889,7 @@ STYLE_D = f'''<style>
 @media print{{.dt-w{{overflow:visible}}}}
 @media (max-width:1100px){{.dk{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}
 .car{{position:relative;font-family:"Nunito","Segoe UI",system-ui,sans-serif;color:{TEAL}}} .car-r{{display:none}}
-.car-v{{overflow:hidden;padding:2px 1px 4px}} .car-t{{display:flex;gap:13px;transition:transform .35s ease}}
+.car-v{{overflow-x:clip;overflow-y:visible;padding:2px 1px 4px;position:relative;z-index:3}} .car-t{{display:flex;gap:13px;transition:transform .35s ease}}
 .car-i{{display:flex;min-width:0}} .car-i>.dk-c{{flex:1}}
 .car-a{{display:none;position:absolute;bottom:0;width:32px;height:32px;border-radius:50%;
 border:2px solid #fff;align-items:center;justify-content:center;font-size:22px;font-weight:800;line-height:1;
