@@ -2393,6 +2393,18 @@ def dashboard_page():
         st.markdown('<div class="rh-empty">📊 No monthly or weekly report on Google Drive yet.<br>Reports saved with '
                     '<b>☁ Save to Google Drive</b> appear here.</div>', unsafe_allow_html=True)
         return
+    # ---- the follow-up after the report (Follow-up page). 24/11/2026: ⚙ Figures "As reported" (the default) = the
+    #      reports' own figures; "Latest" = plus the items received later as of the last "Update the dashboard"
+    fu_items, fu_dec = [], {}
+    try:
+        fu_items, fu_dec = followup_data(client, root)
+    except Exception:                            # the FOLLOW-UP card is then empty; the Follow-up page says why
+        pass
+    pub = state.get("fu_published") or {}
+    pub_dec = {k: {"decision": "Received later"} for k in pub.get("keys") or []}
+    latest = state.get("dash_figures") == "latest"
+    if latest:
+        facts = dashboard.with_followup(facts, fu_items, pub_dec)
 
     # ---- the filters (pills at the top right): they apply to every figure, chart and table of the page.
     # Their labels show the current choice, so the choice is read from the session before the widgets are drawn.
@@ -2471,6 +2483,11 @@ def dashboard_page():
             download_pop = None          # 24/10/2026: the ⬇ button is removed from the bar (each chart has its PDF)
     with gear_row:
         with st.popover("⚙", width="content", help="Currency, refresh, targets, reset, share on Slack"):
+            _seg("Figures", ["reported", "latest"], "dash_figures",
+                 fmt={"reported": "As reported", "latest": "Latest"}.get,
+                 help="As reported: the saved reports only. Latest: plus the pending items received later, as of "
+                      "the last \"Update the dashboard\" on the Follow-up page (the money collected, the "
+                      "transactions and the rates stay the reports' own)")
             cur = _seg("Currency", ["All"] + found, "dash_cur",
                        help="RWF or USD: every count follows that currency. All: every currency (amounts are always "
                             "shown per currency, never added together)")
@@ -2532,8 +2549,10 @@ def dashboard_page():
     ever = {f.bank for f in facts if f.bank in banks}
     missing = [engine.BANKS[c].NAME for c in banks if c in ever and c not in {f.bank for f in sel}]
     # under the bar: what the view shows, and what it is missing
+    version = (f"Latest · follow-up to {pd.Timestamp(pub['at']):%d/%m/%Y}" if latest and pub.get("at")
+               else "Latest · the dashboard was never updated from the follow-up" if latest else "As reported")
     st.markdown(f'<div class="dash-sub">Reconciliation results · <b>{_esc(scope_name)}</b> · {_esc(span)}'
-                + (f" vs {_esc(span_before)}" if span_before else "") + "</div>"
+                + (f" vs {_esc(span_before)}" if span_before else "") + f" · {_esc(version)}</div>"
                 + (f'<div class="dash-miss">Not saved yet for {_esc(span)}: {_esc(", ".join(missing))}: '
                    "the figures do not include them.</div>" if missing else "")
                 + (f'<div class="dash-miss">Partial: ' + _esc("; ".join(
@@ -2541,12 +2560,7 @@ def dashboard_page():
                    if gaps else "")
                 + (f'<div class="dash-miss">{_esc(no_compare)}</div>' if no_compare else ""),
                 unsafe_allow_html=True)
-    # ---- the follow-up after the report (Follow-up page): next to the report's figures, never inside them
-    fu_items, fu_dec = [], {}
-    try:
-        fu_items, fu_dec = followup_data(client, root)
-    except Exception:                            # the FOLLOW-UP card is then empty; the Follow-up page says why
-        pass
+    # ---- the FOLLOW-UP card: the decisions saved so far, whichever figures are shown
     p_end = dashboard.period_end(dashboard.period_key(pd.Timestamp(last if last is not None else first), kind), kind)
     fu_days = int(SETTINGS["followup"]["days"])
     # 12/11/2026: the dashboard's FOLLOW-UP card counts the pending payments only; the Follow-up page keeps both
@@ -2555,8 +2569,9 @@ def dashboard_page():
     # 28/10/2026: every saved report is followed up (no start date any more)
     fu = {"followed": True, "summary": fu_sum, "open_money": followup.money(fu_sum["open_amount"]),
           "unit": kinds[kind].lower(), "types": ("Pending",)}
-    kpis = dashboard_view.kpi_cards(now, before, fu)                       # the page's PDF: every card
-    st.html(dashboard_view.kpi_cards(now, before, fu, per_view=3))          # 12/11/2026: 3 cards, ‹ › for the others
+    later = dashboard.later_amounts(fu_items, pub_dec, first, p_end, banks) if latest else None
+    kpis = dashboard_view.kpi_cards(now, before, fu, later=later)          # the page's PDF: every card
+    st.html(dashboard_view.kpi_cards(now, before, fu, per_view=3, later=later))   # 12/11/2026: 3 cards, ‹ › for the others
 
     child = dashboard.children(facts, kind, first, last, cur, banks)
     labels = [c["label"] for c in child]
@@ -3002,6 +3017,7 @@ def followup_data(client, root, refresh: bool = False):
     items = followup.collect(reports, start, lambda r: cache.get(key(r), []))
     if refresh or "fu_decisions" not in state:
         state.fu_decisions, state.fu_file = followup.load_decisions(client, root)
+        state.fu_published = followup.load_published(client, root)     # 24/11/2026: the dashboard's "Latest"
     return items, state.fu_decisions
 
 
@@ -3015,7 +3031,7 @@ def followup_page():
                     unsafe_allow_html=True)
         return
     days = int(SETTINGS["followup"]["days"])
-    t1, t2 = st.columns([4, 1], vertical_alignment="center")
+    t1, t3, t2 = st.columns([3, 1.3, 1], vertical_alignment="center")
     t1.markdown(f'<div class="dash-sub">What happened to the <b>pending</b> and <b>paid twice</b> items of the saved '
                 f'reports, after the report · overdue after <b>{days} days</b> (Settings)</div>', unsafe_allow_html=True)
     refresh = t2.button("🔄 Refresh", key="fu_refresh", width="stretch", help="Read the reports and the decisions again")
@@ -3057,6 +3073,43 @@ def followup_page():
     banks_here = sorted({i["bank"] for i in items}, key=lambda c: list(engine.BANKS).index(c) if c in engine.BANKS else 99)
     kinds_now = state.get("fu_type", "Pending") or "All"     # 18/11/2026: Pending until another is chosen
     pick_now = state.get("fu_bank") if state.get("fu_bank") in banks_here else "All"
+    # 24/11/2026: the dashboard's "Latest" figures add the items received later only once someone clicks here; a
+    # decision saved afterwards waits for the next click
+    # 24/11/2026: only the period and the bank chosen here (the items shown): the others stay as they were
+    pub = state.get("fu_published") or {}
+    in_view = {i["key"] for i in items if pick_now == "All" or i["bank"] == pick_now}
+    now_keys = {k for k in in_view if decisions.get(k, {}).get("decision") == "Received later"}
+    waiting = len(now_keys ^ (set(pub.get("keys") or []) & in_view))
+    where = f"{period_txt} · {engine.bank_name(pick_now) if pick_now != 'All' else 'all banks'}"
+    # the button in the IremboPay colours, small: dark teal, lime-green text, the count in an outlined pill; the
+    # button and the line under it in one box on the right, as wide as the button: the line from edge to edge
+    t3 = t3.container(key="fu_pub_box")
+    st.html("""<style>.st-key-fu_pub_box{width:fit-content;margin-left:auto;align-items:stretch;gap:4px}
+.st-key-fu_publish{display:flex;justify-content:flex-end}
+.st-key-fu_publish button{background:#1F363B;color:#99E378;border:none;border-radius:9px;min-height:0;
+padding:5px 12px;font-weight:700}
+.st-key-fu_publish button:hover{background:#123239;color:#B4F098;border:none}
+.st-key-fu_publish button p{font-size:13px;font-weight:700}
+.st-key-fu_publish button code{background:transparent;color:#7CC86A;border:1px solid #3E8E41;border-radius:99px;
+padding:0 7px;margin-left:4px;font-size:11px;font-family:inherit}
+.st-key-fu_publish button:disabled{background:#1F363B;color:#99E378;opacity:.45}</style>""")
+    if t3.button(f"Update Dashboard{f' `{waiting:,}`' if waiting else ''}", icon=":material/sync:", key="fu_publish",
+                 width="content", disabled=not waiting,
+                 help=f"Updates the dashboard for {where} only: its Latest figures (⚙ Figures) add the items "
+                      "marked Received later as of this click. " + (f"Last update: {pub['at']} by {pub['by']}." if pub.get("at") else "Never updated yet.")):
+        try:
+            with irembo_loading("Updating the dashboard on Google Drive…"):
+                state.fu_published = followup.publish(client, root, current_user(), in_view)
+                state.fu_decisions, state.fu_file = followup.load_decisions(client, root)
+            state.toast = f"Dashboard updated for {where}"
+            st.rerun()
+        except DriveError as err:
+            st.error(str(err), icon="⚠️")
+    # 24/11/2026: under the button, the items received later already on the dashboard and those waiting for a click
+    shown = len(now_keys & set(pub.get("keys") or []))
+    if shown or waiting:
+        t3.html(f'<div style="display:flex;justify-content:space-between;font-size:12px;color:#5E7378">'
+                f'<span>{shown:,} on the dashboard</span><span>·</span><span>{waiting:,} waiting</span></div>')
     scope = [i for i in items if (kinds_now == "All" or i["type"] == kinds_now) and (pick_now == "All" or i["bank"] == pick_now)]
     # 17/11/2026: the pending items can be chosen by what IremboPay says now (the background check below), once every
     # invoice of the Type and Bank chosen is checked; the cards follow that choice too
