@@ -369,9 +369,10 @@ def test_collected_amount_is_the_money_in_the_bank_with_the_notified_under_it():
            "amounts": {"RWF": {"processed": 1_567_395_147.0, "received": 1_483_016_451.0},
                        "USD": {"processed": 1_244_665.0, "received": 1_066_203.0}}}
     html = dv.kpi_cards(now, None)
-    assert "<b>1.57B</b><i>Notified 1.48B</i>" in html and "<b>1.24M</b><i>Notified 1.07M</i>" in html
+    # 24/11/2026: 3 decimals; the full amounts in a hover box like the charts'
+    assert "<b>1.567B</b><i>Notified 1.483B</i>" in html and "<b>1.245M</b><i>Notified 1.066M</i>" in html
     assert "Total collected (money in our bank accounts)" in html
-    assert 'title="RWF 1,567,395,147 collected · 1,483,016,451 notified"' in html
+    assert "<td>Collected</td><td>1,567,395,147</td></tr><tr><td>Notified</td><td>1,483,016,451</td>" in html
     rep, rec = month_report(month="2026-08", weeks=((1, 2), (3, 9)), proc=(1000, 0), pending=(2, 0), sla=(50, 0),
                             received=(990, 0))
     child = d.children(d.combine(d.facts_from_report(rep, rec)), "month", pd.Timestamp("2026-08-01"))
