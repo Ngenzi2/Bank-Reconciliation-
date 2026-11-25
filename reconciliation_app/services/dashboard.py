@@ -26,7 +26,7 @@ again and nothing is typed by hand: every figure, sentence, colour and ranking b
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import pandas as pd
 
@@ -253,6 +253,49 @@ def combine(facts: list) -> list:
             or (f.bank, monday(f)) not in weekly]
 
 
+def received_later(items: list, decisions: dict) -> list:
+    """The pending items marked "Received later" on the Follow-up page (services/followup.py)."""
+    return [i for i in items if i["type"] == "Pending" and i.get("paid_on") is not None
+            and decisions.get(i["key"], {}).get("decision") == "Received later"]
+
+
+def with_followup(facts: list, items: list, decisions: dict) -> list:
+    """24/11/2026: the dashboard's "Latest" figures: each fact as in its report, plus the pending items marked
+    "Received later" since, by the day they were paid: their amount is added to the notified (received) amount and
+    taken off the pending ones; their number is kept apart ("later") for the Notified transactions tile only. The
+    counts of received transactions, the rates and the money collected stay the report's own. New facts: the facts
+    read from the reports are never changed."""
+    later = received_later(items, decisions)
+    if not later:
+        return facts
+    out = []
+    for f in facts:
+        here = [i for i in later if i["bank"] == f.bank and f.start <= i["paid_on"] <= f.end]
+        if not here:
+            out.append(f)
+            continue
+        counts = {m: dict(v) for m, v in f.counts.items()}
+        amounts = {m: dict(v) for m, v in f.amounts.items()}
+        for i in here:
+            c = i["currency"]
+            amounts["received"][c] = amounts["received"].get(c, 0.0) + i["amount"]
+            counts.setdefault("later", {})[c] = counts.get("later", {}).get(c, 0) + 1
+            amounts["pending"][c] = max(amounts["pending"].get(c, 0.0) - i["amount"], 0.0)
+            counts["pending"][c] = max(counts["pending"].get(c, 0) - 1, 0)
+        out.append(replace(f, counts=counts, amounts=amounts))
+    return out
+
+
+def later_amounts(items: list, decisions: dict, first, last, banks=None) -> dict:
+    """{currency: amount} of the items received later paid between first and last (both included)."""
+    first, last = pd.Timestamp(first), pd.Timestamp(last)
+    out = {}
+    for i in received_later(items, decisions):
+        if first <= i["paid_on"] <= last and (banks is None or i["bank"] in banks):
+            out[i["currency"]] = out.get(i["currency"], 0.0) + i["amount"]
+    return out
+
+
 # =====================================================================================================================
 # PERIODS
 # =====================================================================================================================
@@ -349,9 +392,10 @@ def totals(facts: list, currency: str = "All") -> dict:
     {metric: n, "amounts": {currency: {metric: amount}}, "weekend": n, "weekend_known": bool, "reports": n,
      "banks": set, "currencies": [found]}"""
     t = {m: 0 for m in METRICS}
-    t.update(amounts={}, weekend=0, weekend_known=bool(facts) and all(f.weekend_known for f in facts),
+    t.update(amounts={}, later=0, weekend=0, weekend_known=bool(facts) and all(f.weekend_known for f in facts),
              reports=len({id(f.record) for f in facts}), banks={f.bank for f in facts}, currencies=set())
     for f in facts:
+        t["later"] += sum(n for c, n in f.counts.get("later", {}).items() if currency in ("All", c))
         for m in METRICS:
             for c, n in f.counts[m].items():
                 t["currencies"].add(c)
