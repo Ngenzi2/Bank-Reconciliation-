@@ -9,12 +9,14 @@ Reconciliation Reports), so everyone sees the same; anyone using the app can rec
     items_from_report(path, record)   the open items of one saved Excel report
     collect(...)                      the items of every report since the start date (Settings), each item once
     load_decisions / save_decisions   the shared decisions on Drive
+    load_published / publish          what the dashboard's "Latest" figures use (Update the dashboard, 24/11/2026)
     summary(...)                      open / resolved / amounts / oldest, for the page and the dashboard
     reminder_text(...)                the Slack reminder: the items open for more than N days
 
 Decisions: a pending item (paid at the bank, IremboPay still NEW) -> Received later · Refunded · Not an Irembo
 payment; a paid-twice item -> Refunded · Kept / used for another invoice · Bank error reversed. "Received later"
-counts in the dashboard's "rate after follow-up" (the report's own rate is never changed).
+is added to the dashboard's notified money in its "Latest" figures once someone clicks "Update the dashboard" on the
+Follow-up page (24/11/2026); the reports and their rates are never changed.
 """
 from __future__ import annotations
 
@@ -146,8 +148,8 @@ def cache_save(path: Path, entries: dict, keep=None) -> None:
 
 
 # ---- the decisions, shared on Google Drive -------------------------------------------------------------------------
-def load_decisions(client, root_id: str) -> tuple:
-    """({item key: {decision, comment, by, at}}, the file's Drive ID or None when there is none yet)."""
+def _read(client, root_id: str) -> tuple:
+    """(the whole file: {"version", "decisions", "dashboard"}, its Drive ID or None when there is none yet)."""
     hits = [f for f in client.list_children(root_id, name=STORE_NAME) if f.name == STORE_NAME]
     if not hits:
         return {}, None
@@ -156,14 +158,47 @@ def load_decisions(client, root_id: str) -> tuple:
         data = json.loads(client.download(f.id).decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
         data = {}
-    return dict(data.get("decisions") or {}), f.id
+    return data if isinstance(data, dict) else {}, f.id
+
+
+def _write(client, root_id: str, data: dict, file_id) -> None:
+    body = json.dumps({"version": 1, **data}, indent=1, ensure_ascii=False).encode("utf-8")
+    client.upload(root_id, STORE_NAME, body, "application/json", replace_id=file_id)
+
+
+def load_decisions(client, root_id: str) -> tuple:
+    """({item key: {decision, comment, by, at}}, the file's Drive ID or None when there is none yet)."""
+    data, file_id = _read(client, root_id)
+    return dict(data.get("decisions") or {}), file_id
+
+
+def load_published(client, root_id: str) -> dict:
+    """24/11/2026: what the dashboard's "Latest" figures use: {"at", "by", "keys": [items received later]} as of the
+    last "Update the dashboard" on the Follow-up page; {} when it was never done."""
+    return dict(_read(client, root_id)[0].get("dashboard") or {})
+
+
+def publish(client, root_id: str, who: str, scope=None) -> dict:
+    """24/11/2026: "Update the dashboard": the items marked "Received later" now (the latest decisions on Drive) are
+    the ones the dashboard's "Latest" figures add; a decision saved afterwards waits for the next update.
+    scope: the keys of the items shown on the Follow-up page (the period and bank chosen): only they are updated,
+    the dashboard keeps what it had for the others. None: every item."""
+    data, file_id = _read(client, root_id)
+    decisions = dict(data.get("decisions") or {})
+    now = {k for k, d in decisions.items() if d.get("decision") == "Received later"}
+    kept = set((data.get("dashboard") or {}).get("keys") or [])
+    keys = now if scope is None else (kept - set(scope)) | (now & set(scope))
+    data["dashboard"] = {"at": datetime.now().strftime("%Y-%m-%d %H:%M"), "by": who or "unknown", "keys": sorted(keys)}
+    _write(client, root_id, data, file_id)
+    return data["dashboard"]
 
 
 def save_decisions(client, root_id: str, changes: dict, who: str) -> dict:
     """Write the changes ({key: {"decision", "comment"}}) on top of the latest decisions on Drive (read again just
     before, so a decision saved meanwhile by someone else is kept). An empty decision removes the item's decision.
     Returns every decision."""
-    current, file_id = load_decisions(client, root_id)
+    data, file_id = _read(client, root_id)
+    current = dict(data.get("decisions") or {})
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     for key, ch in changes.items():
         if not ch.get("decision"):
@@ -171,8 +206,8 @@ def save_decisions(client, root_id: str, changes: dict, who: str) -> dict:
         else:
             current[key] = {"decision": ch["decision"], "comment": ch.get("comment", ""), "by": who or "unknown",
                             "at": now}
-    body = json.dumps({"version": 1, "decisions": current}, indent=1, ensure_ascii=False).encode("utf-8")
-    client.upload(root_id, STORE_NAME, body, "application/json", replace_id=file_id)
+    data["decisions"] = current                   # what the dashboard shows ("dashboard") is kept as it was
+    _write(client, root_id, data, file_id)
     return current
 
 
