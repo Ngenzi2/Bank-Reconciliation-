@@ -4169,11 +4169,11 @@ if state.step == 1 and not state.get("no_tx_preview") and STEP1_UPLOAD:     # â‘
                     f'<div class="up-title">2. IremboPay file</div><div class="up-sub">Choose a source</div>'
                     f'</div></div>', unsafe_allow_html=True)
         drive_ready = drive_client()[0] is not None and bool(config.load().irembopay_folder_id)
-        if "pay_source" not in state:                          # Google Drive first when it is set up
-            state.pay_source = "Google Drive" if drive_ready else "This computer"
+        if "pay_source" not in state:                          # 26/11/2026: this computer first, Drive when chosen
+            state.pay_source = "This computer"
         source = st.segmented_control("IremboPay file from", ["Google Drive", "This computer"], key="pay_source",
                                       on_change=keep_choice, args=("pay_source",),
-                                      label_visibility="collapsed") or "Google Drive"
+                                      label_visibility="collapsed") or "This computer"
         state._pay_source_last = source
         if source == "This computer":
             pay_files = sorted((f for f in acc if f.kind == "payments"), key=lambda x: x.first)
