@@ -20,7 +20,7 @@ def test_summary_overdue_and_rate_after_follow_up():
     assert (s["total"], s["resolved"], s["open"]) == (4, 2, 2)
     assert s["overdue"] == 1 and s["oldest"] == 10                       # d: 10 days; c: 2 days
     assert s["open_amount"] == {"RWF": 1000.0, "USD": 20.0} and s["received_later"] == 1
-    assert s["by_type"] == {"Pending": (2, 3), "Paid twice": (0, 1)}
+    assert s["by_type"] == {"Pending": (2, 3), "Paid twice": (0, 1), followup.NOT_BILL: (0, 0)}
 
 
 def test_reminder_lists_the_overdue_items():
@@ -138,3 +138,82 @@ def test_a_bpr_item_shows_its_payment_type(tmp_path):
     items = followup.items_from_report(path, SimpleNamespace(modified="2026-11-16", name="r.xlsx"), "BPR")
     assert [(i["reference"], i["payment_type"]) for i in items] == [
         ("FT1", "Agent bill payment"), ("FT2", "Bank transfer"), ("FT3", "Transfer, not in IremboPay")]
+
+
+def test_bpr_credits_that_are_not_bill_payments_are_checked_too(tmp_path):
+    # 26/11/2026: the "Not a bill payment (BPR)" sheet: checked in the BPR portal; "Bill payment" -> a pending item
+    from types import SimpleNamespace
+    row = {"Currency": "RWF", "VALUE_DATE": "2026-10-29", "BANK_REFERENCE": "FT26302T5BYS", "DESCRIPTION": "",
+           "CREDIT": 1200}
+    path = tmp_path / "r.xlsx"
+    with pd.ExcelWriter(path) as xw:
+        pd.DataFrame([row]).to_excel(xw, sheet_name="Not a bill payment (BPR)", index=False)
+    items = followup.items_from_report(path, SimpleNamespace(modified="2026-11-03", name="r.xlsx"), "BPR")
+    assert [(i["type"], i["reference"], i["amount"]) for i in items] == [(followup.NOT_BILL, "FT26302T5BYS", 1200.0)]
+    key = items[0]["key"]
+    assert followup.with_bill_payments(items, {key: {"decision": "Confirmed transfer"}}) == items
+    both = followup.with_bill_payments(items, {key: {"decision": "Bill payment"}})
+    pending = [i for i in both if i["type"] == "Pending"]
+    assert len(both) == 2 and pending[0]["key"] == "BPR|Pending||FT26302T5BYS|1200.00"
+    assert followup.no_invoice(both, {key: {"decision": "Bill payment"}}) == pending
+
+
+def item_bpr(key, ref, desc, inv=""):
+    return dict(item(key, bank="BPR", inv=inv), reference=ref, description=desc)
+
+
+def test_invoices_found_in_an_uploaded_file():
+    items = [item_bpr("a", "FT1", "SZABAFTUXKJU"), item_bpr("b", "FT2", ""), item_bpr("c", "FT3", "SZX"),
+             item_bpr("d", "FT4", "SZY"), item_bpr("e", "FT5", "SZZ", inv="886000000005")]
+    # the "ask BPR" sheet filled in (title rows above it), BPR's own list (invoice, then the reference), conflicts
+    asked = pd.DataFrame([["BPR bill payments with no invoice number", "", ""], ["Bank reference", "Description",
+                          "Invoice number"], ["FT1", "SZABAFTUXKJU", "886000000001"], ["FT3", "SZX", "886000000003"],
+                          ["FT4", "", "886000000004"], ["FT5", "SZZ", "886000000099"]])
+    sql = pd.DataFrame([["886000000002", "FT2"], ["886000000009", "SZY"]])
+    found = followup.find_invoices(items, {"c": {"decision": "Refunded"}}, {"Sheet1": asked, "SQL": sql}, "f.xlsx")
+    assert found == {"a": {"invoice": "886000000001", "source": "f.xlsx"},
+                     "b": {"invoice": "886000000002", "source": "f.xlsx"}}    # c decided, d two invoices, e has one
+    seen = followup.with_found(items, {"a": {"invoice": "886000000001", "source": "f.xlsx", "by": "ann", "at": "x"}})
+    assert seen[0]["invoice"] == "886000000001" and seen[0]["key"] == "a" and "f.xlsx" in seen[0]["found"]
+    assert seen[1:] == items[1:]
+
+
+def test_an_uploaded_csv_is_read_as_text():
+    sheets = followup.read_list(b"invoice_number,provider_reference\n886302716630,SZABAFTUXKJU\n", "export.csv")
+    found = followup.find_invoices([item_bpr("a", "FT1", "SZABAFTUXKJU")], {}, sheets, "export.csv")
+    assert found["a"]["invoice"] == "886302716630"
+
+
+def test_invoices_found_are_kept_on_drive_with_the_decisions():
+    drive = FakeDrive()
+    followup.save_found(drive, "root", {"a": {"invoice": "886000000001", "source": "f.xlsx"}}, "ann@irembo.com")
+    followup.save_decisions(drive, "root", {"b": {"decision": "Refunded", "comment": ""}}, "bob@irembo.com")
+    found = followup.load_found(drive, "root")
+    assert found["a"]["invoice"] == "886000000001" and found["a"]["by"] == "ann@irembo.com"
+    assert set(followup.load_decisions(drive, "root")[0]) == {"b"} and len(drive.files) == 1
+
+
+def test_the_sheet_to_ask_bpr_has_the_bill_payments_only(tmp_path):
+    # 26/11/2026: a transfer that an older report listed as pending is not asked for; an invoice number in the
+    # description (a branch payment) is the item's invoice, its key unchanged
+    from types import SimpleNamespace
+    rows = [{"Currency": "RWF", "VALUE_DATE": "2026-10-12", "BANK_REFERENCE": r, "DESCRIPTION": d, "CREDIT": 500,
+             "invoice_number": None} for r, d in (("FT1", "SZABAFTUXKJU"), ("FT2", "20146551811"),
+                                                  ("FT3", "FTCM26286YTIPXBYA"), ("TT4", "886284754415"), ("TT5", ""))]
+    path = tmp_path / "r.xlsx"
+    with pd.ExcelWriter(path) as xw:
+        pd.DataFrame(rows).to_excel(xw, sheet_name="Pending notification", index=False)
+    items = followup.items_from_report(path, SimpleNamespace(modified="2026-10-20", name="r.xlsx"), "BPR")
+    branch = next(i for i in items if i["reference"] == "TT4")
+    assert branch["invoice"] == "886284754415" and branch["key"] == "BPR|Pending||TT4|500.00"
+    assert [i["reference"] for i in followup.to_ask(items, {})] == ["FT1", "FT2", "TT5"]      # empty: not known
+    assert [i["reference"] for i in followup.to_ask(items, {items[0]["key"]: {"decision": "Refunded"}})] == ["FT2", "TT5"]
+
+
+def test_a_pending_transfer_can_be_closed_and_leaves_the_sheet_to_ask_bpr():
+    # 26/11/2026: IremboPay money paid by bank transfer (counted in Processed): nothing to follow up
+    assert "Confirmed transfer" in followup.DECISIONS["Pending"]
+    items = [item_bpr("a", "FT1", "SZABAFTUXKJU"), item_bpr("b", "TT2", "")]
+    dec = {"b": {"decision": "Confirmed transfer"}}
+    assert [i["key"] for i in followup.to_ask(items, dec)] == ["a"]
+    assert followup.summary(items, dec)["resolved"] == 1

@@ -3018,6 +3018,9 @@ def followup_data(client, root, refresh: bool = False):
     if refresh or "fu_decisions" not in state:
         state.fu_decisions, state.fu_file = followup.load_decisions(client, root)
         state.fu_published = followup.load_published(client, root)     # 24/11/2026: the dashboard's "Latest"
+        state.fu_found = followup.load_found(client, root)              # 26/11/2026: invoices found for items with none
+    # 26/11/2026: BPR credits checked as bill payments come back as pending items; invoices found are filled in
+    items = followup.with_found(followup.with_bill_payments(items, state.fu_decisions), state.get("fu_found") or {})
     return items, state.fu_decisions
 
 
@@ -3050,6 +3053,7 @@ def followup_page():
     #      everything below (cards, list, reminder) is the items paid in that period
     ptypes = {"week": "Week", "month": "Month", "quarter": "Quarter", "year": "Year", "all": "All"}
     period_txt = "all periods"
+    all_items = items                         # 26/11/2026: the BPR sheet and the invoices found: every period
     with st.container(key="fu_tools", horizontal=True, vertical_alignment="center", gap="small"):
         with st.container(key="fu_kind_tabs", width="content"):
             ptype = _seg("Period type", list(ptypes), "fu_kind", default="month", fmt=ptypes.get, hide_label=True)
@@ -3126,8 +3130,8 @@ padding:0 7px;margin-left:4px;font-size:11px;font-family:inherit}
     if says_now != "All":
         scope = [i for i in scope if says(i) == says_now]
     sm = followup.summary(scope, decisions, days=days)
-    open_by = " · ".join(f"{sm['by_type'][t][0]:,} {t.lower()}" for t in ("Pending", "Paid twice")
-                         if kinds_now in ("All", t))
+    open_by = " · ".join(f"{sm['by_type'][t][0]:,} {t.lower()}" for t in followup.DECISIONS
+                         if kinds_now in ("All", t) and sm["by_type"][t][1])
     # 18/11/2026: two words on the page: "Pending" (no decision recorded yet) and "Resolved" (a decision saved)
     cards = [("PENDING", f"{sm['open']:,}", open_by),
              ("AMOUNT PENDING", followup.money(sm["open_amount"]).replace(" · ", "<br>"), "still to follow up"),
@@ -3158,7 +3162,12 @@ padding:0 7px;margin-left:4px;font-size:11px;font-family:inherit}
     f1, f2, f4, f3 = st.columns([1.4, 1.4, 1.5, 1.7])
     show = f1.segmented_control("Show", ["Pending", "Resolved", "All"], default="Pending",
                                 key="fu_view2") or "Pending"
-    kinds = f2.segmented_control("Type", ["All", "Pending", "Paid twice"], default="Pending", key="fu_type") or "All"
+    # 26/11/2026: BPR's "Not a bill payment?" only when there are some
+    type_options = ["All", "Pending", "Paid twice"] + (
+        [followup.NOT_BILL] if any(i["type"] == followup.NOT_BILL for i in items) else [])
+    if state.get("fu_type") not in type_options + [None]:
+        state.fu_type = "Pending"
+    kinds = f2.segmented_control("Type", type_options, default="Pending", key="fu_type") or "All"
     status = "All"
     if kinds == "Pending" and checked < to_check:              # the choice comes once every invoice is checked
         f4.selectbox("IremboPay says", [f"Checking… {checked} of {to_check}"], key="fu_says_wait", disabled=True,
@@ -3196,6 +3205,8 @@ padding:0 7px;margin-left:4px;font-size:11px;font-family:inherit}
             "Status": ("✅ Resolved" if decisions.get(i["key"], {}).get("decision")
                        else f"{'🔴' if followup.days_open(i) > days else '🟡'} Pending · {followup.days_open(i)} days"),
             "Bank": engine.bank_name(i["bank"]), "Type": i["type"], "Invoice": i["invoice"] or "(no invoice)",
+            "Invoice found in": i.get("found", ""),        # 26/11/2026: the file that gave an item with none its invoice
+            "Description": i.get("description", ""),
             "Bank reference": i["reference"],               # 17/11/2026: the statement's own reference of the credit
             "Amount": i["amount"], "Currency": i["currency"],
             "Channel": i.get("channel", ""),        # 18/11/2026: the bank statement's channel of the credit
@@ -3210,14 +3221,23 @@ padding:0 7px;margin-left:4px;font-size:11px;font-family:inherit}
         table.loc[suggest, "Decision"] = "Received later"      # a suggestion: saved only when you click Save
         if pend:                       # 11/11/2026: the line counts up by itself; the table is redrawn once all answered
             checkout_progress(checker, pend)
+        # 26/11/2026: a BPR credit with no invoice whose description shows a transfer (FTCM..., another reference),
+        # listed as pending by a report made before 23/11/2026: "Confirmed transfer" suggested (an empty description
+        # can be a bill payment: never suggested)
+        transfer = (table["Decision"].eq("") & table["Type"].eq("Pending") & table["Invoice"].eq("(no invoice)")
+                    & table["Payment type"].str.startswith("Transfer") & table["Description"].ne(""))
+        table.loc[transfer, "Decision"] = "Confirmed transfer"
         if suggest.any():
             st.caption(f"💡 {int(suggest.sum())} pending invoice(s) are now **Paid** in IremboPay: "
                        "\"Received later\" is filled in for you. Check them, then Save.")
+        if transfer.any():
+            st.caption(f"💡 {int(transfer.sum())} BPR credit(s) with no invoice are bank transfers (from their "
+                       "description): \"Confirmed transfer\" is filled in for you. Check them in the BPR portal, then Save.")
         DASH = "—"                                       # no decision yet, in the Decision column
         # 19/11/2026: the decisions of the type shown (Pending or Paid twice); both types in the list: each decision
         # that belongs to one type only says which ("Bank error reversed (paid twice)")
         types_here = list(dict.fromkeys(table["Type"]))
-        TAG = {"Pending": "pending", "Paid twice": "paid twice"}
+        TAG = {"Pending": "pending", "Paid twice": "paid twice", followup.NOT_BILL: "not a bill payment?"}
 
         def labelled(d, t):
             if len(types_here) < 2 or not d or sum(d in v for v in followup.DECISIONS.values()) > 1:
@@ -3242,8 +3262,17 @@ padding:0 7px;margin-left:4px;font-size:11px;font-family:inherit}
                     help="The date the bank received the payment (Ecobank: Request Date)"),
                 "Decision": st.column_config.SelectboxColumn(
                     "Decision", options=options, width="medium",
-                    help="Pending: Received later · Refunded · Not an Irembo payment. Paid twice: Refunded · "
-                         "Kept / used for another invoice · Bank error reversed. — = no decision yet."),
+                    help="Pending: Received later · Refunded · Not an Irembo payment · Confirmed transfer (IremboPay "
+                         "money paid by bank transfer, nothing to follow up). Paid twice: Refunded · "
+                         "Kept / used for another invoice · Bank error reversed. Not a bill payment? (BPR, checked in "
+                         "the BPR portal): Confirmed transfer · Bill payment (it then comes back as a pending item). "
+                         "— = no decision yet."),
+                "Invoice found in": st.column_config.TextColumn(
+                    "Invoice found in", help="For an item that had no invoice number: the file it was found in "
+                                             "(Add invoices), who added it and when"),
+                "Description": st.column_config.TextColumn(
+                    "Description", help="The description on the bank statement (BPR: SZ... agent, 20... internet "
+                                        "banking)"),
                 "Bank reference": st.column_config.TextColumn(
                     "Bank reference", help="The credit's reference on the bank statement: I&M Tran Id · Ecobank Cba "
                                            "Ref No · BOA Ref no · BPR BANK_REFERENCE · BK OurReference"),
@@ -3259,7 +3288,7 @@ padding:0 7px;margin-left:4px;font-size:11px;font-family:inherit}
         changes, bad = {}, []
         for (_, new), (_, old) in zip(edited.iterrows(), table.iterrows()):
             dec, com = str(new["Decision"] or "").replace(DASH, ""), str(new["Comment"] or "")
-            dec = re.sub(r" \((pending|paid twice)\)$", "", dec)          # the type's label, when both are listed
+            dec = re.sub(r" \((pending|paid twice|not a bill payment\?)\)$", "", dec)   # the type's label, when several are listed
             before = decisions.get(new["_key"], {})
             if dec and dec not in followup.DECISIONS[new["Type"]]:
                 bad.append(f"{new['Invoice']}: \"{dec}\" is not a choice for a {new['Type'].lower()} item")
@@ -3294,6 +3323,53 @@ padding:0 7px;margin-left:4px;font-size:11px;font-family:inherit}
         with c4.popover("Search", icon=":material/search:", width="stretch", help="Show only the rows holding a text"):
             st.text_input("Search", key="fu_search", placeholder="Invoice, bank reference, merchant, amount…",
                           label_visibility="collapsed")
+
+    # 26/11/2026: the pending items with no invoice number (every period): a sheet to ask BPR for their invoices, and
+    # a file that gives them one (that sheet filled in, a statement with an invoice list, an IremboPay export)
+    lost = followup.no_invoice(all_items, decisions)
+    if lost:
+        a1, a2, _ = st.columns([1.6, 1.6, 3.8])
+        ask = followup.to_ask(all_items, decisions, "BPR")
+        if ask:
+            sheet = pd.DataFrame([{"Bank reference": i["reference"], "Description": i.get("description", ""),
+                                   "Amount": i["amount"], "Currency": i["currency"],
+                                   "Value date": i["paid_on"].date() if i["paid_on"] is not None else None,
+                                   "Invoice number": ""} for i in ask])
+            a1.download_button(
+                f"Sheet to ask BPR ({len(ask):,})", dashboard_view.ranked_xlsx(
+                    sheet, "BPR bill payments with no invoice number",
+                    f"{len(ask):,} credits · please fill in the invoice number · {pd.Timestamp.now():%d/%m/%Y}",
+                    None, "Invoices", rank=False),
+                icon=":material/download:", width="stretch", key="fu_ask_bpr",
+                file_name=f"BPR invoices to find {pd.Timestamp.now():%Y-%m-%d}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                help="The BPR bill payments (SZ... agent, 20... internet banking) still pending with no invoice number "
+                     "(every period), as an Excel sheet to send to BPR. "
+                     "When it comes back with the invoice numbers, upload it with Add invoices.")
+        with a2.popover(f"Add invoices ({len(lost):,} without)", icon=":material/upload_file:", width="stretch",
+                        help="Give the pending items with no invoice number their invoice, from a file"):
+            st.caption("Upload the sheet BPR sent back with the invoice numbers, a statement with an invoice list on "
+                       "another sheet, or an IremboPay export. Each row with one invoice number and the item's bank "
+                       "reference or description gives the item that invoice. IremboPay is then checked as for "
+                       "any pending invoice.")
+            up = st.file_uploader("File", type=["xlsx", "xls", "csv"], key="fu_inv_file", label_visibility="collapsed")
+            if up is not None:
+                try:
+                    found = followup.find_invoices(all_items, decisions, followup.read_list(up.getvalue(), up.name),
+                                                   up.name)
+                except Exception as err:
+                    st.error(friendly_error(err, "Reading this file"), icon="⚠️")
+                    found = {}
+                st.caption(f"Found in this file: **{len(found):,}** of the {len(lost):,} items with no invoice number.")
+                if found and st.button(f"Save {len(found):,} invoice{'s' if len(found) != 1 else ''}", type="primary",
+                                       key="fu_inv_save", help="Shared on Google Drive, like the decisions"):
+                    try:
+                        with irembo_loading("Saving on Google Drive…"):
+                            state.fu_found = followup.save_found(client, root, found, current_user())
+                        state.toast = f"{len(found):,} invoice{'s' if len(found) != 1 else ''} added"
+                        st.rerun()
+                    except DriveError as err:
+                        st.error(str(err), icon="⚠️")
     # 18/11/2026: no Slack follow-up reminder on this page any more
 
 
