@@ -218,14 +218,28 @@ def _arrow(now, before, good_up=True, points=False, fmt=lambda v: f"{v:,}"):
     return f'<span class="{"dk-g" if good else "dk-r"}">{"↗" if up else "↘"} {txt}</span> from {fmt(before)}'
 
 
-def followup_progress(done: int, total: int, received: dict, still_open: dict, by_bank: list, label: str) -> str:
+def followup_progress(done: int, total: int, received: dict, still_open: dict, by_bank: list, label: str,
+                      only_resolved: bool = False) -> str:
     """18/11/2026, the Follow-up page: what is completed (a decision recorded) and what remains, as a success.
     received: {currency: amount} marked "Received later"; still_open: {currency: amount} of the remaining items;
-    by_bank: [(bank, completed, remaining)]. label: the period and filters shown (the same items as the cards)."""
+    by_bank: [(bank, completed, remaining)]. label: the period and filters shown (the same items as the cards).
+    only_resolved (27/11/2026, Show -> Resolved): the resolved items only, nothing about the pending ones."""
     ok, ok_l, left, left_l, left_d = "#2E7D4F", "#DFF3E6", "#D4A72C", "#FBF1D9", "#9A7414"
     pct = done / total * 100 if total else 0
     money = lambda amounts: " · ".join(f"{escape(c)} {v:,.0f}" for c, v in amounts.items() if v)
     # 18/11/2026: by bank as a table without lines: each number right under its heading
+    if only_resolved:                  # 27/11/2026: one green bar per bank, as long as its share of the resolved items
+        top = max((d for _, d, _ in by_bank), default=0) or 1
+        rows = "".join(
+            f'<tr><td>{escape(name)}</td><td class="fp-bt"><span class="fp-sb"><i style="width:{d / top * 100:.0f}%;'
+            f'background:{ok}"></i></span></td><td class="fp-num" style="color:{ok}">{d:,}</td></tr>'
+            for name, d, _ in by_bank if d)
+        rows = ('<tr class="fp-gap"><td colspan="3"></td></tr>' + rows) if rows else ""
+        tiles = (f'<div class="fp-tile" style="background:{ok_l}"><div class="fp-n" style="color:{ok}">{done:,}</div>'
+                 f'<div class="fp-l">RESOLVED</div><div class="fp-m">'
+                 f'{money(received) + " received later" if money(received) else "nothing received later yet"}</div></div>')
+        right = (f'<table class="fp-tb"><tr><th>BY BANK</th><th></th><th class="fp-num">resolved</th></tr>{rows}</table>'
+                 if rows else '<div class="fp-s">No item resolved yet</div>')
     banks = "".join(
         f'<tr><td>{escape(name)}</td><td class="fp-bt"><span class="fp-sb"><i style="width:{d / (d + n) * 100:.0f}%;'
         f'background:{ok}"></i><i style="width:{n / (d + n) * 100:.0f}%;background:{left}"></i></span></td>'
@@ -269,7 +283,12 @@ font-variant-numeric:tabular-nums}}
 .fp-sb{{display:flex;height:9px;border-radius:6px;overflow:hidden;background:{PALE}}}
 .fp-sb i{{display:block;height:100%}}
 @media (max-width:900px){{.fp-g{{grid-template-columns:1fr}}}}
-</style><div class="fp"><div class="fp-t"><div class="fp-k"><i>✓</i>FOLLOW-UP PROGRESS</div>
+</style>""" + (f"""<style>.fp-tiles.fp-one{{grid-template-columns:1fr}}</style><div class="fp"><div class="fp-t">
+<div class="fp-k"><i>✓</i>FOLLOW-UP · RESOLVED</div><div class="fp-p">{escape(label)}</div></div><div class="fp-g">
+<div class="fp-left"><div class="fp-tiles fp-one">{tiles}</div>
+<div class="fp-s fp-under">{done:,} item{"s" if done != 1 else ""} with a decision saved</div></div>
+<div class="fp-right">{right}</div></div></div>
+<style>.fp-tb th.fp-num:nth-child(3)::before{{background:{ok}}}</style>""" if only_resolved else f"""<div class="fp"><div class="fp-t"><div class="fp-k"><i>✓</i>FOLLOW-UP PROGRESS</div>
 <div class="fp-p">{escape(label)}</div></div><div class="fp-g"><div class="fp-left"><div class="fp-tiles">
 <div class="fp-tile" style="background:{ok_l}"><div class="fp-n" style="color:{ok}">{done:,}</div>
 <div class="fp-l">RESOLVED</div><div class="fp-m">{money(received) + " received later" if money(received) else "nothing received later yet"}</div></div>
@@ -279,7 +298,7 @@ font-variant-numeric:tabular-nums}}
 <div class="fp-s fp-under"><b>{pct:.0f}%</b> resolved · {done:,} of {total:,} items</div></div>
 <div class="fp-right">{f'<table class="fp-tb"><tr><th>BY BANK</th><th></th><th class="fp-num">resolved</th><th class="fp-num">pending</th></tr>{banks}</table>' if banks else '<div class="fp-s">No item</div>'}</div>
 </div></div>
-<style>.fp-tb th.fp-num:nth-child(3)::before{{background:{ok}}} .fp-tb th.fp-num:nth-child(4)::before{{background:{left}}}</style>""")
+<style>.fp-tb th.fp-num:nth-child(3)::before{{background:{ok}}} .fp-tb th.fp-num:nth-child(4)::before{{background:{left}}}</style>"""))
 
 
 def kpi_cards(now: dict, before: dict | None, fu: dict | None = None, per_view: int | None = None,
