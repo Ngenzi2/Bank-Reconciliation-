@@ -3414,7 +3414,8 @@ padding:0 7px;margin-left:4px;font-size:11px;font-family:inherit}
                 except DriveError as err:
                     st.error(str(err), icon="⚠️")
 
-    if lost and tool_slot is not None:
+    lost_keys = {i["key"] for i in lost}            # 27/11/2026: only when the table lists one of them
+    if lost and tool_slot is not None and any(i["key"] in lost_keys for i in rows):
         # a small menu (two entries, each with one line under it); the upload opens in its own window
         st.html("""<style>
 .st-key-fu_noinv_menu{gap:2px;min-width:250px;max-width:290px}
