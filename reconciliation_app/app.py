@@ -1957,6 +1957,19 @@ def current_user() -> str:
     return (state.get("drive_email") or "") if client is not None else ""
 
 
+def current_user_name() -> str:
+    """27/11/2026: the name of the Google account signed in ("" when unknown): shown in the follow-up's "Decided by"."""
+    client, _ = drive_client()
+    if client is None:
+        return ""
+    if "drive_name" not in state:
+        try:
+            state.drive_name = client.account_name() if hasattr(client, "account_name") else ""
+        except DriveError:
+            return ""
+    return state.drive_name
+
+
 # =====================================================================================================================
 # 6. SIDE PANEL (only the bank chosen in step 1)
 #    Reports: view, download (Excel or PDF), delete   ·   Exception decisions: delete   ·   Recent runs   ·   Settings
@@ -3021,9 +3034,12 @@ def followup_data(client, root, refresh: bool = False):
             followup.cache_save(FOLLOWUP_CACHE, fresh, keep=[key(r) for r in reports])
     items = followup.collect(reports, start, lambda r: cache.get(key(r), []))
     if refresh or "fu_decisions" not in state:
-        state.fu_decisions, state.fu_file = followup.load_decisions(client, root)
-        state.fu_published = followup.load_published(client, root)     # 24/11/2026: the dashboard's "Latest"
-        state.fu_found = followup.load_found(client, root)              # 26/11/2026: invoices found for items with none
+        # 27/11/2026: one decisions file per person on Drive, read once and put together (services/followup.py)
+        everyone = followup.load_all(client, root)
+        state.fu_decisions = everyone["decisions"]
+        state.fu_published = everyone["dashboard"]       # 24/11/2026: the dashboard's "Latest"
+        state.fu_found = everyone["invoices"]            # 26/11/2026: invoices found for items with none
+        state.fu_names = everyone["names"]               # 27/11/2026: the names shown in "Decided by"
     # 26/11/2026: BPR credits checked as bill payments come back as pending items; invoices found are filled in
     items = followup.with_found(followup.with_bill_payments(items, state.fu_decisions), state.get("fu_found") or {})
     return items, state.fu_decisions
@@ -3109,11 +3125,11 @@ padding:0 7px;margin-left:4px;font-size:11px;font-family:inherit}
     if t3.button(f"Update Dashboard{f' `{waiting:,}`' if waiting else ''}", icon=":material/sync:", key="fu_publish",
                  width="content", disabled=not waiting,
                  help=f"Updates the dashboard for {where} only: its Latest figures (⚙ Figures) add the items "
-                      "marked Received later as of this click. " + (f"Last update: {pub['at']} by {pub['by']}." if pub.get("at") else "Never updated yet.")):
+                      "marked Received later as of this click. " + (f"Last update: {followup.decided_by(pub, state.get('fu_names') or {})}." if pub.get("at") else "Never updated yet.")):
         try:
             with irembo_loading("Updating the dashboard on Google Drive…"):
-                state.fu_published = followup.publish(client, root, current_user(), in_view)
-                state.fu_decisions, state.fu_file = followup.load_decisions(client, root)
+                state.fu_published = followup.publish(client, root, current_user(), in_view, current_user_name())
+                state.fu_decisions = followup.load_decisions(client, root)[0]
             state.toast = f"Dashboard updated for {where}"
             st.rerun()
         except DriveError as err:
@@ -3242,7 +3258,7 @@ padding:0 7px;margin-left:4px;font-size:11px;font-family:inherit}
             "IremboPay says": says(i) if i["type"] == "Pending" else "",      # the same words as the filter
             "Decision": decisions.get(i["key"], {}).get("decision", ""),
             "Comment": decisions.get(i["key"], {}).get("comment", ""),
-            "Decided by": (lambda x: f"{x.get('by', '')} · {x.get('at', '')}" if x else "")(decisions.get(i["key"])),
+            "Decided by": followup.decided_by(decisions.get(i["key"]), state.get("fu_names") or {}),  # 27/11/2026
             "Report": i["report"]} for i in rows])
         suggest = table["Decision"].eq("") & table["Type"].eq("Pending") & table["IremboPay says"].eq("Paid")
         table.loc[suggest, "Decision"] = "Received later"      # a suggestion: saved only when you click Save
@@ -3336,10 +3352,12 @@ padding:0 7px;margin-left:4px;font-size:11px;font-family:inherit}
         if c1.button(f"💾 Save {len(changes)} decision{'s' if len(changes) != 1 else ''}", type="primary",
                      key="fu_save", disabled=not changes or bool(bad), width="stretch",
                      help="Your decisions are saved only when you click Save. They are shared on Google Drive "
-                          f"(\"{followup.STORE_NAME}\" in Reconciliation Reports): everyone sees the same"):
+                          "(your own \"Follow-up decisions\" file in Reconciliation Reports): everyone sees the same"):
             try:
                 with irembo_loading("Saving on Google Drive…"):
-                    state.fu_decisions = followup.save_decisions(client, root, changes, current_user())
+                    state.fu_decisions = followup.save_decisions(client, root, changes, current_user(),
+                                                                 current_user_name())
+                    state.fu_names = {**(state.get("fu_names") or {}), current_user(): current_user_name()}
                 state.toast = f"{len(changes)} follow-up decision{'s' if len(changes) != 1 else ''} saved"
                 st.rerun()
             except DriveError as err:
@@ -3384,7 +3402,8 @@ padding:0 7px;margin-left:4px;font-size:11px;font-family:inherit}
                                    key="fu_inv_save", help="Shared on Google Drive, like the decisions"):
                 try:
                     with irembo_loading("Saving on Google Drive…"):
-                        state.fu_found = followup.save_found(client, root, found, current_user())
+                        state.fu_found = followup.save_found(client, root, found, current_user(),
+                                                             current_user_name())
                     state.toast = f"{len(found):,} invoice{'s' if len(found) != 1 else ''} added"
                     st.rerun()
                 except DriveError as err:
