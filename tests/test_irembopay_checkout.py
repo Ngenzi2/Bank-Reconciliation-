@@ -143,6 +143,25 @@ def test_checker_keeps_the_currency_of_an_open_invoice():
     assert checker.currencies() == {"886213126169": "USD"}
 
 
+def test_an_open_invoice_gives_its_amount_too(monkeypatch):
+    """27/11/2026: the amount of an open invoice (compared on the Follow-up page); none for a paid one."""
+    monkeypatch.setattr(C.urllib.request, "urlopen",
+                        fake_http(200, {"success": True, "data": {"currency": "usd", "amount": 1.0}}))
+    assert C.check_full("886005194660") == ("Open, not paid yet", "USD", 1.0)
+    monkeypatch.setattr(C.urllib.request, "urlopen",
+                        fake_http(400, {"success": False, "errors": [{"code": "BAD_INVOICES_PAID", "detail": "x"}]}))
+    assert C.check_full("886005194660") == ("Paid", "", None)
+    checker = C.Checker(lookup=lambda inv: ("Open, not paid yet", "USD", 1.0) if inv == "886005194660" else "Paid",
+                        pause=0)
+    invoices = ["886005194660", "886213126170"]
+    checker.add(invoices)
+    wait(checker, invoices)
+    assert checker.amount("886005194660") == 1.0 and checker.amount("886213126170") is None
+    checker.recheck(["886005194660"])
+    wait(checker, ["886005194660"])
+    assert checker.amount("886005194660") == 1.0
+
+
 def test_check_all_again_asks_every_invoice_again():
     # 19/11/2026: "↻ Check all again" on the Follow-up and Reconciliation pages: an answer can change (paid since)
     import time
