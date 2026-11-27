@@ -1369,7 +1369,8 @@ class RunResult:
     timings: dict = field(default_factory=dict)       # seconds per step (written in the run log)
     compared_with: str = ""
     ran_at: pd.Timestamp = field(default_factory=pd.Timestamp.now)       # when the run was made
-    by_currency: dict = field(default_factory=dict)   # {currency: {"rows", "matched", "not_found", "amount"}}
+    by_currency: dict = field(default_factory=dict)   # {currency: {"rows", "matched", "not_found", "not_bill", "amount"}}
+    not_bill: int = 0           # 27/11/2026: credits counted but never matched (BK: card, POS, transfers, no invoice)
     review_counts: dict = field(default_factory=dict) # what the reviewed rows became: {"Pending notification": 6, ...}
     sheets: dict = field(default_factory=dict)        # the detail sheets of the report (used by the custom report)
     daily: dict = field(default_factory=dict)         # {day: counts_of(the 5 tables of that day)} (custom charts)
@@ -1383,8 +1384,9 @@ class RunResult:
 
     @property
     def matched(self) -> int:
-        """Bank rows found in the IremboPay file by invoice number (before the review)."""
-        return self.bank_rows - self.not_found
+        """Bank rows found in the IremboPay file by invoice number (before the review); the credits counted but never
+        matched (not_bill) are neither matched nor not found."""
+        return self.bank_rows - self.not_found - self.not_bill
 
     def add(self, level, text):
         self.messages.append((level, text))
@@ -1486,12 +1488,17 @@ def run(base_dir: Path, period: Period, files: list, sla_days: int = 0, compare:
         if col in merged:
             no_invoice_pending &= merged[col].fillna("").astype(str).eq("")
     merged.loc[no_invoice_pending, "_to_review"] = False   # BPR: no invoice number -> Pending, never reviewed
-    per_cur = merged[current].groupby("Currency").agg(rows=("found_in_irembopay", "size"),
-                                                      matched=("found_in_irembopay", "sum"), amount=(amount, "sum"))
+    not_bill = current & skip & ~merged["found_in_irembopay"]     # 27/11/2026: counted, never matched (BK)
+    res.not_bill = int(not_bill.sum())
+    per_cur = merged[current].assign(_not_bill=not_bill[current]).groupby("Currency").agg(
+        rows=("found_in_irembopay", "size"), matched=("found_in_irembopay", "sum"), not_bill=("_not_bill", "sum"),
+        amount=(amount, "sum"))
     order = [cur for cur in bank.CURRENCIES if cur in per_cur.index] + [cur for cur in per_cur.index
                                                                          if cur not in bank.CURRENCIES]
     res.by_currency = {(cur or "Not in IremboPay"): {"rows": int(per_cur.at[cur, "rows"]), "matched": int(per_cur.at[cur, "matched"]),
-                             "not_found": int(per_cur.at[cur, "rows"] - per_cur.at[cur, "matched"]),
+                             "not_found": int(per_cur.at[cur, "rows"] - per_cur.at[cur, "matched"]
+                                              - per_cur.at[cur, "not_bill"]),
+                             "not_bill": int(per_cur.at[cur, "not_bill"]),
                              "amount": float(per_cur.at[cur, "amount"])} for cur in order}
     not_found = merged[merged["_to_review"]].copy()
     not_found["Bank channel"] = bank.channel(not_found)
