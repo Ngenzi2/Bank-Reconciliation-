@@ -3187,7 +3187,9 @@ padding:0 7px;margin-left:4px;font-size:11px;font-family:inherit}
     label = " · ".join(v for v in (period_txt[:1].upper() + period_txt[1:], kinds_now if kinds_now != "All" else "",
                                    says_now if says_now != "All" else "",
                                    engine.bank_name(pick_now) if pick_now != "All" else "All banks") if v)
-    st.html(dashboard_view.followup_progress(sm["resolved"], sm["total"], received, sm["open_amount"], by_bank, label))
+    # 27/11/2026: Show -> Resolved: the card shows the resolved items only (nothing about the pending ones)
+    st.html(dashboard_view.followup_progress(sm["resolved"], sm["total"], received, sm["open_amount"], by_bank, label,
+                                             only_resolved=state.get("fu_view2") == "Resolved"))
 
     # ---- the list: filters, then one row per item (the decision and the comment can be changed)
     f1, f2, f4, f3 = st.columns([1.1, 1.9, 1.5, 1.5])
