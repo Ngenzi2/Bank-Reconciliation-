@@ -53,14 +53,67 @@ class FakeDrive:
 
 
 def test_decisions_are_merged_with_the_latest_on_drive():
+    """27/11/2026: each person saves in their own file; everyone sees the decisions of every file."""
     drive = FakeDrive()
     followup.save_decisions(drive, "root", {"a": {"decision": "Refunded", "comment": "sent back"}}, "ann@irembo.com")
     followup.save_decisions(drive, "root", {"b": {"decision": "Received later", "comment": ""}}, "bob@irembo.com")
-    dec, fid = followup.load_decisions(drive, "root")
+    dec, n_files = followup.load_decisions(drive, "root")
     assert set(dec) == {"a", "b"} and dec["a"]["by"] == "ann@irembo.com" and dec["a"]["comment"] == "sent back"
-    assert len(drive.files) == 1 and json.loads(drive.files[fid][1])["version"] == 1    # one shared file, replaced
+    names = sorted(n for n, _ in drive.files.values())
+    assert n_files == 2 and names == ["Follow-up decisions - ann@irembo.com.json",
+                                      "Follow-up decisions - bob@irembo.com.json"]
     followup.save_decisions(drive, "root", {"a": {"decision": ""}}, "ann@irembo.com")    # back to open
     assert set(followup.load_decisions(drive, "root")[0]) == {"b"}
+    assert len(drive.files) == 2                                                         # her own file, replaced
+
+
+def test_the_latest_decision_wins_whoever_saved_it(monkeypatch):
+    """27/11/2026: the same item decided by two people: the later one counts; taking it back hides both."""
+    drive = FakeDrive()
+    times = iter(["2026-11-27 09:00", "2026-11-27 10:00", "2026-11-27 11:00"])
+
+    class Clock:
+        @staticmethod
+        def now():
+            class T:
+                def strftime(self, fmt):
+                    return next(times)
+            return T()
+    monkeypatch.setattr(followup, "datetime", Clock)
+    followup.save_decisions(drive, "root", {"a": {"decision": "Received later", "comment": ""}}, "ann@irembo.com")
+    followup.save_decisions(drive, "root", {"a": {"decision": "Refunded", "comment": "x"}}, "bob@irembo.com")
+    dec = followup.load_decisions(drive, "root")[0]
+    assert dec["a"]["decision"] == "Refunded" and dec["a"]["by"] == "bob@irembo.com"
+    followup.save_decisions(drive, "root", {"a": {"decision": ""}}, "ann@irembo.com")    # Ann takes it back, later
+    assert "a" not in followup.load_decisions(drive, "root")[0]                          # Bob's older one stays hidden
+
+
+def test_the_old_shared_file_is_still_read():
+    """27/11/2026: the decisions saved before (one shared file, made by one person) are kept and can be changed."""
+    drive = FakeDrive()
+    old = {"version": 1, "decisions": {"a": {"decision": "Refunded", "comment": "", "by": "divin@irembo.com",
+                                             "at": "2026-11-20 10:00"}},
+           "dashboard": {"at": "2026-11-20 11:00", "by": "divin@irembo.com", "keys": ["a"]}}
+    drive.files["old"] = (followup.STORE_NAME, json.dumps(old).encode())
+    assert followup.load_decisions(drive, "root")[0]["a"]["decision"] == "Refunded"
+    assert followup.load_published(drive, "root")["keys"] == ["a"]
+    followup.save_decisions(drive, "root", {"a": {"decision": "Received later", "comment": ""}}, "dianah@irembo.com")
+    assert followup.load_decisions(drive, "root")[0]["a"]["decision"] == "Received later"
+    assert json.loads(drive.files["old"][1]) == old                                      # the old file is never changed
+
+
+def test_the_latest_dashboard_update_counts_and_names_are_shown():
+    drive = FakeDrive()
+    followup.save_decisions(drive, "root", {"a": {"decision": "Received later", "comment": ""}}, "ann@irembo.com",
+                            "Ann Uwase")
+    board = followup.publish(drive, "root", "bob@irembo.com", name="Bob Mugisha")
+    assert board["keys"] == ["a"] and followup.load_published(drive, "root")["by"] == "bob@irembo.com"
+    everyone = followup.load_all(drive, "root")
+    assert everyone["names"] == {"ann@irembo.com": "Ann Uwase", "bob@irembo.com": "Bob Mugisha"}
+    entry = {"by": "ann@irembo.com", "at": "2026-03-02 14:05"}
+    assert followup.decided_by(entry, everyone["names"]) == "Ann Uwase · 2/03/26"
+    assert followup.decided_by({"by": "d.teta@alustudent.com", "at": "2026-11-27 09:00"}, {}) == "d.teta · 27/11/26"
+    assert followup.decided_by(None, {}) == ""
 
 
 def test_latest_version_of_each_report_since_the_start():
@@ -190,7 +243,7 @@ def test_invoices_found_are_kept_on_drive_with_the_decisions():
     followup.save_decisions(drive, "root", {"b": {"decision": "Refunded", "comment": ""}}, "bob@irembo.com")
     found = followup.load_found(drive, "root")
     assert found["a"]["invoice"] == "886000000001" and found["a"]["by"] == "ann@irembo.com"
-    assert set(followup.load_decisions(drive, "root")[0]) == {"b"} and len(drive.files) == 1
+    assert set(followup.load_decisions(drive, "root")[0]) == {"b"} and len(drive.files) == 2   # one file each
 
 
 def test_the_sheet_to_ask_bpr_has_the_bill_payments_only(tmp_path):
