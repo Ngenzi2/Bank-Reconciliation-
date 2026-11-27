@@ -18,6 +18,8 @@ per browser session.
 
 13/11/2026: for an invoice that can still be paid, IremboPay also gives its currency (Checker.currency). The report
 of Ecobank and BPR uses it for a credit the payment file does not show as paid (CURRENCY_FROM_CHECKOUT, engine.py).
+27/11/2026: its amount too (Checker.amount): the Follow-up page compares it with the amount the bank received. Only
+an open invoice has one; IremboPay gives no amount for an invoice paid or expired.
 """
 from __future__ import annotations
 
@@ -49,9 +51,15 @@ def check(invoice: str) -> str:
 def check_details(invoice: str) -> tuple:
     """One invoice -> (one of the answers above, its currency). IremboPay gives the currency only for an invoice
     that can still be paid; "" otherwise. Never raises."""
+    return check_full(invoice)[:2]
+
+
+def check_full(invoice: str) -> tuple:
+    """One invoice -> (one of the answers above, its currency, its amount). The currency and the amount only for an
+    invoice that can still be paid ("" and None otherwise). Never raises."""
     invoice = str(invoice).strip()
     if not re.fullmatch(r"[0-9A-Za-z-]{1,40}", invoice):
-        return "Not an IremboPay invoice", ""
+        return "Not an IremboPay invoice", "", None
     req = urllib.request.Request(URL.format(invoice), headers={"Accept": "application/json",
                                                                "User-Agent": "Mozilla/5.0 (Bank Reconciliation)"})
     for wait_s in (*RETRY_WAIT, None):
@@ -67,32 +75,38 @@ def check_details(invoice: str) -> tuple:
             continue
         break
     if status is None:
-        return COULD_NOT, ""
+        return COULD_NOT, "", None
     if status == 200:
         try:
-            currency = (json.loads(body).get("data") or {}).get("currency") or ""
+            data = json.loads(body).get("data") or {}
+            currency = data.get("currency") or ""
         except (ValueError, AttributeError):
-            currency = ""
-        return "Open, not paid yet", str(currency).strip().upper()
+            data, currency = {}, ""
+        try:
+            amount = float(data.get("amount"))
+        except (TypeError, ValueError):
+            amount = None
+        return "Open, not paid yet", str(currency).strip().upper(), amount
     try:
         errors = json.loads(body).get("errors") or []
     except ValueError:
-        return COULD_NOT, ""
+        return COULD_NOT, "", None
     for e in errors:
         if e.get("code") in ANSWERS:
-            return ANSWERS[e["code"]], ""
+            return ANSWERS[e["code"]], "", None
     if errors and errors[0].get("detail"):
-        return f"Other: {errors[0]['detail']}", ""
-    return COULD_NOT, ""
+        return f"Other: {errors[0]['detail']}", "", None
+    return COULD_NOT, "", None
 
 
 class Checker:
     """The lookups of one browser session: add() queues invoices, a background thread answers them one by one."""
 
-    def __init__(self, lookup=check_details, pause: float = PAUSE, workers: int = WORKERS):
+    def __init__(self, lookup=check_full, pause: float = PAUSE, workers: int = WORKERS):
         self._lookup, self._pause, self._workers = lookup, pause, workers
         self._results: dict[str, str] = {}
         self._currency: dict[str, str] = {}
+        self._amount: dict[str, float] = {}
         self._queue: list[str] = []
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
@@ -139,10 +153,13 @@ class Checker:
                             found = future.result()
                         except Exception:
                             found = COULD_NOT
-                        answer, currency = found if isinstance(found, tuple) else (found, "")
+                        found = tuple(found) if isinstance(found, tuple) else (found,)
+                        answer, currency, amount = (found + ("", None))[:3]
                         self._results[inv] = answer
                         if currency:
                             self._currency[inv] = currency
+                        if amount is not None:
+                            self._amount[inv] = amount
                         if inv in self._queue:
                             self._queue.remove(inv)
 
@@ -157,6 +174,11 @@ class Checker:
         """The invoice's currency as IremboPay gave it ("" when it did not: only an open invoice has one)."""
         with self._lock:
             return self._currency.get(str(invoice).strip(), "")
+
+    def amount(self, invoice):
+        """27/11/2026: the invoice's amount as IremboPay gave it (None when it did not: only an open invoice has one)."""
+        with self._lock:
+            return self._amount.get(str(invoice).strip())
 
     def currencies(self) -> dict:
         """{invoice: currency} of every invoice looked up so far that IremboPay gave a currency for."""
@@ -177,6 +199,7 @@ class Checker:
                 i = str(i).strip()
                 self._results.pop(i, None)
                 self._currency.pop(i, None)
+                self._amount.pop(i, None)
         self.add(invoices)
 
     def retry_failed(self, invoices) -> None:
