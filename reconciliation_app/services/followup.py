@@ -242,84 +242,161 @@ def cache_save(path: Path, entries: dict, keep=None) -> None:
 
 
 # ---- the decisions, shared on Google Drive -------------------------------------------------------------------------
+# ---- the decisions on Drive (27/11/2026: one file per person) ------------------------------------------------------
+# Google lets the app change only the files it created for the person signed in (Drive scope drive.file), so one shared
+# file could be saved by its creator only. Each person now saves to their own file, "Follow-up decisions - <email>.json"
+# in the same folder; everyone reads every "Follow-up decisions…" file (the old shared one too) and puts them together:
+# for each item the latest decision wins (by its time), a decision taken back is kept as an empty one with its time,
+# the dashboard's update is the latest one, and each person's file keeps their name (shown in "Decided by").
+PREFIX = "Follow-up decisions"
+AT = "%Y-%m-%d %H:%M:%S"                     # the time saved with each change (to the second: the latest one wins)
+
+
+def own_name(who: str) -> str:
+    """The file of one person: "Follow-up decisions - ann@irembo.com.json"."""
+    safe = re.sub(r"[^0-9A-Za-z@._+-]", "_", who or "unknown")
+    return f"{PREFIX} - {safe}.json"
+
+
+def _files(client, root_id: str) -> list:
+    """[(name, data, file id)] of every decisions file in the folder: the old shared one first, then one per person."""
+    hits = [f for f in client.list_children(root_id) if f.name == STORE_NAME
+            or (f.name.startswith(PREFIX + " - ") and f.name.endswith(".json"))]
+    hits.sort(key=lambda f: (f.name != STORE_NAME, f.name))
+    out = []
+    for f in hits:
+        try:
+            data = json.loads(client.download(f.id).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            data = {}
+        out.append((f.name, data if isinstance(data, dict) else {}, f.id))
+    return out
+
+
+def _latest(files: list, part: str) -> dict:
+    """{key: entry} of one part ("decisions" or "invoices") of every file: for each key the entry saved last."""
+    out = {}
+    for _, data, _ in files:
+        for key, entry in (data.get(part) or {}).items():
+            if isinstance(entry, dict) and (key not in out or str(entry.get("at", "")) >= str(out[key].get("at", ""))):
+                out[key] = entry
+    return out
+
+
+def _merged(files: list) -> dict:
+    """What everyone sees: {"decisions" (taken back ones left out), "invoices", "dashboard", "names"}."""
+    board = {}
+    for _, d, _ in files:                       # the latest update (on a tie, the file read last: the one just saved)
+        if isinstance(d.get("dashboard"), dict) and str(d["dashboard"].get("at", "")) >= str(board.get("at", "")):
+            board = d["dashboard"]
+    names = {d.get("owner"): d.get("name") for _, d, _ in files if d.get("owner") and d.get("name")}
+    return {"decisions": {k: v for k, v in _latest(files, "decisions").items() if v.get("decision")},
+            "invoices": _latest(files, "invoices"),
+            "dashboard": board,
+            "names": names}
+
+
 def _read(client, root_id: str) -> tuple:
-    """(the whole file: {"version", "decisions", "dashboard"}, its Drive ID or None when there is none yet)."""
-    hits = [f for f in client.list_children(root_id, name=STORE_NAME) if f.name == STORE_NAME]
-    if not hits:
-        return {}, None
-    f = hits[0]
-    try:
-        data = json.loads(client.download(f.id).decode("utf-8"))
-    except (ValueError, UnicodeDecodeError):
-        data = {}
-    return data if isinstance(data, dict) else {}, f.id
+    """(what everyone sees, every file) - see _merged."""
+    files = _files(client, root_id)
+    return _merged(files), files
 
 
-def _write(client, root_id: str, data: dict, file_id) -> None:
-    body = json.dumps({"version": 1, **data}, indent=1, ensure_ascii=False).encode("utf-8")
-    client.upload(root_id, STORE_NAME, body, "application/json", replace_id=file_id)
+def _save_own(client, root_id: str, files: list, who: str, name: str, change) -> dict:
+    """Change this person's own file (made the first time) and return what everyone sees afterwards."""
+    mine = own_name(who)
+    own = next(((n, d, fid) for n, d, fid in files if n == mine), (mine, {}, None))
+    data = dict(own[1])
+    change(data)
+    data["owner"] = who or "unknown"
+    if name:
+        data["name"] = name
+    body = json.dumps({**data, "version": 2}, indent=1, ensure_ascii=False).encode("utf-8")
+    client.upload(root_id, mine, body, "application/json", replace_id=own[2])
+    files = [f for f in files if f[0] != mine] + [(mine, data, own[2])]
+    return _merged(files)
 
 
 def load_decisions(client, root_id: str) -> tuple:
-    """({item key: {decision, comment, by, at}}, the file's Drive ID or None when there is none yet)."""
-    data, file_id = _read(client, root_id)
-    return dict(data.get("decisions") or {}), file_id
+    """({item key: {decision, comment, by, at}} of everyone, the number of decisions files read)."""
+    merged, files = _read(client, root_id)
+    return merged["decisions"], len(files)
+
+
+def load_all(client, root_id: str) -> dict:
+    """27/11/2026: everything the Follow-up page needs, every file read once: {"decisions", "invoices", "dashboard",
+    "names"} (see _merged)."""
+    return _read(client, root_id)[0]
+
+
+def load_names(client, root_id: str) -> dict:
+    """27/11/2026: {e-mail: name} of the people who saved in the follow-up (for "Decided by")."""
+    return _read(client, root_id)[0]["names"]
 
 
 def load_found(client, root_id: str) -> dict:
     """26/11/2026: {item key: {invoice, source, by, at}}: the invoices found for items that had none."""
-    return dict(_read(client, root_id)[0].get("invoices") or {})
+    return _read(client, root_id)[0]["invoices"]
 
 
-def save_found(client, root_id: str, found: dict, who: str) -> dict:
-    """Add the invoices found ({key: {"invoice", "source"}}) to those on Drive (read again just before). Returns all."""
-    data, file_id = _read(client, root_id)
-    current = dict(data.get("invoices") or {})
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    for key, f in found.items():
-        current[key] = {"invoice": f["invoice"], "source": f.get("source", ""), "by": who or "unknown", "at": now}
-    data["invoices"] = current
-    _write(client, root_id, data, file_id)
-    return current
+def save_found(client, root_id: str, found: dict, who: str, name: str = "") -> dict:
+    """Add the invoices found ({key: {"invoice", "source"}}) to this person's file. Returns everyone's."""
+    _, files = _read(client, root_id)
+    now = datetime.now().strftime(AT)
+
+    def change(data):
+        data["invoices"] = {**(data.get("invoices") or {}), **{
+            key: {"invoice": f["invoice"], "source": f.get("source", ""), "by": who or "unknown", "at": now}
+            for key, f in found.items()}}
+    return _save_own(client, root_id, files, who, name, change)["invoices"]
 
 
 def load_published(client, root_id: str) -> dict:
     """24/11/2026: what the dashboard's "Latest" figures use: {"at", "by", "keys": [items received later]} as of the
-    last "Update the dashboard" on the Follow-up page; {} when it was never done."""
-    return dict(_read(client, root_id)[0].get("dashboard") or {})
+    last "Update the dashboard" on the Follow-up page (whoever clicked it); {} when it was never done."""
+    return dict(_read(client, root_id)[0]["dashboard"])
 
 
-def publish(client, root_id: str, who: str, scope=None) -> dict:
-    """24/11/2026: "Update the dashboard": the items marked "Received later" now (the latest decisions on Drive) are
+def publish(client, root_id: str, who: str, scope=None, name: str = "") -> dict:
+    """24/11/2026: "Update the dashboard": the items marked "Received later" now (everyone's latest decisions) are
     the ones the dashboard's "Latest" figures add; a decision saved afterwards waits for the next update.
     scope: the keys of the items shown on the Follow-up page (the period and bank chosen): only they are updated,
     the dashboard keeps what it had for the others. None: every item."""
-    data, file_id = _read(client, root_id)
-    decisions = dict(data.get("decisions") or {})
-    now = {k for k, d in decisions.items() if d.get("decision") == "Received later"}
-    kept = set((data.get("dashboard") or {}).get("keys") or [])
+    merged, files = _read(client, root_id)
+    now = {k for k, d in merged["decisions"].items() if d.get("decision") == "Received later"}
+    kept = set(merged["dashboard"].get("keys") or [])
     keys = now if scope is None else (kept - set(scope)) | (now & set(scope))
-    data["dashboard"] = {"at": datetime.now().strftime("%Y-%m-%d %H:%M"), "by": who or "unknown", "keys": sorted(keys)}
-    _write(client, root_id, data, file_id)
-    return data["dashboard"]
+    board = {"at": datetime.now().strftime(AT), "by": who or "unknown", "keys": sorted(keys)}
+    _save_own(client, root_id, files, who, name, lambda data: data.__setitem__("dashboard", board))
+    return board
 
 
-def save_decisions(client, root_id: str, changes: dict, who: str) -> dict:
-    """Write the changes ({key: {"decision", "comment"}}) on top of the latest decisions on Drive (read again just
-    before, so a decision saved meanwhile by someone else is kept). An empty decision removes the item's decision.
-    Returns every decision."""
-    data, file_id = _read(client, root_id)
-    current = dict(data.get("decisions") or {})
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    for key, ch in changes.items():
-        if not ch.get("decision"):
-            current.pop(key, None)
-        else:
-            current[key] = {"decision": ch["decision"], "comment": ch.get("comment", ""), "by": who or "unknown",
-                            "at": now}
-    data["decisions"] = current                   # what the dashboard shows ("dashboard") is kept as it was
-    _write(client, root_id, data, file_id)
-    return current
+def save_decisions(client, root_id: str, changes: dict, who: str, name: str = "") -> dict:
+    """Write the changes ({key: {"decision", "comment"}}) in this person's file (everyone's are read again just
+    before, so a decision saved meanwhile by someone else is kept). An empty decision takes the item's decision back
+    (kept as an empty decision with its time, so an older one in someone else's file does not come back).
+    Returns everyone's decisions."""
+    _, files = _read(client, root_id)
+    now = datetime.now().strftime(AT)
+
+    def change(data):
+        current = dict(data.get("decisions") or {})
+        for key, ch in changes.items():
+            current[key] = {"decision": ch.get("decision") or "", "comment": ch.get("comment", "") if ch.get("decision")
+                            else "", "by": who or "unknown", "at": now}
+        data["decisions"] = current
+    return _save_own(client, root_id, files, who, name, change)["decisions"]
+
+
+def decided_by(entry: dict, names: dict) -> str:
+    """27/11/2026: "Dianah Teta · 2/03/26": the name (the part before @ until that person has saved once with this
+    version) and the day of the decision."""
+    if not entry:
+        return ""
+    who = str(entry.get("by", ""))
+    name = names.get(who) or who.split("@")[0]
+    at = pd.to_datetime(entry.get("at"), errors="coerce")
+    return f"{name} · {at.day}/{at:%m/%y}" if not pd.isna(at) else name
 
 
 # ---- figures --------------------------------------------------------------------------------------------------------
