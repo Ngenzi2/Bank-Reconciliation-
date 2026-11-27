@@ -299,6 +299,13 @@ class DriveClient:
             self._email = (about.get("user") or {}).get("emailAddress", "")
         return self._email
 
+    def account_name(self) -> str:
+        """27/11/2026: the name of the Google account Drive is used with ("" when Google gives none); asked once."""
+        if getattr(self, "_name", None) is None:
+            about = self._run(self.service.about().get(fields="user(displayName)"), "read the signed-in account")
+            self._name = (about.get("user") or {}).get("displayName", "") or ""
+        return self._name
+
     # ---- access rights (asked to Drive, never assumed) ------------------------------------------------------------
     def check_access(self, folder_id: str, label: str, write: bool) -> AccessCheck:
         """What the account may do in a folder. write=True: it must be able to add and replace files; with the
