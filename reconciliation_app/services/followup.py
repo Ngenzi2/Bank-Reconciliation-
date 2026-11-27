@@ -17,11 +17,23 @@ Decisions: a pending item (paid at the bank, IremboPay still NEW) -> Received la
 payment; a paid-twice item -> Refunded · Kept / used for another invoice · Bank error reversed. "Received later"
 is added to the dashboard's notified money in its "Latest" figures once someone clicks "Update the dashboard" on the
 Follow-up page (24/11/2026); the reports and their rates are never changed.
+
+26/11/2026 (BPR):
+    - The credits of the "Not a bill payment (BPR)" sheet are items too ("Not a bill payment?"), checked in the BPR
+      portal: Confirmed transfer (closed, nothing changes) or Bill payment (it comes back as a Pending item with no
+      invoice, followed up like the others).
+    - A pending item can be a "Confirmed transfer" too: IremboPay money (counted in Processed) paid by bank transfer,
+      with no invoice to follow up (a report made before 23/11/2026 listed those as pending).
+    - A pending item with no invoice number gets its invoice from a file someone uploads (the "ask BPR" sheet filled
+      in, a statement with an invoice list on another sheet, an IremboPay export): find_invoices / save_found. The
+      invoices found are kept in the same file on Drive; the item's key does not change, so its decision stays.
 """
 from __future__ import annotations
 
+import io
 import json
 import pickle
+import re
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -31,11 +43,16 @@ import pandas as pd
 import engine
 
 STORE_NAME = "Follow-up decisions.json"
-DECISIONS = {"Pending": ["Received later", "Refunded", "Not an Irembo payment", "Failed on both sides"],
-             "Paid twice": ["Refunded", "Kept / used for another invoice", "Bank error reversed"]}
-SHEETS = {"Pending notification": "Pending", "Duplicate payment other channel": "Paid twice"}
-CACHE_VERSION = 4                     # 2 (17/11/2026): each item keeps its IremboPay status; 3 (18/11): its channel;
-                                      # 4 (23/11): BPR, the payment type
+NOT_BILL = "Not a bill payment?"
+DECISIONS = {"Pending": ["Received later", "Refunded", "Not an Irembo payment", "Confirmed transfer",
+                         "Failed on both sides"],
+             "Paid twice": ["Refunded", "Kept / used for another invoice", "Bank error reversed"],
+             NOT_BILL: ["Confirmed transfer", "Bill payment"]}
+SHEETS = {"Pending notification": "Pending", "Duplicate payment other channel": "Paid twice",
+          "Not a bill payment (BPR)": NOT_BILL}
+CACHE_VERSION = 6                     # 2 (17/11/2026): each item keeps its IremboPay status; 3 (18/11): its channel;
+                                      # 4 (23/11): BPR, the payment type; 5 (26/11): the description, NOT_BILL items;
+                                      # 6: an invoice number in the description is the invoice
 
 
 def _text(v) -> str:
@@ -45,16 +62,16 @@ def _text(v) -> str:
 
 def items_from_report(path: Path, record, bank_code: str) -> list:
     """[{key, bank, type, invoice, reference, amount, currency, paid_on, merchant, provider, status, channel,
-    payment_type, report, reported}] of one saved Excel report: the rows of its Pending notification and Duplicate
-    payment sheets. channel (18/11/2026): the bank statement's channel of the credit (the bank's channel(), as in the
-    review). payment_type (23/11/2026, BPR): agent / internet banking bill payment, branch payment, bank transfer,
-    transfer not in IremboPay; "" for other banks."""
+    payment_type, description, report, reported}] of one saved Excel report: the rows of its Pending notification and
+    Duplicate payment sheets (and BPR's Not a bill payment sheet, 26/11/2026). channel (18/11/2026): the bank
+    statement's channel of the credit (the bank's channel(), as in the review). payment_type (23/11/2026, BPR): agent /
+    internet banking bill payment, branch payment, bank transfer, transfer not in IremboPay; "" for other banks."""
     bank = engine.get_bank(bank_code)
     c = bank.COLUMNS
     try:
-        sheets = pd.read_excel(path, sheet_name=list(SHEETS), dtype={"invoice_number": str},
-                               engine=engine.EXCEL_ENGINE)
-    except Exception:                                   # an older report without these sheets: nothing to follow up
+        book = pd.ExcelFile(path, engine=engine.EXCEL_ENGINE)
+        sheets = {s: book.parse(s, dtype={"invoice_number": str}) for s in SHEETS if s in book.sheet_names}
+    except Exception:                                   # not readable: nothing to follow up
         return []
     reported = pd.Timestamp(record.modified) if record.modified is not None else pd.Timestamp.now()
     if reported.tzinfo is not None:
@@ -77,15 +94,92 @@ def items_from_report(path: Path, record, bank_code: str) -> list:
             amount = pd.to_numeric(r.get(c["amount"]), errors="coerce")
             amount = 0.0 if pd.isna(amount) else float(amount)
             paid_on = pd.to_datetime(r.get(c["payment_date"]), errors="coerce")
+            desc = _text(r.get(c["description"])) if c.get("description") else ""
+            # 26/11/2026: a description that is an invoice number (a BPR branch payment) is the item's invoice; the key
+            # stays as it was, so its decision is kept
             out.append({"key": f"{bank.CODE}|{kind}|{inv}|{ref}|{amount:.2f}", "bank": bank.CODE, "type": kind,
-                        "invoice": inv, "reference": ref, "amount": amount,
+                        "invoice": inv or (desc if re.fullmatch(r"8\d{11}", desc) else ""), "reference": ref,
+                        "amount": amount,
                         "currency": _text(r.get("Currency")) or bank.CURRENCIES[0],
                         "paid_on": None if pd.isna(paid_on) else pd.Timestamp(paid_on).normalize(),
                         "merchant": _text(r.get("name")), "provider": _text(r.get("payment_provider")),
                         "status": status_of(r), "channel": _text(channels.get(n)),
                         "payment_type": _text(types.get(n)),
+                        "description": desc,
                         "report": record.name, "reported": reported.normalize()})
     return out
+
+
+def with_bill_payments(items: list, decisions: dict) -> list:
+    """26/11/2026: a "Not a bill payment?" item marked "Bill payment" (checked in the BPR portal) is also a Pending
+    item with no invoice, followed up like the others."""
+    out, keys = list(items), {i["key"] for i in items}
+    for i in items:
+        if i["type"] == NOT_BILL and decisions.get(i["key"], {}).get("decision") == "Bill payment":
+            key = f"{i['bank']}|Pending|{i['invoice']}|{i['reference']}|{i['amount']:.2f}"
+            if key not in keys:
+                out.append({**i, "key": key, "type": "Pending", "status": "None",
+                            "payment_type": "Bill payment (checked in the BPR portal)"})
+    return sorted(out, key=lambda i: (i["reported"], i["bank"], i["type"], i["invoice"]))
+
+
+def with_found(items: list, found: dict) -> list:
+    """The items with no invoice number that got one from an uploaded file (save_found); "found" says from where."""
+    out = []
+    for i in items:
+        f = found.get(i["key"]) if not i["invoice"] else None
+        out.append({**i, "invoice": f["invoice"], "found": f"{f.get('source', '')} · {f.get('by', '')} {f.get('at', '')}"}
+                   if f else i)
+    return out
+
+
+def no_invoice(items: list, decisions: dict, bank: str | None = None) -> list:
+    """The pending items still open with no invoice number (of one bank, or all)."""
+    return [i for i in items if i["type"] == "Pending" and not i["invoice"] and (bank is None or i["bank"] == bank)
+            and not decisions.get(i["key"], {}).get("decision")]
+
+
+def to_ask(items: list, decisions: dict, bank_code: str = "BPR") -> list:
+    """The items to ask the bank for an invoice: open, no invoice number, and bill payments by the bank's rule (a
+    transfer that a report made before 23/11/2026 still listed as pending is left out). An empty description is kept:
+    it can be a bill payment (FT26302T5BYS, checked in the BPR portal); a decision takes it off the sheet."""
+    rows = no_invoice(items, decisions, bank_code)
+    bank = engine.get_bank(bank_code)
+    if rows and hasattr(bank, "bill_payment"):
+        desc = [i.get("description", "") for i in rows]
+        bill = bank.bill_payment(pd.DataFrame({"DESCRIPTION": desc}))
+        rows = [i for i, b, d in zip(rows, bill, desc) if b == "yes" or not d]
+    return rows
+
+
+def read_list(content: bytes, name: str) -> dict:
+    """Every sheet of an uploaded .xlsx / .xls / .csv file, each cell as text."""
+    if name.lower().endswith(".csv"):
+        return {name: pd.read_csv(io.BytesIO(content), dtype=str, header=None, keep_default_na=False,
+                                  on_bad_lines="skip")}
+    return pd.read_excel(io.BytesIO(content), sheet_name=None, dtype=str, header=None)
+
+
+def find_invoices(items: list, decisions: dict, sheets: dict, source: str) -> dict:
+    """26/11/2026: the invoices of the open pending items with no invoice number, found in an uploaded file. A row with
+    one invoice number (12 digits starting with 8) and the item's bank reference or description gives the item that
+    invoice; a reference found with two different invoices is not used. -> {item key: {"invoice", "source"}}"""
+    wanted = {}
+    for i in no_invoice(items, decisions):
+        for t in {i["reference"], i.get("description", "")} - {""}:
+            wanted.setdefault(t, []).append(i["key"])
+    seen = {}
+    for sheet in sheets.values():
+        for row in sheet.fillna("").astype(str).itertuples(index=False):
+            cells = [re.sub(r"\.0$", "", c.strip()) for c in row if c.strip()]
+            invs = {c for c in cells if re.fullmatch(r"8\d{11}", c)}
+            if len(invs) != 1:
+                continue
+            for c in cells:
+                if c in wanted:
+                    for k in wanted[c]:
+                        seen.setdefault(k, set()).update(invs)
+    return {k: {"invoice": next(iter(v)), "source": source} for k, v in seen.items() if len(v) == 1}
 
 
 def status_of(row) -> str:
@@ -170,6 +264,23 @@ def load_decisions(client, root_id: str) -> tuple:
     """({item key: {decision, comment, by, at}}, the file's Drive ID or None when there is none yet)."""
     data, file_id = _read(client, root_id)
     return dict(data.get("decisions") or {}), file_id
+
+
+def load_found(client, root_id: str) -> dict:
+    """26/11/2026: {item key: {invoice, source, by, at}}: the invoices found for items that had none."""
+    return dict(_read(client, root_id)[0].get("invoices") or {})
+
+
+def save_found(client, root_id: str, found: dict, who: str) -> dict:
+    """Add the invoices found ({key: {"invoice", "source"}}) to those on Drive (read again just before). Returns all."""
+    data, file_id = _read(client, root_id)
+    current = dict(data.get("invoices") or {})
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    for key, f in found.items():
+        current[key] = {"invoice": f["invoice"], "source": f.get("source", ""), "by": who or "unknown", "at": now}
+    data["invoices"] = current
+    _write(client, root_id, data, file_id)
+    return current
 
 
 def load_published(client, root_id: str) -> dict:
