@@ -31,7 +31,7 @@ import pandas as pd
 import engine
 
 STORE_NAME = "Follow-up decisions.json"
-DECISIONS = {"Pending": ["Received later", "Refunded", "Not an Irembo payment"],
+DECISIONS = {"Pending": ["Received later", "Refunded", "Not an Irembo payment", "Failed on both sides"],
              "Paid twice": ["Refunded", "Kept / used for another invoice", "Bank error reversed"]}
 SHEETS = {"Pending notification": "Pending", "Duplicate payment other channel": "Paid twice"}
 CACHE_VERSION = 4                     # 2 (17/11/2026): each item keeps its IremboPay status; 3 (18/11): its channel;
