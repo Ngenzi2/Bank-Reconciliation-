@@ -3101,6 +3101,8 @@ def followup_page():
         if k in state and state[k] in ("All", None):
             del state[k]                                     # drawn again on its default, Pending
     kinds_now = state.get("fu_type", "Pending") or "Pending"     # 18/11/2026: Pending until another is chosen
+    if state.get("fu_view2") == "Resolved":                       # 27/11/2026: Resolved lists every type
+        kinds_now = "All"
     pick_now = state.get("fu_bank") if state.get("fu_bank") in banks_here else "All"
     # 24/11/2026: the dashboard's "Latest" figures add the items received later only once someone clicks here; a
     # decision saved afterwards waits for the next click
@@ -3197,8 +3199,11 @@ padding:0 7px;margin-left:4px;font-size:11px;font-family:inherit}
         [followup.NOT_BILL] if any(i["type"] == followup.NOT_BILL for i in items) else [])
     if "fu_type" in state and state.fu_type not in type_options:
         del state["fu_type"]                                 # drawn again on its default, Pending
-    kinds = f2.segmented_control("Type", type_options, default="Pending", key="fu_type",
-                                 format_func=lambda t: {"Pending": "Pending notification"}.get(t, t)) or "Pending"
+    if show == "Resolved":             # 27/11/2026: no Type for the resolved items: every type is listed
+        kinds = "All"
+    else:
+        kinds = f2.segmented_control("Type", type_options, default="Pending", key="fu_type",
+                                     format_func=lambda t: {"Pending": "Pending notification"}.get(t, t)) or "Pending"
     status = "All"
     if kinds == "Pending" and checked < to_check:              # the choice comes once every invoice is checked
         f4.selectbox("IremboPay says", [f"Checking… {checked} of {to_check}"], key="fu_says_wait", disabled=True,
